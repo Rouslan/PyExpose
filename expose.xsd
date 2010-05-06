@@ -1,0 +1,177 @@
+<?xml version="1.0"?>
+<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+
+  <xsd:simpleType name="ident">
+    <xsd:restriction base="xsd:string">
+      <xsd:pattern value="[a-zA-Z_][a-zA-Z0-9_]*"/>
+    </xsd:restriction>
+  </xsd:simpleType>
+
+
+  <xsd:simpleType name="retsemantictype">
+    <xsd:restriction base="xsd:string">
+      <xsd:enumeration value="default"/>
+      <xsd:enumeration value="copy"/>
+    </xsd:restriction>
+  </xsd:simpleType>
+
+
+  <xsd:complexType name="DefType">
+
+    <xsd:all minOccurs="0">
+      <xsd:element ref="doc"/>
+    </xsd:all>
+
+    <xsd:attribute name="name" type="ident">
+      <xsd:annotation>
+        <xsd:documentation>
+          The name of the function/method as will be seen in python. If not
+          specified, the name will taken from the C++ function/method.
+        </xsd:documentation>
+      </xsd:annotation>
+    </xsd:attribute>
+
+    <xsd:attribute name="func" type="xsd:string" use="required"/>
+
+    <xsd:attribute name="overload" type="xsd:string">
+      <xsd:annotation>
+        <xsd:documentation>
+          The list of arguments the C++ function/method takes. This is to select
+          a specific function/method when the function/method is overloaded. The
+          arguments are seperated by commas just like in the function/method.
+          The types can be specified with or without typedefs, as long as the
+          underlying types are the same as that of the function/method.
+        </xsd:documentation>
+      </xsd:annotation>
+    </xsd:attribute>
+
+    <xsd:attribute name="return-semantic" type="retsemantictype" default="default"/>
+
+  </xsd:complexType>
+
+
+
+
+  <xsd:element name="module">
+    <xsd:complexType>
+      <xsd:choice maxOccurs="unbounded" minOccurs="0">
+        <xsd:element ref="def"/>
+        <xsd:element ref="class"/>
+        <xsd:element ref="doc"/>
+      </xsd:choice>
+      <xsd:attribute name="name" type="ident" use="required"/>
+      <xsd:attribute name="include" type="xsd:string" use="required"/>
+    </xsd:complexType>
+  </xsd:element>
+
+
+  <xsd:element name="def" type="DefType"/>
+
+
+  <xsd:element name="init">
+    <xsd:complexType>
+      <xsd:complexContent>
+        <xsd:restriction base="DefType">
+          <xsd:attribute name="overload" type="xsd:string"/>
+        </xsd:restriction>
+      </xsd:complexContent>
+    </xsd:complexType>
+  </xsd:element>
+
+
+  <xsd:element name="property">
+    <xsd:complexType>
+      <xsd:all minOccurs="0">
+        <xsd:element ref="doc"/>
+        <xsd:element name="get">
+          <xsd:complexType>
+            <xsd:complexContent>
+              <xsd:restriction base="DefType">
+                <xsd:attribute name="func" type="xsd:string" use="required"/>
+                <xsd:attribute name="return-semantic" type="retsemantictype" default="default"/>
+              </xsd:restriction>
+            </xsd:complexContent>
+          </xsd:complexType>
+        </xsd:element>
+        <xsd:element name="set">
+          <xsd:complexType>
+            <xsd:complexContent>
+              <xsd:restriction base="DefType">
+                <xsd:attribute name="func" type="xsd:string" use="required"/>
+                <xsd:attribute name="overload" type="xsd:string"/>
+              </xsd:restriction>
+            </xsd:complexContent>
+          </xsd:complexType>
+        </xsd:element>
+      </xsd:all>
+
+      <xsd:attribute name="name" type="ident" use="required"/>
+      <xsd:attribute name="get" type="xsd:string"/>
+      <xsd:attribute name="set" type="xsd:string"/>
+    </xsd:complexType>
+  </xsd:element>
+
+
+  <xsd:element name="member">
+    <xsd:complexType>
+
+      <xsd:attribute name="name" type="ident">
+        <xsd:annotation>
+          <xsd:documentation>
+            The name of the member as will be seen in python. If not specified,
+            the name will be taken from the C++ member.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="cmember" type="xsd:string" use="required">
+        <xsd:annotation>
+          <xsd:documentation>
+            The member variable of the C++ class to expose. Do not qualify it
+            with the class name (i.e. don't use MyClass::myvar, use myvar).
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+    </xsd:complexType>
+  </xsd:element>
+
+
+  <xsd:element name="class">
+    <xsd:complexType>
+      <xsd:choice maxOccurs="unbounded" minOccurs="0">
+        <xsd:element ref="init"/>
+        <xsd:element ref="def"/>
+        <xsd:element ref="property"/>
+        <xsd:element ref="member"/>
+        <xsd:element ref="doc"/>
+      </xsd:choice>
+
+      <xsd:attribute name="name" type="ident">
+        <xsd:annotation>
+          <xsd:documentation>
+            The name of the class as will be seen in python. If not specified,
+            the name will be taken from the C++ class.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="type" type="xsd:string" use="required">
+        <xsd:annotation>
+          <xsd:documentation>
+            The C++ class to expose to python.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+    </xsd:complexType>
+  </xsd:element>
+
+
+  <xsd:element name="doc">
+    <xsd:simpleType>
+      <xsd:restriction base="xsd:string">
+        <xsd:whiteSpace value="preserve"/>
+      </xsd:restriction>
+    </xsd:simpleType>
+  </xsd:element>
+</xsd:schema>
