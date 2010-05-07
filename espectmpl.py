@@ -3,20 +3,32 @@
 import string
 
 init_check = '''
-    if(!self->initialized) {{{{
+    if(!self->initialized) {{
         PyErr_SetString(PyExc_RuntimeError,not_init_msg);
         return {0};
-    }}}}
+    }}
 '''
 
+class IfElse:
+    def __init__(self,iftrue,iffalse = '',format = False):
+        self.iftrue = iftrue
+        self.iffalse = iffalse
+        self.format = format
+
+    def __call__(self,val,args,kwds):
+        r = self.iftrue if val else self.iffalse
+        return r.format(*args,**kwds) if self.format else r
+
+class ForEach:
+    def __init__(self,pattern,join = ''):
+        self.pattern = pattern
+        self.join = join
+
+    def __call__(self,val,args,kwds):
+        return self.join.join(self.pattern.format(x,*args,**kwds) for x in val)
+
 class WithCondFormatter(string.Formatter):
-    """Allow conditional inclusion of parts of a format string.
-
-    WithCondFormatter('foo{bar}',{'bar':'yummy'}).format(str,bar=x,**others)
-    is equivalent to:
-    'foo{bar}'.format(bar = 'yummy'.format(**others) if x else '',**others)
-
-    """
+    """Allow conditional inclusion of parts of a format string."""
     def __init__(self,conds):
         super(WithCondFormatter,self).__init__()
         self.conds = conds
@@ -24,8 +36,8 @@ class WithCondFormatter(string.Formatter):
     def get_value(self,key,args,kwds):
         val = kwds[key] if isinstance(key,basestring) else args[key]
         cond = self.conds.get(key)
-        if cond is not None:
-            return cond.format(args,kwds) if val else ''
+        if cond:
+            return cond(val,args,kwds)
         return val
 
 class FormatWithCond(object):
@@ -47,7 +59,7 @@ PyObject *obj_{cname}_get{name}({ctype} *self,void *closure) {{
     }} EXCEPT_HANDLERS(0)
 }}
 ''',
-checkinit = init_check.format('0'))
+checkinit = IfElse(init_check.format('0')))
 
 property_set = FormatWithCond('''
 int obj_{cname}_set{name}({ctype} *self,PyObject *value,void *closure) {{
@@ -63,7 +75,7 @@ int obj_{cname}_set{name}({ctype} *self,PyObject *value,void *closure) {{
     return 0;
 }}
 ''',
-checkinit = init_check.format(-1))
+checkinit = IfElse(init_check.format(-1)))
 
 method = FormatWithCond('''
 PyObject *obj_{cname}_method_{name}(obj_{cname} *self{args}) {{
@@ -73,7 +85,7 @@ PyObject *obj_{cname}_method_{name}(obj_{cname} *self{args}) {{
     }} EXCEPT_HANDLERS(0)
 }}
 ''',
-checkinit = init_check.format('0'))
+checkinit = IfElse(init_check.format('0')))
 
 destruct = '''
 void obj_{name}_dealloc(obj_{name} *self) {{
@@ -105,14 +117,15 @@ PyMethodDef obj_{name}_methods[] = {{
 
 internconstruct = FormatWithCond('''
     obj_{name}({args}) : base({argvals}) {{
-        PyObject_Init(reinterpret_cast<PyObject*>(this),&obj_{name}Type);
+        PyObject_Init(reinterpret_cast<PyObject*>(this),{dynamic}obj_{name}Type);
 {checkinit}
     }}
 ''',
-checkinit = '        initialized = true;')
+checkinit = IfElse('        initialized = true;'),
+dynamic = IfElse('','&'))
 
-classdef_start = '''
-extern PyTypeObject obj_{name}Type;
+classdef_start = FormatWithCond('''
+extern PyTypeObject {dynamic}obj_{name}Type;
 
 struct obj_{name} {{
     PyObject_HEAD
@@ -128,7 +141,8 @@ struct obj_{name} {{
     void operator delete(void *ptr) {{
         PyMem_Free(ptr);
     }}
-'''
+''',
+dynamic = IfElse('*'))
 
 classdef_end = '''
 };
@@ -145,7 +159,7 @@ int obj_{name}_init(obj_{name} *self,PyObject *args,PyObject *kwds) {{
 }}
 '''
 
-classtypedef = '''
+classtypedef = FormatWithCond('''
 PyTypeObject obj_{name}Type = {{
     PyObject_HEAD_INIT(0)
     0,                         /* ob_size */
@@ -178,7 +192,7 @@ PyTypeObject obj_{name}Type = {{
     {methodsref}, /* tp_methods */
     {membersref}, /* tp_members */
     {getsetref}, /* tp_getset */
-    0,                         /* tp_base */
+    {base}, /* tp_base */
     0,                         /* tp_dict */
     0,                         /* tp_descr_get */
     0,                         /* tp_descr_set */
@@ -187,29 +201,33 @@ PyTypeObject obj_{name}Type = {{
     0,                         /* tp_alloc */
     0                          /* tp_new */
 }};
-'''
+''',
+destructref = IfElse('reinterpret_cast<destructor>(&obj_{name}_dealloc)','0',True),
+methodsref = IfElse('obj_{name}_methods','0',True),
+getsetref = IfElse('obj_{name}_getset','0',True))
 
 class_dynamic_typedef = FormatWithCond('''
 PyTypeObject *obj_{name}Type;
 
 inline PyObject *create_obj_{name}Type() {{
     PyObject *bases = PyTuple_New({baseslen});
-    if(!bases) return 0;
+    if(UNLIKELY(!bases)) return 0;
     {basesassign}
 
     PyObject *name = PyString_FromString("{name}");
-    if(!name) return 0;
+    if(UNLIKELY(!name)) return 0;
     PyObject *dict = PyDict_New();
-    if(!dict) {{
+    if(UNLIKELY(!dict)) {{
         Py_DECREF(bases);
         Py_DECREF(name);
         return 0;
     }}
-    PyTypeObject *type = PyObjectCallFunctionObjArgs(PyType_Type,name,bases,dict,0);
+    PyObject *to = PyObjectCallFunctionObjArgs(PyType_Type,name,bases,dict,0);
+    PyTypeObject *type = reinterpret_cast<PyTypeObject*>(to);
     Py_DECREF(bases);
     Py_DECREF(name);
     Py_DECREF(dict);
-    if(!type) return 0;
+    if(UNLIKELY(!type)) return 0;
 
     type.tp_name = "{module}.{name}";
     type.tp_basicsize = sizeof(obj_{name});
@@ -221,15 +239,14 @@ inline PyObject *create_obj_{name}Type() {{
     {getsetref}
     type.tp_init = reinterpret_cast<initproc>(&obj_{name}_init);
 
-    obj_{name}Type = type;
-    return reinterpret_cast<PyObject*>(type);
+    return to;
 }}
 ''',
-destructref = 'type.tp_dealloc = {destructref};',
-doc = 'type.tp_doc = {doc};',
-methodsref = 'type.tp_methods = {methodsref};',
-membersref = 'type.tp_members = {membersref};',
-getsetref = 'type.tp_getset = {getsetref};')
+destructref = IfElse('type.tp_dealloc = reinterpret_cast<destructor>(&obj_{name}_dealloc);',True),
+doc = IfElse('type.tp_doc = {doc};',True),
+methodsref = IfElse('type.tp_methods = obj_{name}_methods;',True),
+membersref = IfElse('type.tp_members = {membersref};',True),
+getsetref = IfElse('type.tp_getset = obj_{name}_getset;',True))
 
 gccxmlinput_start = '''
 #include <Python.h>
@@ -303,8 +320,8 @@ struct get_arg {{
     PyObject *args, *kwds;
     unsigned int tcount, kcount;
     get_arg(PyObject *args,PyObject *kwds) : args(args), kwds(kwds), tcount(0), kcount(0) {{
-        assert(args != NULL && PyTuple_Check(args));
-        assert(kwds == NULL || PyDict_Check(kwds));
+        assert(args != 0 && PyTuple_Check(args));
+        assert(kwds == 0 || PyDict_Check(kwds));
     }}
 
     PyObject *operator()(const char *name,bool required);
@@ -468,6 +485,12 @@ module_class_add = '''
     PyModule_AddObject(m,"{0}",reinterpret_cast<PyObject*>(&obj_{0}Type));
 '''
 
+module_dynamic_class_add = '''
+    obj_{0}Type = create_obj_{0}Type();
+    if(UNLIKELY(!obj_{0}Type)) return;
+    PyModule_AddObject(m,"{0}",obj_{0}Type);
+'''
+
 module_end = '''
 }
 
@@ -477,15 +500,16 @@ module_end = '''
 # There is an interesting opportunity here. If the object is not of the desired
 # type, the class could be implemented such that all the functions are wrappers
 # to python method calls of the same name.
-get_base = '''
+get_base = FormatWithCond('''
 inline {type} &get_base_{name}(PyObject *o) {{
-    if(UNLIKELY(!PyObject_TypeCheck(o,&obj_{name}Type))) {{
+    if(UNLIKELY(!PyObject_TypeCheck(o,{dynamic}obj_{name}Type))) {{
         PyErr_SetString(PyExc_TypeError,"object is not an instance of {name}");
         throw py_error_set();
     }}
     return reinterpret_cast<obj_{name}*>(o)->base;
 }}
-'''
+''',
+dynamic = IfElse('','&'))
 
 header_start = '''
 #pragma once
@@ -530,9 +554,9 @@ overload_func_call = FormatWithCond('''
         NoSuchOverload(args);
 end:    ;
 ''',
-nokwdscheck = '''
-        if(PyDict_Size(kwds)) {{
+nokwdscheck = IfElse('''
+        if(PyDict_Size(kwds)) {
             PyErr_SetString(PyExc_TypeError,no_keywords_msg);
             throw py_error_set();
-        }}
-''')
+        }
+'''))

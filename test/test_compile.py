@@ -37,7 +37,7 @@ public:
     int value_times(int x) { return value * x; }
 
     int value;
-}
+};
 
 class BaseB : public BaseA {
 public:
@@ -48,7 +48,7 @@ class BaseC : public BaseA {
     BaseC() : BaseA(4) {}
 };
 
-class Derived : public Base1, public Base2 {
+class Derived : public BaseA, public BaseB {
 public:
 
 };

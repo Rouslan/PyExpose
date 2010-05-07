@@ -134,15 +134,39 @@ def quote_c(x):
 def mandatory_args(x):
     return len(list(itertools.takewhile(lambda a: a.default is None, x.args)))
 
-def internconstructor(classname,c):
-    return tmpl.internconstruct.format(
-        name = classname,
-        checkinit = True,
-        args = ','.join('{0!s} _{1}'.format(a,i) for i,a in enumerate(c.args)),
-        argvals = ','.join('_{0}'.format(i) for i in xrange(len(c.args))))
-
 def varargs(x):
     return x.args and x.args[-1] is gccxml.cppellipsis
+
+
+
+def type_cptr(c):
+    r = 'obj_{0}Type'.format(c.cdef.name)
+    if not c.dynamic:
+        r = '&' + r
+    return r
+
+class ClassTypeInfo:
+    def __init__(self,cdef,cppint):
+        self.cdef = cdef
+        self.cppint = cppint
+        self.bases = []
+
+    def basecount(self):
+        return sum(1 + b.basecount() for b in self.bases)
+
+    @property
+    def dynamic(self):
+        return len(self.bases) > 1
+
+    def findbases(self,classdefs):
+        assert len(self.bases) == 0
+        for b in self.cppint.bases:
+            cd = classdefs.get(b.type)
+            if cd:
+                self.bases.append(cd)
+
+    def output(self,out,module):
+        self.cdef.output(out,module,self.cppint,self.dynamic,map(type_cptr,self.bases))
 
 
 
@@ -247,27 +271,14 @@ class ClassDef:
         self.properties = []
         self.vars = []
         self.doc = None
-        self.bases = []
 
-    def findbases(self,cppint,classint,classdefs):
-        for b in classint.bases:
-            cd = classdefs.get(b.type)
-            if cd:
-                self.bases.append(cd)
-
-    def basecount(self):
-        return sum(1 + b.basecount() for b in self.bases)
-
-    @property
-    def dynamic(self):
-        return len(self.bases) > 1
-
-    @property
-    def type_cptr(self):
-        r = 'obj_{name}Type'
-        if not self.dynamic:
-            r = '&' + r
-        return r
+    def internconstructor(self,c,dynamic):
+        return tmpl.internconstruct.format(
+            name = self.name,
+            dynamic = dynamic,
+            checkinit = True,
+            args = ','.join('{0!s} _{1}'.format(a,i) for i,a in enumerate(c.args)),
+            argvals = ','.join('_{0}'.format(i) for i in xrange(len(c.args))))
 
     def method(self,m,classint,conv):
         cm = classint.find(m.func)
@@ -280,15 +291,15 @@ class ClassDef:
             methargs = ',PyObject *'
             argcode = cppcode('')
         elif len(cm.args) == 1 and not cm.args[0].default:
-            type == 'METH_O'
+            type = 'METH_O'
             methargs = ',PyObject *arg'
-            argcode = cppcode(conv.frompy(cm.args[0])[0])
+            argcode = cppcode(conv.frompy(cm.args[0].type)[0].format('arg'))
         elif any(a.name for a in cm.args): # is there a named argument?
-            type == 'METH_VARARGS|METH_KEYWORDS'
+            type = 'METH_VARARGS|METH_KEYWORDS'
             methargs = ',PyObject *args,PyObject *kwds'
             argcode = conv.arg_parser(cm.args)
         else:
-            type == 'METH_VARAGS'
+            type = 'METH_VARAGS'
             methargs = ',PyObject *args'
             argcode = conv.arg_parser(cm.args,False)
 
@@ -322,33 +333,31 @@ class ClassDef:
 
         return tableentry,funcbody
 
-    def output(self,out,module,cppint):
-        c = cppint.find(self.type)
-        if not isinstance(c,gccxml.CPPClass):
-            raise SpecificationError('"{0}" is not a struct/class type'.format(self.type))
-
+    def output(self,out,module,c,dynamic,bases):
+        assert isinstance(c,gccxml.CPPClass)
 
         print >> out.h, tmpl.classdef_start.format(
             name = self.name,
-            type = self.type),
+            type = self.type,
+            dynamic = dynamic),
 
         for m in c.members:
             if isinstance(m,gccxml.CPPConstructor) and not varargs(m):
-                print >> out.h, internconstructor(self.name,m),
+                print >> out.h, self.internconstructor(m,dynamic),
 
         print >> out.h, tmpl.classdef_end,
 
 
-        destructref = '0'
+        destructref = False
         initdestruct = ''
         d = c.getDestructor()
         if d:
             print >> out.cpp, tmpl.destruct.format(name = self.name, dname = d.name),
-            destructref = 'reinterpret_cast<destructor>(&obj_{0}_dealloc)'.format(self.name)
+            destructref = True
             initdestruct = '    if(self->initialized) self->base.~{0}();'.format(d.name)
 
 
-        getsetref = None
+        getsetref = False
         if self.properties:
             for p in self.properties:
                 print >> out.cpp, p.output(self,c,cppint,out.conv),
@@ -357,7 +366,7 @@ class ClassDef:
                 name = self.name,
                 items = ',\n    '.join(p.table_entry(self) for p in self.properties)),
 
-            getsetref = 'obj_{0}_getset'.format(self.name)
+            getsetref = True
 
         membersref = None
         if self.vars:
@@ -367,7 +376,7 @@ class ClassDef:
             membersref = 'obj_{0}_members'.format(self.name)
 
 
-        methodsref = None
+        methodsref = False
         if self.methods:
             tentries,bodies = zip(*[self.method(m,c,out.conv) for m in self.methods])
             for b in bodies:
@@ -377,12 +386,18 @@ class ClassDef:
                 name = self.name,
                 items = ',\n    '.join(tentries)),
 
-            methodsref = 'obj_{0}_methods'.format(self.name)
+            methodsref = True
 
 
         func = 'new(&self->base) ' + self.type
         if self.constructors:
-            cons = [(func,c.getConstructor(con.overload).args) for con in self.constructors]
+            if self.constructors[0].overload is None:
+                # no overload specified means use all constructors
+
+                assert len(self.constructors) == 1
+                cons = [(func,con.args) for con in c.members if isinstance(con,gccxml.CPPConstructor)]
+            else:
+                cons = [(func,c.getConstructor(con.overload).args) for con in self.constructors]
         else:
             cons = [(func,c.getConstructor().args)]
 
@@ -391,9 +406,9 @@ class ClassDef:
         print >> out.cpp, tmpl.classinit.format(
             name = self.name,
             initdestruct = initdestruct,
-            initcode = self.cons),
+            initcode = cons),
 
-        if self.dynamic:
+        if dynamic:
             print >> out.cpp, tmpl.class_dynamic_typedef.format(
                 name = self.name,
                 module = module,
@@ -402,9 +417,10 @@ class ClassDef:
                 getsetref = getsetref,
                 membersref = membersref,
                 methodsref = methodsref,
-                baselen = len(self.bases),
-                baseassign = '\n    '.join('PyTuple_SET_ITEM(bases,{0},{1});'.format(*x) for x in enumerate(self.bases))),
+                baseslen = len(bases),
+                basesassign = '\n    '.join('PyTuple_SET_ITEM(bases,{0},{1});'.format(*x) for x in enumerate(bases))),
         else:
+            assert len(bases) <= 1
             print >> out.cpp, tmpl.classtypedef.format(
                 name = self.name,
                 module = module,
@@ -412,7 +428,13 @@ class ClassDef:
                 doc = quote_c(self.doc) if self.doc else '0',
                 getsetref = getsetref or '0',
                 membersref = membersref or '0',
-                methodsref = methodsref or '0'),
+                methodsref = methodsref or '0',
+                base = bases[0] if bases else '0'),
+
+        print >> out.cpp, tmpl.get_base.format(
+            type = c.typestr(),
+            name = self.name,
+            dynamic = dynamic),
 
 
 class cppcode:
@@ -606,7 +628,7 @@ class ArgBranchNode:
         r = ''
         get_size = '{0}if(PyTuple_GET_SIZE(args) {1} {2}) {{\n'
 
-        if skipsize:
+        if skipsize > 0:
             assert anychildnodes
 
             r += self.basic_and_objects_code(conv,argconv,skipsize-1,ind,exactlenchecked)
@@ -637,10 +659,12 @@ class ArgBranchNode:
                 r += self.basic_and_objects_code(conv,argconv,min_args - 1,ind)
 
                 ind -= 1
-                r += ind + '}\n'
 
                 if self.call:
-                    r += self.call_code(conv,argconv,ind)
+                    r += ind + '} else {\n'
+                    r += self.call_code(conv,argconv,ind+1)
+
+                r += ind + '}\n'
 
         elif exactlenchecked:
             assert self.call
@@ -776,6 +800,8 @@ class Conversion:
     def frompy(self,t):
         '''Returns a tuple containing the conversion code string and the type (CPP_X_Type) that the code returns'''
 
+        assert isinstance(t,gccxml.CPPType)
+
         r = self.__frompy.get(t)
         if r: return r,t
 
@@ -909,11 +935,9 @@ class Conversion:
 
 class ModuleDef:
     def __init__(self):
-        self.members = []
+        self.classes = []
+        self.functions = []
         self.doc = ''
-
-    def _filtered_members(self,type):
-        return filter(lambda x: isinstance(x,type), self.members)
 
     def print_gccxml_input(self,out):
         # In addition to the include files, declare certain typedefs so they can be matched against types used elsewhere
@@ -952,33 +976,45 @@ class ModuleDef:
 
         print >> out.h, tmpl.header_start.format(module = self.name)
 
-        for m in self.members:
-            if isinstance(m,ClassDef):
-                c = cppint.find(m.type)
-                print >> out.cpp, tmpl.get_base.format(
-                    type = c.typestr(),
-                    name = m.name)
 
-                # these assume the class has copy constructors
-                conv.add_conv(c,'new obj_{0}({{0}})'.format(m.name),'get_base_{0}({{0}})'.format(m.name))
-                conv.cppclasstopy[c] = m
+        classes = {}
 
-        for m in self.members:
+        for cdef in self.classes:
+            c = cppint.find(cdef.type)
+            if not isinstance(c,gccxml.CPPClass):
+                raise SpecificationError('"{0}" is not a struct/class type'.format(cdef.type))
+            classes[c] = ClassTypeInfo(cdef,c)
+
+            # these assume the class has copy constructors
+            conv.add_conv(c,'new obj_{0}({{0}})'.format(cdef.name),'get_base_{0}({{0}})'.format(cdef.name))
+            conv.cppclasstopy[c] = cdef
+
+        for c in classes.values():
+            c.findbases(classes)
+
+        # Sort classes by heirarchy. Base classes need to be declared before derived classes.
+        classes = sorted(classes.values(),key=ClassTypeInfo.basecount)
+
+        for c in classes:
+            c.output(out,self.name)
+
+        for m in self.functions:
             m.output(out,self.name,cppint)
 
         print >> out.cpp, tmpl.module_init.format(
             funclist = '',
             module = self.name)
 
-        for c in self._filtered_members(ClassDef):
-            print >> out.cpp, tmpl.module_class_prepare.format(c.name)
+        for c in classes:
+            if not c.dynamic:
+                print >> out.cpp, tmpl.module_class_prepare.format(c.cdef.name)
 
         print >> out.cpp, tmpl.module_create.format(
             name = self.name,
-            doc = quote_c(self.doc) if self.doc else "0")
+            doc = quote_c(self.doc) if self.doc else '0')
 
-        for c in self._filtered_members(ClassDef):
-            print >> out.cpp, tmpl.module_class_add.format(c.name)
+        for c in classes:
+            print >> out.cpp, (tmpl.module_dynamic_class_add if c.dynamic else tmpl.module_class_add).format(c.cdef.name)
 
         print >> out.cpp, tmpl.module_end
         print >> out.h, tmpl.header_end
@@ -986,17 +1022,18 @@ class ModuleDef:
     def _funcs_with_overload(self):
         '''yields function-like objects that have a non-empty overload defined'''
 
-        for m in self.members:
-            if isinstance(m,ClassDef):
-                for x in m.constructors:
-                    if x.overload: yield x
-                for meth in m.methods:
-                    if x.overload: yield x
-            elif isinstance(m,DefDef):
-                if m.overload: yield m
+        for c in self.classes:
+            for x in c.constructors:
+                if x.overload: yield x
+            for meth in c.methods:
+                if x.overload: yield x
+
+        for f in self.functions:
+            if f.overload: yield m
+
 
 def stripsplit(x):
-    return [i.strip() for i in x.split(",")]
+    return [i.strip() for i in x.split(',')]
 
 class tag_Class(tag):
     def __init__(self,args):
@@ -1037,8 +1074,10 @@ class tag_Module(tag):
         self.r.includes = stripsplit(args["include"])
 
     def child(self,name,data):
-        if name == "class" or name == "def":
-            self.r.members.append(data)
+        if name == "class":
+            self.r.classes.append(data)
+        if name == "def":
+            self.r.functions.append(data)
         elif name == "doc":
             self.r.doc = data
 
