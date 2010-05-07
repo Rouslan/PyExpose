@@ -3,18 +3,18 @@
 import string
 
 init_check = '''
-    if(!self->initialized) {{
+    if(!self->initialized) {{{{
         PyErr_SetString(PyExc_RuntimeError,not_init_msg);
         return {0};
-    }}
+    }}}}
 '''
 
 class WithCondFormatter(string.Formatter):
     """Allow conditional inclusion of parts of a format string.
 
-    WithCondFormatter('foo{bar}',{'bar':'yummy'}).format(str,bar=x)
+    WithCondFormatter('foo{bar}',{'bar':'yummy'}).format(str,bar=x,**others)
     is equivalent to:
-    'foo{bar}'.format(bar = 'yummy' if x else '')
+    'foo{bar}'.format(bar = 'yummy'.format(**others) if x else '',**others)
 
     """
     def __init__(self,conds):
@@ -25,7 +25,7 @@ class WithCondFormatter(string.Formatter):
         val = kwds[key] if isinstance(key,basestring) else args[key]
         cond = self.conds.get(key)
         if cond is not None:
-            return cond if val else ''
+            return cond.format(args,kwds) if val else ''
         return val
 
 class FormatWithCond(object):
@@ -134,7 +134,7 @@ classdef_end = '''
 };
 '''
 
-classtypedef = '''
+classinit = '''
 int obj_{name}_init(obj_{name} *self,PyObject *args,PyObject *kwds) {{
 {initdestruct}
     try {{
@@ -143,7 +143,9 @@ int obj_{name}_init(obj_{name} *self,PyObject *args,PyObject *kwds) {{
     self->initialized = true;
     return 0;
 }}
+'''
 
+classtypedef = '''
 PyTypeObject obj_{name}Type = {{
     PyObject_HEAD_INIT(0)
     0,                         /* ob_size */
@@ -186,6 +188,48 @@ PyTypeObject obj_{name}Type = {{
     0                          /* tp_new */
 }};
 '''
+
+class_dynamic_typedef = FormatWithCond('''
+PyTypeObject *obj_{name}Type;
+
+inline PyObject *create_obj_{name}Type() {{
+    PyObject *bases = PyTuple_New({baseslen});
+    if(!bases) return 0;
+    {basesassign}
+
+    PyObject *name = PyString_FromString("{name}");
+    if(!name) return 0;
+    PyObject *dict = PyDict_New();
+    if(!dict) {{
+        Py_DECREF(bases);
+        Py_DECREF(name);
+        return 0;
+    }}
+    PyTypeObject *type = PyObjectCallFunctionObjArgs(PyType_Type,name,bases,dict,0);
+    Py_DECREF(bases);
+    Py_DECREF(name);
+    Py_DECREF(dict);
+    if(!type) return 0;
+
+    type.tp_name = "{module}.{name}";
+    type.tp_basicsize = sizeof(obj_{name});
+    {destructref}
+    type.tp_flags = Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE;
+    {doc}
+    {methodsref}
+    {membersref}
+    {getsetref}
+    type.tp_init = reinterpret_cast<initproc>(&obj_{name}_init);
+
+    obj_{name}Type = type;
+    return reinterpret_cast<PyObject*>(type);
+}}
+''',
+destructref = 'type.tp_dealloc = {destructref};',
+doc = 'type.tp_doc = {doc};',
+methodsref = 'type.tp_methods = {methodsref};',
+membersref = 'type.tp_members = {membersref};',
+getsetref = 'type.tp_getset = {getsetref};')
 
 gccxmlinput_start = '''
 #include <Python.h>
@@ -487,8 +531,8 @@ overload_func_call = FormatWithCond('''
 end:    ;
 ''',
 nokwdscheck = '''
-        if(PyDict_Size(kwds)) {
+        if(PyDict_Size(kwds)) {{
             PyErr_SetString(PyExc_TypeError,no_keywords_msg);
             throw py_error_set();
-        }
+        }}
 ''')

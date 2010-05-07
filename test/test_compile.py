@@ -30,6 +30,29 @@ public:
     static std::string greet();
 };
 
+class BaseA {
+public:
+    BaseA(int value) : value(value) {}
+    virtual ~BaseA();
+    int value_times(int x) { return value * x; }
+
+    int value;
+}
+
+class BaseB : public BaseA {
+public:
+    BaseB() : BaseA(3) {}
+};
+
+class BaseC : public BaseA {
+    BaseC() : BaseA(4) {}
+};
+
+class Derived : public Base1, public Base2 {
+public:
+
+};
+
 #endif
 '''
 
@@ -49,6 +72,9 @@ MyClass::MyClass(unsigned int value) : value(value) {
 std::string MyClass::greet() {
     return std::string("Hello World!");
 }
+
+
+BaseA::~BaseA() {}
 '''
 
 spec_file = '''<?xml version="1.0"?>
@@ -60,6 +86,23 @@ spec_file = '''<?xml version="1.0"?>
         <init/>
         <member cmember="value"/>
         <def func="greet"/>
+    </class>
+
+    <class type="BaseA">
+        <init/>
+        <def func="value_times"/>
+    </class>
+
+    <class type="BaseB">
+        <init/>
+    </class>
+
+    <class type="BaseC">
+        <init/>
+    </class>
+
+    <class type="Derived">
+        <init/>
     </class>
 </module>
 '''
@@ -137,6 +180,12 @@ class TestCompile(unittest.TestCase):
 
         self.assertRaises(TypeError,testmodule.AClass,-1)
         self.assertRaises(RuntimeError,testmodule.AClass,3)
+
+        try:
+            der = testmodule.Derived()
+            print der.value_times(5)
+        except Exception as e:
+            self.fail(str(e))
 
 
 

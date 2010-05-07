@@ -247,6 +247,27 @@ class ClassDef:
         self.properties = []
         self.vars = []
         self.doc = None
+        self.bases = []
+
+    def findbases(self,cppint,classint,classdefs):
+        for b in classint.bases:
+            cd = classdefs.get(b.type)
+            if cd:
+                self.bases.append(cd)
+
+    def basecount(self):
+        return sum(1 + b.basecount() for b in self.bases)
+
+    @property
+    def dynamic(self):
+        return len(self.bases) > 1
+
+    @property
+    def type_cptr(self):
+        r = 'obj_{name}Type'
+        if not self.dynamic:
+            r = '&' + r
+        return r
 
     def method(self,m,classint,conv):
         cm = classint.find(m.func)
@@ -327,7 +348,7 @@ class ClassDef:
             initdestruct = '    if(self->initialized) self->base.~{0}();'.format(d.name)
 
 
-        getsetref = '0'
+        getsetref = None
         if self.properties:
             for p in self.properties:
                 print >> out.cpp, p.output(self,c,cppint,out.conv),
@@ -338,7 +359,7 @@ class ClassDef:
 
             getsetref = 'obj_{0}_getset'.format(self.name)
 
-        membersref = '0'
+        membersref = None
         if self.vars:
             print >> out.cpp, tmpl.member_table.format(
                 name = self.name,
@@ -346,7 +367,7 @@ class ClassDef:
             membersref = 'obj_{0}_members'.format(self.name)
 
 
-        methodsref = '0'
+        methodsref = None
         if self.methods:
             tentries,bodies = zip(*[self.method(m,c,out.conv) for m in self.methods])
             for b in bodies:
@@ -367,17 +388,31 @@ class ClassDef:
 
         cons = out.conv.function_call(cons,True)
 
-        print >> out.cpp, tmpl.classtypedef.format(
+        print >> out.cpp, tmpl.classinit.format(
             name = self.name,
-            type = self.type,
-            module = module,
-            destructref = destructref,
-            doc = quote_c(self.doc) if self.doc else '0',
-            getsetref = getsetref,
             initdestruct = initdestruct,
-            membersref = membersref,
-            methodsref = methodsref,
-            initcode = cons),
+            initcode = self.cons),
+
+        if self.dynamic:
+            print >> out.cpp, tmpl.class_dynamic_typedef.format(
+                name = self.name,
+                module = module,
+                destructref = destructref,
+                doc = self.doc and quote_c(self.doc),
+                getsetref = getsetref,
+                membersref = membersref,
+                methodsref = methodsref,
+                baselen = len(self.bases),
+                baseassign = '\n    '.join('PyTuple_SET_ITEM(bases,{0},{1});'.format(*x) for x in enumerate(self.bases))),
+        else:
+            print >> out.cpp, tmpl.classtypedef.format(
+                name = self.name,
+                module = module,
+                destructref = destructref or '0',
+                doc = quote_c(self.doc) if self.doc else '0',
+                getsetref = getsetref or '0',
+                membersref = membersref or '0',
+                methodsref = methodsref or '0'),
 
 
 class cppcode:
