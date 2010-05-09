@@ -139,17 +139,58 @@ def varargs(x):
 
 
 
-def type_cptr(c):
-    r = 'obj_{0}Type'.format(c.cdef.name)
-    if not c.dynamic:
-        r = '&' + r
-    return r
+class MultiInheritNode:
+    def __init__(self,first):
+        self.classes = [first]
+        self.derived_nodes = []
+
+    def new_node(self,first):
+        n = MultiInheritNode(first)
+        self.derived_nodes.append(n)
+        return n
+
+    def append_single(self,item):
+        self.classes.append(item)
+
+    @property
+    def main_type(self):
+        assert self.classes
+        return self.classes[0]
+
+    def output(self,template):
+        r = ''
+        for d in self.derived_nodes:
+            r += d.output(template)
+        r += tmpl.typecheck_test.format(
+            name = self.main_type.cdef.name)
+        return r
+
+    def downcast_func(self):
+        r = tmpl.typecheck_start.format(
+            name = self.main_type.cdef.name,
+            type = self.main_type.cdef.type)
+
+        for d in self.derived_nodes:
+            r += d.output(tmpl.typecheck_test)
+
+        r += tmpl.typecheck_else.format(
+            name = self.main_type.cdef.name)
+
+        return r
+
+
+
 
 class ClassTypeInfo:
     def __init__(self,cdef,cppint):
         self.cdef = cdef
         self.cppint = cppint
         self.bases = []
+        self.derived = []
+
+    @property
+    def name(self):
+        return self.cdef.name
 
     def basecount(self):
         return sum(1 + b.basecount() for b in self.bases)
@@ -158,15 +199,88 @@ class ClassTypeInfo:
     def dynamic(self):
         return len(self.bases) > 1
 
+    # a seperate property in case a dynamic declration is ever needed for a single/no-inheritance class
+    multi_inherit = dynamic
+
+    @property
+    def static_from_dynamic(self):
+        return len(self.bases) == 1 and self.bases[0].dynamic
+
+    def has_multi_inherit_subclass(self):
+        return any(c.multi_inherit or c.has_multi_inherit_subclass() for c in self.derived)
+
     def findbases(self,classdefs):
         assert len(self.bases) == 0
         for b in self.cppint.bases:
             cd = classdefs.get(b.type)
             if cd:
                 self.bases.append(cd)
+                cd.derived.append(self)
 
     def output(self,out,module):
-        self.cdef.output(out,module,self.cppint,self.dynamic,map(type_cptr,self.bases))
+        # If this is a statically declared class and its base is a dynamic
+        # class, don't set tp_base yet (we don't have an address for it yet).
+        bases = []
+        if not self.static_from_dynamic:
+            if self.bases:
+                bases = map((lambda x: 'get_obj_{0}Type()'.format(x.cdef.name)), self.bases)
+            elif self.has_multi_inherit_subclass():
+                # common type needed for multiple inheritance
+                bases = ['&obj__CommonType']
+
+        self.cdef.output(out, module, self.cppint, self.dynamic,bases,self.has_multi_inherit_subclass())
+
+    # get the get_base func, not get the base func
+    def get_base_func(self):
+        if self.has_multi_inherit_subclass():
+            return self.heirarchy_chain().downcast_func()
+        else:
+            return tmpl.get_base.format(
+                type = self.cppint.typestr(),
+                name = self.name)
+
+    def prepare_for_module(self):
+        if not self.dynamic:
+            return tmpl.module_class_prepare.format(
+                name = self.cdef.name,
+                base = self.static_from_dynamic and self.bases[0].cdef.name)
+        return ''
+
+    def add_to_module(self):
+        return (tmpl.module_dynamic_class_add if self.dynamic else tmpl.module_class_add).format(self.cdef.name)
+
+    def __repr__(self):
+        return '<espec.ClassTypeInfo for {0}>'.format(self.cdef.name)
+
+    def _heirarchy_chain(self,node):
+        if self.multi_inherit:
+            node = node.new_node(self)
+        else:
+            node.append_single(self)
+
+        for c in self.derived:
+            c._heirarchy_chain(node)
+
+    def heirarchy_chain(self):
+        """Return a tree of lists of derived classes divided at classes with
+        multiple inheritance.
+
+        The tree is the result when you take the tree containing containing all
+        direct and indirect derived classes of this class, plus this class, then
+        combine each class that does not inherit from more than one class (any
+        class, not necessarily from this tree), with its base class so each node
+        has a list that either starts with this class, or a class the inherits
+        from more than one class.
+
+        If there are no classes with multiple inheritance, the result will be a
+        single node.
+
+        """
+        node = MultiInheritNode(self)
+        for c in self.derived:
+            c._heirarchy_chain(node)
+
+        return node
 
 
 
@@ -272,15 +386,14 @@ class ClassDef:
         self.vars = []
         self.doc = None
 
-    def internconstructor(self,c,dynamic):
+    def internconstructor(self,c):
         return tmpl.internconstruct.format(
             name = self.name,
-            dynamic = dynamic,
             checkinit = True,
             args = ','.join('{0!s} _{1}'.format(a,i) for i,a in enumerate(c.args)),
             argvals = ','.join('_{0}'.format(i) for i in xrange(len(c.args))))
 
-    def method(self,m,classint,conv):
+    def method(self,m,classint,conv,need_cast):
         cm = classint.find(m.func)
 
         if not isinstance(cm,gccxml.CPPMethod):
@@ -303,7 +416,7 @@ class ClassDef:
             methargs = ',PyObject *args'
             argcode = conv.arg_parser(cm.args,False)
 
-        code = 'self->base.'
+        code = 'base.'
         if cm.static:
             type += '|METH_STATIC'
             code = '{0}::'.format(self.type)
@@ -320,10 +433,12 @@ class ClassDef:
 
         funcbody = tmpl.method.format(
             name = m.name,
+            type = self.type,
             cname = self.name,
             args = methargs,
             checkinit = not cm.static,
-            code = code)
+            code = code,
+            typecast = need_cast)
 
         tableentry = '{{"{name}",reinterpret_cast<PyCFunction>(obj_{cname}_method_{name}),{type},{doc}}}'.format(
             cname = self.name,
@@ -333,7 +448,7 @@ class ClassDef:
 
         return tableentry,funcbody
 
-    def output(self,out,module,c,dynamic,bases):
+    def output(self,out,module,c,dynamic,bases,need_method_cast):
         assert isinstance(c,gccxml.CPPClass)
 
         print >> out.h, tmpl.classdef_start.format(
@@ -343,7 +458,7 @@ class ClassDef:
 
         for m in c.members:
             if isinstance(m,gccxml.CPPConstructor) and not varargs(m):
-                print >> out.h, self.internconstructor(m,dynamic),
+                print >> out.h, self.internconstructor(m),
 
         print >> out.h, tmpl.classdef_end,
 
@@ -368,17 +483,17 @@ class ClassDef:
 
             getsetref = True
 
-        membersref = None
+        membersref = False
         if self.vars:
             print >> out.cpp, tmpl.member_table.format(
                 name = self.name,
                 items = ',\n    '.join(v.table_entry(self,c,out.conv) for v in self.vars)),
-            membersref = 'obj_{0}_members'.format(self.name)
+            membersref = True
 
 
         methodsref = False
         if self.methods:
-            tentries,bodies = zip(*[self.method(m,c,out.conv) for m in self.methods])
+            tentries,bodies = zip(*[self.method(m,c,out.conv,need_method_cast) for m in self.methods])
             for b in bodies:
                 print >> out.cpp, b,
 
@@ -405,6 +520,7 @@ class ClassDef:
 
         print >> out.cpp, tmpl.classinit.format(
             name = self.name,
+            type = self.type,
             initdestruct = initdestruct,
             initcode = cons),
 
@@ -418,23 +534,18 @@ class ClassDef:
                 membersref = membersref,
                 methodsref = methodsref,
                 baseslen = len(bases),
-                basesassign = '\n    '.join('PyTuple_SET_ITEM(bases,{0},{1});'.format(*x) for x in enumerate(bases))),
+                basesassign = enumerate(bases)),
         else:
             assert len(bases) <= 1
             print >> out.cpp, tmpl.classtypedef.format(
                 name = self.name,
                 module = module,
-                destructref = destructref or '0',
+                destructref = destructref,
                 doc = quote_c(self.doc) if self.doc else '0',
-                getsetref = getsetref or '0',
-                membersref = membersref or '0',
-                methodsref = methodsref or '0',
+                getsetref = getsetref,
+                membersref = membersref,
+                methodsref = methodsref,
                 base = bases[0] if bases else '0'),
-
-        print >> out.cpp, tmpl.get_base.format(
-            type = c.typestr(),
-            name = self.name,
-            dynamic = dynamic),
 
 
 class cppcode:
@@ -653,7 +764,7 @@ class ArgBranchNode:
                 ind -= 1
                 r += ind + '}\n'
             else:
-                r += get_size.format(ind,'>=',len(argconv) + min_args)
+                r += get_size.format(ind,'>',len(argconv) + min_args)
                 ind += 1
 
                 r += self.basic_and_objects_code(conv,argconv,min_args - 1,ind)
@@ -831,7 +942,7 @@ class Conversion:
 
     def check_and_cast(self,t):
         cdef = self.cppclasstopy[strip_refptr(t)]
-        check ='PyObject_TypeCheck({{0}},&obj_{0}Type)'.format(cdef.name)
+        check ='PyObject_TypeCheck({{0}},get_obj_{0}Type())'.format(cdef.name)
         cast = '{0}reinterpret_cast<obj_{1}*>({{0}})->base'.format('&' if isinstance(t,gccxml.CPPPointerType) else '',cdef.name)
         return check,cast
 
@@ -996,6 +1107,9 @@ class ModuleDef:
         classes = sorted(classes.values(),key=ClassTypeInfo.basecount)
 
         for c in classes:
+            print >> out.cpp, c.get_base_func()
+
+        for c in classes:
             c.output(out,self.name)
 
         for m in self.functions:
@@ -1006,15 +1120,14 @@ class ModuleDef:
             module = self.name)
 
         for c in classes:
-            if not c.dynamic:
-                print >> out.cpp, tmpl.module_class_prepare.format(c.cdef.name)
+            print >> out.cpp, c.prepare_for_module()
 
         print >> out.cpp, tmpl.module_create.format(
             name = self.name,
             doc = quote_c(self.doc) if self.doc else '0')
 
         for c in classes:
-            print >> out.cpp, (tmpl.module_dynamic_class_add if c.dynamic else tmpl.module_class_add).format(c.cdef.name)
+            print >> out.cpp, c.add_to_module()
 
         print >> out.cpp, tmpl.module_end
         print >> out.h, tmpl.header_end

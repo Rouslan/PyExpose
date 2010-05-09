@@ -60,7 +60,7 @@ class CPPBasicType(CPPType):
         return '{0} {1}'.format(self.name,deriv) if deriv else self.name
 
 class CPPClass(CPPBasicType):
-    __slots__ = 'bases','members'
+    __slots__ = 'bases','members','size'
 
     def __init__(self,name = None):
         self.name = name
@@ -284,13 +284,13 @@ def bool_keys(*keys):
     return [(k,zero_one,False) for k in keys]
 
 def function_child(self,name,data):
-    if name == "Argument" or name == "Ellipsis":
+    if name == 'Argument' or name == 'Ellipsis':
         self.r[1].args.append(data)
 
 
 
 class tag_Class(tag):
-    __init__ = common_init(CPPClass,[("name",None,None),("members",unicode.split,[])])
+    __init__ = common_init(CPPClass,[('name',None,None),('size',None,None),('members',unicode.split,[])])
 
     def child(self,name,data):
         if name == "Base":

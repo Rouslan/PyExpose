@@ -80,12 +80,16 @@ checkinit = IfElse(init_check.format(-1)))
 method = FormatWithCond('''
 PyObject *obj_{cname}_method_{name}(obj_{cname} *self{args}) {{
 {checkinit}
+    {type} &base = {typecast}
     try {{
         {code}
     }} EXCEPT_HANDLERS(0)
 }}
 ''',
-checkinit = IfElse(init_check.format('0')))
+checkinit = IfElse(init_check.format('0')),
+typecast = IfElse(
+    'get_base_{cname}(reinterpret_cast<PyObject*>(self),false);',
+    'self->base;',True))
 
 destruct = '''
 void obj_{name}_dealloc(obj_{name} *self) {{
@@ -117,15 +121,15 @@ PyMethodDef obj_{name}_methods[] = {{
 
 internconstruct = FormatWithCond('''
     obj_{name}({args}) : base({argvals}) {{
-        PyObject_Init(reinterpret_cast<PyObject*>(this),{dynamic}obj_{name}Type);
+        PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_{name}Type());
 {checkinit}
     }}
 ''',
-checkinit = IfElse('        initialized = true;'),
-dynamic = IfElse('','&'))
+checkinit = IfElse('        initialized = true;'))
 
 classdef_start = FormatWithCond('''
-extern PyTypeObject {dynamic}obj_{name}Type;
+extern PyTypeObject {dynamic[0]}obj_{name}Type;
+inline PyTypeObject *get_obj_{name}Type() {{ return {dynamic[1]}obj_{name}Type; }}
 
 struct obj_{name} {{
     PyObject_HEAD
@@ -142,7 +146,7 @@ struct obj_{name} {{
         PyMem_Free(ptr);
     }}
 ''',
-dynamic = IfElse('*'))
+dynamic = IfElse(['*',''],['','&']))
 
 classdef_end = '''
 };
@@ -150,6 +154,7 @@ classdef_end = '''
 
 classinit = '''
 int obj_{name}_init(obj_{name} *self,PyObject *args,PyObject *kwds) {{
+    if(UNLIKELY(!safe_to_call_init(get_obj_{name}Type(),reinterpret_cast<PyObject*>(self)))) return -1;
 {initdestruct}
     try {{
 {initcode}
@@ -161,7 +166,7 @@ int obj_{name}_init(obj_{name} *self,PyObject *args,PyObject *kwds) {{
 
 classtypedef = FormatWithCond('''
 PyTypeObject obj_{name}Type = {{
-    PyObject_HEAD_INIT(0)
+    PyObject_HEAD_INIT(&obj__CommonMetaType)
     0,                         /* ob_size */
     "{module}.{name}", /* tp_name */
     sizeof(obj_{name}), /* tp_basicsize */
@@ -204,49 +209,54 @@ PyTypeObject obj_{name}Type = {{
 ''',
 destructref = IfElse('reinterpret_cast<destructor>(&obj_{name}_dealloc)','0',True),
 methodsref = IfElse('obj_{name}_methods','0',True),
+membersref = IfElse('obj_{name}_members','0',True),
 getsetref = IfElse('obj_{name}_getset','0',True))
 
 class_dynamic_typedef = FormatWithCond('''
 PyTypeObject *obj_{name}Type;
 
-inline PyObject *create_obj_{name}Type() {{
+inline PyTypeObject *create_obj_{name}Type() {{
     PyObject *bases = PyTuple_New({baseslen});
     if(UNLIKELY(!bases)) return 0;
     {basesassign}
 
-    PyObject *name = PyString_FromString("{name}");
-    if(UNLIKELY(!name)) return 0;
+    PyObject *name = PyString_FromString("{module}.{name}");
+    if(UNLIKELY(!name)) {{
+        Py_DECREF(bases);
+        return 0;
+    }}
     PyObject *dict = PyDict_New();
     if(UNLIKELY(!dict)) {{
         Py_DECREF(bases);
         Py_DECREF(name);
         return 0;
     }}
-    PyObject *to = PyObjectCallFunctionObjArgs(PyType_Type,name,bases,dict,0);
-    PyTypeObject *type = reinterpret_cast<PyTypeObject*>(to);
+
+    PyTypeObject *type = reinterpret_cast<PyTypeObject*>(
+        PyObject_CallFunctionObjArgs(reinterpret_cast<PyObject*>(&obj__CommonMetaType),name,bases,dict,0));
+
     Py_DECREF(bases);
     Py_DECREF(name);
     Py_DECREF(dict);
     if(UNLIKELY(!type)) return 0;
 
-    type.tp_name = "{module}.{name}";
-    type.tp_basicsize = sizeof(obj_{name});
+    type->tp_basicsize = sizeof(obj_{name});
     {destructref}
-    type.tp_flags = Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE;
     {doc}
     {methodsref}
     {membersref}
     {getsetref}
-    type.tp_init = reinterpret_cast<initproc>(&obj_{name}_init);
+    type->tp_init = reinterpret_cast<initproc>(&obj_{name}_init);
 
-    return to;
+    return type;
 }}
 ''',
-destructref = IfElse('type.tp_dealloc = reinterpret_cast<destructor>(&obj_{name}_dealloc);',True),
-doc = IfElse('type.tp_doc = {doc};',True),
-methodsref = IfElse('type.tp_methods = obj_{name}_methods;',True),
-membersref = IfElse('type.tp_members = {membersref};',True),
-getsetref = IfElse('type.tp_getset = obj_{name}_getset;',True))
+basesassign = ForEach('PyTuple_SET_ITEM(bases,{0[0]},reinterpret_cast<PyObject*>({0[1]}));','\n    '),
+destructref = IfElse('type->tp_dealloc = reinterpret_cast<destructor>(&obj_{name}_dealloc);',format=True),
+doc = IfElse('type->tp_doc = {doc};',format=True),
+methodsref = IfElse('type->tp_methods = obj_{name}_methods;',format=True),
+membersref = IfElse('type->tp_members = obj_{name}_members;',format=True),
+getsetref = IfElse('type->tp_getset = obj_{name}_getset;',format=True))
 
 gccxmlinput_start = '''
 #include <Python.h>
@@ -290,6 +300,7 @@ module_start = '''
 #include <string>
 #include <limits.h>
 #include <assert.h>
+#include <typeinfo>
 {includes}
 #include "{module}.h"
 
@@ -313,7 +324,6 @@ const char *no_delete_msg = "This attribute cannot be deleted";
 const char *not_init_msg = "This object has not been initialized. Its __init__ method must be called first.";
 const char *unspecified_err_msg = "unspecified error";
 const char *no_keywords_msg = "keyword arguments are not accepted";
-
 
 
 struct get_arg {{
@@ -458,6 +468,118 @@ void NoSuchOverload(PyObject *args) {{
     }}
     throw py_error_set();
 }}
+
+
+// A common metatype for out types, to distinguish from user-defined types
+PyTypeObject obj__CommonMetaType = {{
+    PyObject_HEAD_INIT(0)
+    0,                         /* ob_size */
+    "{module}._internal_metaclass", /* tp_name */
+    PyType_Type.tp_basicsize,  /* tp_basicsize */
+    0,                         /* tp_itemsize */
+    0,                         /* tp_dealloc */
+    0,                         /* tp_print */
+    0,                         /* tp_getattr */
+    0,                         /* tp_setattr */
+    0,                         /* tp_compare */
+    0,                         /* tp_repr */
+    0,                         /* tp_as_number */
+    0,                         /* tp_as_sequence */
+    0,                         /* tp_as_mapping */
+    0,                         /* tp_hash */
+    0,                         /* tp_call */
+    0,                         /* tp_str */
+    0,                         /* tp_getattro */
+    0,                         /* tp_setattro */
+    0,                         /* tp_as_buffer */
+    Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE, /* tp_flags */
+    0,                         /* tp_doc */
+    0,                         /* tp_traverse */
+    0,                         /* tp_clear */
+    0,                         /* tp_richcompare */
+    0,                         /* tp_weaklistoffset */
+    0,                         /* tp_iter */
+    0,                         /* tp_iternext */
+    0,                         /* tp_methods */
+    0,                         /* tp_members */
+    0,                         /* tp_getset */
+    0,                         /* tp_base */
+    0,                         /* tp_dict */
+    0,                         /* tp_descr_get */
+    0,                         /* tp_descr_set */
+    0,                         /* tp_dictoffset */
+    0,                         /* tp_init */
+    0,                         /* tp_alloc */
+    0                          /* tp_new */
+}};
+
+/* Check if __init__ is being called on the wrong type.
+
+   Python already prevents methods from being used on objects that don't derive
+   from the appropriate class, so it is assumed that self->tp_mro contains our
+   type. */
+bool safe_to_call_init(PyTypeObject *target,PyObject *self) {{
+    assert(self->ob_type && self->ob_type->tp_mro);
+    PyObject *mro = self->ob_type->tp_mro;
+    for(unsigned int i = 0; reinterpret_cast<PyTypeObject*>(PyTuple_GET_ITEM(mro,i)) != target; ++i) {{
+        assert(i < PyTuple_GET_SIZE(mro));
+        if(UNLIKELY(PyTuple_GET_ITEM(mro,i)->ob_type == &obj__CommonMetaType)) {{
+            PyErr_SetString(PyExc_TypeError,"__init__ cannot be used directly on a derived type");
+            return false;
+        }}
+    }}
+    return true;
+}}
+
+
+struct obj__Common {{
+    PyObject_HEAD
+    bool initialized;
+}};
+
+/* trying to inherit from more than one type raises a TypeError if there isn't a
+   common base */
+PyTypeObject obj__CommonType = {{
+    PyObject_HEAD_INIT(&obj__CommonMetaType)
+    0,                         /* ob_size */
+    "{module}._internal_class", /* tp_name */
+    sizeof(obj__Common),       /* tp_basicsize */
+    0,                         /* tp_itemsize */
+    0,                         /* tp_dealloc */
+    0,                         /* tp_print */
+    0,                         /* tp_getattr */
+    0,                         /* tp_setattr */
+    0,                         /* tp_compare */
+    0,                         /* tp_repr */
+    0,                         /* tp_as_number */
+    0,                         /* tp_as_sequence */
+    0,                         /* tp_as_mapping */
+    0,                         /* tp_hash */
+    0,                         /* tp_call */
+    0,                         /* tp_str */
+    0,                         /* tp_getattro */
+    0,                         /* tp_setattro */
+    0,                         /* tp_as_buffer */
+    Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE, /* tp_flags */
+    0,                         /* tp_doc */
+    0,                         /* tp_traverse */
+    0,                         /* tp_clear */
+    0,                         /* tp_richcompare */
+    0,                         /* tp_weaklistoffset */
+    0,                         /* tp_iter */
+    0,                         /* tp_iternext */
+    0,                         /* tp_methods */
+    0,                         /* tp_members */
+    0,                         /* tp_getset */
+    0,                         /* tp_base */
+    0,                         /* tp_dict */
+    0,                         /* tp_descr_get */
+    0,                         /* tp_descr_set */
+    0,                         /* tp_dictoffset */
+    0,                         /* tp_init */
+    0,                         /* tp_alloc */
+    0                          /* tp_new */
+}};
 '''
 
 
@@ -468,16 +590,28 @@ PyMethodDef func_table[] = {{
 }};
 
 
-extern "C" SHARED(void) init{module}(void) {{'''
+extern "C" SHARED(void) init{module}(void) {{
+    obj__CommonMetaType.tp_base = &PyType_Type;
+    if(UNLIKELY(PyType_Ready(&obj__CommonMetaType) < 0)) return;
 
-module_class_prepare = '''
-    obj_{0}Type.tp_new = &PyType_GenericNew;
-    if(UNLIKELY(PyType_Ready(&obj_{0}Type) < 0)) return;
-'''
+    if(UNLIKELY(PyType_Ready(&obj__CommonType) < 0)) return;'''
+
+module_class_prepare = FormatWithCond('''
+    {base}
+    obj_{name}Type.tp_new = &PyType_GenericNew;
+    if(UNLIKELY(PyType_Ready(&obj_{name}Type) < 0)) return;
+''',
+base = IfElse('obj_{name}Type.tp_base = get_obj_{base}Type();',format=True))
 
 module_create = '''
     PyObject *m = Py_InitModule3("{name}",func_table,{doc});
     if(UNLIKELY(!m)) return;
+
+    Py_INCREF(&obj__CommonMetaType);
+    PyModule_AddObject(m,"_internal_metaclass",reinterpret_cast<PyObject*>(&obj__CommonMetaType));
+
+    Py_INCREF(&obj__CommonType);
+    PyModule_AddObject(m,"_internal_class",reinterpret_cast<PyObject*>(&obj__CommonType));
 '''
 
 module_class_add = '''
@@ -488,7 +622,7 @@ module_class_add = '''
 module_dynamic_class_add = '''
     obj_{0}Type = create_obj_{0}Type();
     if(UNLIKELY(!obj_{0}Type)) return;
-    PyModule_AddObject(m,"{0}",obj_{0}Type);
+    PyModule_AddObject(m,"{0}",reinterpret_cast<PyObject*>(obj_{0}Type));
 '''
 
 module_end = '''
@@ -497,19 +631,19 @@ module_end = '''
 #pragma GCC visibility pop
 '''
 
-# There is an interesting opportunity here. If the object is not of the desired
-# type, the class could be implemented such that all the functions are wrappers
-# to python method calls of the same name.
 get_base = FormatWithCond('''
 inline {type} &get_base_{name}(PyObject *o) {{
-    if(UNLIKELY(!PyObject_TypeCheck(o,{dynamic}obj_{name}Type))) {{
+    if(UNLIKELY(!PyObject_TypeCheck(o,get_obj_{name}Type()))) {{
         PyErr_SetString(PyExc_TypeError,"object is not an instance of {name}");
         throw py_error_set();
     }}
     return reinterpret_cast<obj_{name}*>(o)->base;
 }}
 ''',
-dynamic = IfElse('','&'))
+typecast = IfElse(
+    '*dynamic_cast<{type}*>(static_cast<void*>(&reinterpret_cast<obj_{name}*>(o)->base))',
+    'reinterpret_cast<obj_{name}*>(o)->base',
+    True))
 
 header_start = '''
 #pragma once
@@ -555,8 +689,34 @@ overload_func_call = FormatWithCond('''
 end:    ;
 ''',
 nokwdscheck = IfElse('''
-        if(PyDict_Size(kwds)) {
+        if(kwds && PyDict_Size(kwds)) {
             PyErr_SetString(PyExc_TypeError,no_keywords_msg);
             throw py_error_set();
         }
 '''))
+
+typecheck_start = '''
+{type} &get_base_{name}(PyObject *x,bool safe = true) {{
+'''
+typecheck_test = '''
+    if(PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{name}Type())))
+        return reinterpret_cast<obj_{name}*>(x)->base;
+'''
+typecheck_else = '''
+    if(UNLIKELY(safe && !PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{name}Type())))) {{
+        PyErr_SetString(PyExc_TypeError,"object is not an instance of {name}");
+        throw py_error_set();
+    }}
+    assert(PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{name}Type())));
+    return reinterpret_cast<obj_{name}*>(x)->base;
+}}
+'''
+
+typecheck_init_test = '''
+    if(PyObject_IsInstance(reinterpret_cast<PyObject*>(self),reinterpret_cast<PyObject*>(get_obj_{name}Type())))
+        return init_wrong_type();
+'''
+
+typecheck_init_else = '''
+    assert(PyObject_IsInstance(reinterpret_cast<PyObject*>(self),reinterpret_cast<PyObject*>(get_obj_{name}Type())));
+'''
