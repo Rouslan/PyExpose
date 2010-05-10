@@ -697,10 +697,20 @@ nokwdscheck = IfElse('''
 typecheck_start = '''
 {type} &get_base_{name}(PyObject *x,bool safe = true) {{
 '''
+
+# The
+# reinterpret_cast<long>(static_cast<{type}*>(reinterpret_cast<{othertype}*>(1))) != 1
+# part is added as an optimization trick. The purpose of the following code is
+# to get a reference to the correct location in memory. Because {othertype}
+# derives from more than one type, the memory for {type} wont necessarily be at
+# the beginning of {othertype}. If however, {type} does occur at the beginning,
+# this added part will evaluate to false and the rest of the expression should
+# be subject to dead code removal by the compiler.
 typecheck_test = '''
-    if(PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{name}Type())))
-        return reinterpret_cast<obj_{name}*>(x)->base;
+    if(reinterpret_cast<long>(static_cast<{type}*>(reinterpret_cast<{othertype}*>(1))) != 1 && PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{other}Type())))
+        return reinterpret_cast<obj_{other}*>(x)->base;
 '''
+
 typecheck_else = '''
     if(UNLIKELY(safe && !PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{name}Type())))) {{
         PyErr_SetString(PyExc_TypeError,"object is not an instance of {name}");

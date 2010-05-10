@@ -157,12 +157,14 @@ class MultiInheritNode:
         assert self.classes
         return self.classes[0]
 
-    def output(self,template):
+    def output(self,root):
         r = ''
         for d in self.derived_nodes:
-            r += d.output(template)
+            r += d.output(root)
         r += tmpl.typecheck_test.format(
-            name = self.main_type.cdef.name)
+            type = root.main_type.cdef.type,
+            othertype = self.main_type.cdef.type,
+            other = self.main_type.cdef.name)
         return r
 
     def downcast_func(self):
@@ -171,7 +173,7 @@ class MultiInheritNode:
             type = self.main_type.cdef.type)
 
         for d in self.derived_nodes:
-            r += d.output(tmpl.typecheck_test)
+            r += d.output(self)
 
         r += tmpl.typecheck_else.format(
             name = self.main_type.cdef.name)
