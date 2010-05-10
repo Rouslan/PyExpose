@@ -80,16 +80,14 @@ checkinit = IfElse(init_check.format(-1)))
 method = FormatWithCond('''
 PyObject *obj_{cname}_method_{name}(obj_{cname} *self{args}) {{
 {checkinit}
-    {type} &base = {typecast}
+{typecast}
     try {{
         {code}
     }} EXCEPT_HANDLERS(0)
 }}
 ''',
 checkinit = IfElse(init_check.format('0')),
-typecast = IfElse(
-    'get_base_{cname}(reinterpret_cast<PyObject*>(self),false);',
-    'self->base;',True))
+typecast = IfElse('    {type} &base = {typecast};',format=True))
 
 destruct = '''
 void obj_{name}_dealloc(obj_{name} *self) {{
@@ -241,6 +239,8 @@ inline PyTypeObject *create_obj_{name}Type() {{
     if(UNLIKELY(!type)) return 0;
 
     type->tp_basicsize = sizeof(obj_{name});
+    type->tp_dictoffset = 0;
+    type->tp_weaklistoffset = 0;
     {destructref}
     {doc}
     {methodsref}
@@ -300,7 +300,6 @@ module_start = '''
 #include <string>
 #include <limits.h>
 #include <assert.h>
-#include <typeinfo>
 {includes}
 #include "{module}.h"
 
@@ -470,7 +469,7 @@ void NoSuchOverload(PyObject *args) {{
 }}
 
 
-// A common metatype for out types, to distinguish from user-defined types
+// A common metatype for our types, to distinguish from user-defined types
 PyTypeObject obj__CommonMetaType = {{
     PyObject_HEAD_INIT(0)
     0,                         /* ob_size */

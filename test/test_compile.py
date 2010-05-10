@@ -44,11 +44,15 @@ public:
     BaseB() : BaseA(3) {}
 };
 
-class BaseC : public BaseA {
-    BaseC() : BaseA(4) {}
+class BaseC {
+public:
+    BaseC() : value(4) {}
+    int value;
+
+    double value_div(double x) { return double(value) / x; }
 };
 
-class Derived : public BaseA, public BaseB {
+class Derived : public BaseB, public BaseC {
 public:
 
 };
@@ -90,15 +94,16 @@ spec_file = '''<?xml version="1.0"?>
 
     <class type="BaseA">
         <init/>
-        <def func="value_times"/>
     </class>
 
     <class type="BaseB">
         <init/>
+        <def func="value_times"/>
     </class>
 
     <class type="BaseC">
         <init/>
+        <def func="value_div"/>
     </class>
 
     <class type="Derived">
@@ -183,9 +188,12 @@ class TestCompile(unittest.TestCase):
 
         try:
             der = testmodule.Derived()
-            print der.value_times(5)
+            self.assertEqual(der.value_times(5),15)
+            self.assertAlmostEqual(der.value_div(5),0.8)
         except Exception as e:
             self.fail(str(e))
+
+        self.assertRaises(TypeError,testmodule.BaseC.__init__,der)
 
 
 

@@ -361,6 +361,7 @@ class MemberDef:
             raise SpecificationError('"{0}" is not a member variable'.format(self.cmember))
 
         # TODO: offsetof is not relaiable for non-POD types (with g++, it will fail for classes with diamond virtual inheritance). A better solution is needed.
+        # TODO: Don't even allow this when the type has an exposed subclass with multiple-inheritance. Create get/set methods instead.
         return '{{const_cast<char*>("{name}"),{type},offsetof(obj_{classdefname},base) + offsetof({classname},{mname}),{flags},{doc}}}'.format(
             name = self.name,
             type = conv.member_macro(m.type),
@@ -431,6 +432,10 @@ class ClassDef:
         if argcode.prep:
             code = '{0};\n        {1};'.format(argcode.prep,code)
 
+        cast_code = None
+        if not cm.static:
+            cast_code = 'get_base_{0}(reinterpret_cast<PyObject*>(self),false)'.format(self.name) if need_cast else 'self->base'
+
         funcbody = tmpl.method.format(
             name = m.name,
             type = self.type,
@@ -438,7 +443,7 @@ class ClassDef:
             args = methargs,
             checkinit = not cm.static,
             code = code,
-            typecast = need_cast)
+            typecast = cast_code)
 
         tableentry = '{{"{name}",reinterpret_cast<PyCFunction>(obj_{cname}_method_{name}),{type},{doc}}}'.format(
             cname = self.name,
