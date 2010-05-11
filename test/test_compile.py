@@ -57,6 +57,8 @@ public:
 
 };
 
+int add_nine(BaseC &bc);
+
 #endif
 '''
 
@@ -79,6 +81,11 @@ std::string MyClass::greet() {
 
 
 BaseA::~BaseA() {}
+
+int add_nine(BaseC &bc) {
+    bc.value += 9;
+    return bc.value;
+}
 '''
 
 spec_file = '''<?xml version="1.0"?>
@@ -109,6 +116,8 @@ spec_file = '''<?xml version="1.0"?>
     <class type="Derived">
         <init/>
     </class>
+
+    <def func="add_nine"/>
 </module>
 '''
 
@@ -194,6 +203,9 @@ class TestCompile(unittest.TestCase):
             self.fail(str(e))
 
         self.assertRaises(TypeError,testmodule.BaseC.__init__,der)
+
+        self.assertEqual(testmodule.add_nine(der),13)
+        self.assertEqual(testmodule.add_nine(der),22)
 
 
 

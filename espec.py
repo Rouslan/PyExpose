@@ -267,12 +267,12 @@ class ClassTypeInfo:
         """Return a tree of lists of derived classes divided at classes with
         multiple inheritance.
 
-        The tree is the result when you take the tree containing containing all
-        direct and indirect derived classes of this class, plus this class, then
-        combine each class that does not inherit from more than one class (any
-        class, not necessarily from this tree), with its base class so each node
-        has a list that either starts with this class, or a class the inherits
-        from more than one class.
+        The tree is the result when you take the tree containing all direct and
+        indirect derived classes of this class, plus this class, then combine
+        each class that does not inherit from more than one class (any class,
+        not necessarily from this tree), with its base class so each node has a
+        list that either starts with this class, or a class the inherits from
+        more than one class.
 
         If there are no classes with multiple inheritance, the result will be a
         single node.
@@ -381,6 +381,58 @@ class GetSetDef:
 class DefDef:
     doc = None
 
+    def _output(self,cf,conv,prolog,type_extra,selfvar,funcnameprefix,accessor):
+        if len(cf.args) == 0:
+            type = 'METH_NOARGS'
+            funcargs = ',PyObject *'
+            argcode = cppcode('')
+        elif len(cf.args) == 1 and not cf.args[0].default:
+            type = 'METH_O'
+            funcargs = ',PyObject *arg'
+            argcode = cppcode(conv.frompy(cf.args[0].type)[0].format('arg'))
+        elif any(a.name for a in cf.args): # is there a named argument?
+            type = 'METH_VARARGS|METH_KEYWORDS'
+            funcargs = ',PyObject *args,PyObject *kwds'
+            argcode = conv.arg_parser(cf.args)
+        else:
+            type = 'METH_VARAGS'
+            funcargs = ',PyObject *args'
+            argcode = conv.arg_parser(cf.args,False)
+
+        code = '{0}\n        {1}{2}({3})'.format(argcode.prep,accessor,self.func,argcode.val)
+
+        if cf.returns == conv.void:
+            code += ';\n        Py_RETURN_NONE'
+        else:
+            code = 'return {0};'.format(conv.topy(cf.returns,self.retsemantic).format(code))
+
+
+        funcbody = tmpl.function.format(
+            funcnameprefix = funcnameprefix,
+            prolog = prolog,
+            selfvar = selfvar,
+            name = self.name,
+            args = funcargs,
+            code = code)
+
+        tableentry = '{{"{name}",reinterpret_cast<PyCFunction>({funcnameprefix}{name}),{type}{typeextra},{doc}}}'.format(
+            funcnameprefix = funcnameprefix,
+            name = self.name,
+            type = type,
+            typeextra = type_extra,
+            doc = quote_c(self.doc) if self.doc else '0')
+
+        return tableentry,funcbody
+
+    def output(self,cppint,conv):
+        cf = cppint.find(self.func)
+
+        if not isinstance(cf,gccxml.CPPFunction):
+            raise SpecificationError('"{0}" is not a function'.format(self.func))
+
+        return self._output(cf,conv,'','','PyObject*','func_','')
+
+
 class ClassDef:
     def __init__(self):
         self.constructors = []
@@ -402,58 +454,22 @@ class ClassDef:
         if not isinstance(cm,gccxml.CPPMethod):
             raise SpecificationError('"{0}" is not a method'.format(m.func))
 
-        if len(cm.args) == 0:
-            type = 'METH_NOARGS'
-            methargs = ',PyObject *'
-            argcode = cppcode('')
-        elif len(cm.args) == 1 and not cm.args[0].default:
-            type = 'METH_O'
-            methargs = ',PyObject *arg'
-            argcode = cppcode(conv.frompy(cm.args[0].type)[0].format('arg'))
-        elif any(a.name for a in cm.args): # is there a named argument?
-            type = 'METH_VARARGS|METH_KEYWORDS'
-            methargs = ',PyObject *args,PyObject *kwds'
-            argcode = conv.arg_parser(cm.args)
-        else:
-            type = 'METH_VARAGS'
-            methargs = ',PyObject *args'
-            argcode = conv.arg_parser(cm.args,False)
+        prolog = ''
+        accessor = 'base.'
+        type_extra = ''
 
-        code = 'base.'
         if cm.static:
-            type += '|METH_STATIC'
-            code = '{0}::'.format(self.type)
-
-        code = '{0}{1}({2})'.format(code,m.func,argcode.val)
-
-        if cm.returns == conv.void:
-            code += ';\n        Py_RETURN_NONE'
+            type_extra = '|METH_STATIC'
+            accessor = '{0}::'.format(self.type)
         else:
-            code = 'return {0};'.format(conv.topy(cm.returns,m.retsemantic).format(code))
+            prolog = tmpl.init_check.format('0') + '\n'
 
-        if argcode.prep:
-            code = '{0};\n        {1};'.format(argcode.prep,code)
+            if need_cast:
+                prolog += '    {type} &base = {typecast};\n'.format(
+                    type = self.type,
+                    typecast = 'get_base_{0}(reinterpret_cast<PyObject*>(self),false)'.format(self.name) if need_cast else 'self->base')
 
-        cast_code = None
-        if not cm.static:
-            cast_code = 'get_base_{0}(reinterpret_cast<PyObject*>(self),false)'.format(self.name) if need_cast else 'self->base'
-
-        funcbody = tmpl.method.format(
-            name = m.name,
-            type = self.type,
-            cname = self.name,
-            args = methargs,
-            checkinit = not cm.static,
-            code = code,
-            typecast = cast_code)
-
-        tableentry = '{{"{name}",reinterpret_cast<PyCFunction>(obj_{cname}_method_{name}),{type},{doc}}}'.format(
-            cname = self.name,
-            name = m.name,
-            type = type,
-            doc = quote_c(m.doc) if m.doc else '0')
-
-        return tableentry,funcbody
+        return m._output(cm,conv,prolog,type_extra,'obj_{0} *self'.format(self.name),'obj_{0}_method_'.format(self.name),accessor)
 
     def output(self,out,module,c,dynamic,bases,need_method_cast):
         assert isinstance(c,gccxml.CPPClass)
@@ -854,16 +870,19 @@ class Conversion:
 
 
         tod = 'PyToDouble({0})'
+        # The first value of each tuple specifies whether the converted type is
+        # a reference to the original value. If not, it cannot be passed by
+        # non-const reference.
         self.__frompy = {
-            self.sshort : 'PyToShort({0})',
-            self.ushort : 'PyToUShort({0})',
-            self.sint : 'PyToInt({0})',
-            self.uint : 'PyToUInt({0})',
-            self.slong : 'PyToLong({0})',
-            self.ulong : 'PyToULong({0})',
-            self.float : 'static_cast<float>(PyToDouble({0}))',
-            self.double : tod,
-            self.long_double : tod
+            self.sshort : (False,'PyToShort({0})'),
+            self.ushort : (False,'PyToUShort({0})'),
+            self.sint : (False,'PyToInt({0})'),
+            self.uint : (False,'PyToUInt({0})'),
+            self.slong : (False,'PyToLong({0})'),
+            self.ulong : (False,'PyToULong({0})'),
+            self.float : (False,'static_cast<float>(PyToDouble({0}))'),
+            self.double : (False,tod),
+            self.long_double : (False,tod)
         }
 
         ts = 'T_STRING'
@@ -890,8 +909,8 @@ class Conversion:
             self.basic_types[TYPE_LONG].add(self.slonglong)
             self.basic_types[TYPE_LONG].add(self.ulonglong)
 
-            self.__frompy[self.slonglong] = 'PyToLongLong({0})'
-            self.__frompy[self.ulonglong] = 'PyToULongLong({0})'
+            self.__frompy[self.slonglong] = (False,'PyToLongLong({0})')
+            self.__frompy[self.ulonglong] = (False,'PyToULongLong({0})')
 
             self.__pymember[self.slonglong] = 'T_LONGLONG'
             self.__pymember[self.ulonglong] = 'T_ULONGLONG'
@@ -921,22 +940,23 @@ class Conversion:
         assert isinstance(t,gccxml.CPPType)
 
         r = self.__frompy.get(t)
-        if r: return r,t
+        ref = lambda x: gccxml.CPPReferenceType(x) if r[0] else x
+        if r: return r[1],ref(t)
 
-        # if t is a pointer or reference to a const datatype, we can pass the address of, or a reference to, the underlying datatype
+        # check if t is a pointer or reference to a type we can convert
         if isinstance(t,gccxml.CPPReferenceType):
-            if const_qualified(t.type):
-                nt = t.type.type
-                r = self.__frompy.get(nt)
-                if r: return r, nt
+            nt = strip_cvq(t.type)
+            r = self.__frompy.get(nt)
+            if r and (r[0] or const_qualified(t.type)):
+                return r[1], ref(nt)
         elif isinstance(t,gccxml.CPPPointerType):
-            if const_qualified(t.type):
-                nt = t.type.type
-                r = self.__frompy.get(nt)
-                if r: return '*({0})'.format(r), nt
+            nt = strip_cvq(t.type)
+            r = self.__frompy.get(nt)
+            if r and(r[0] or const_qualified(t.type)):
+                return '*({0})'.format(r[1]), ref(nt)
         elif isinstance(t,gccxml.CPPCvQualifiedType):
-            r = self.__frompy(t)
-            if r: return r, t.type
+            r = self.__frompy.get(t.type)
+            if r: return r[1], ref(t.type)
 
         raise SpecificationError('No conversion from "PyObject*" to "{0}" is registered'.format(t.typestr()))
 
@@ -1104,7 +1124,7 @@ class ModuleDef:
             classes[c] = ClassTypeInfo(cdef,c)
 
             # these assume the class has copy constructors
-            conv.add_conv(c,'new obj_{0}({{0}})'.format(cdef.name),'get_base_{0}({{0}})'.format(cdef.name))
+            conv.add_conv(c,'new obj_{0}({{0}})'.format(cdef.name),(True,'get_base_{0}({{0}})'.format(cdef.name)))
             conv.cppclasstopy[c] = cdef
 
         for c in classes.values():
@@ -1119,11 +1139,14 @@ class ModuleDef:
         for c in classes:
             c.output(out,self.name)
 
+        functable = []
         for m in self.functions:
-            m.output(out,self.name,cppint)
+            tentry,body = m.output(cppint,conv)
+            print >> out.cpp, body
+            functable.append(tentry)
 
         print >> out.cpp, tmpl.module_init.format(
-            funclist = '',
+            funclist = functable,
             module = self.name)
 
         for c in classes:

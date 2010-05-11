@@ -77,18 +77,6 @@ int obj_{cname}_set{name}({ctype} *self,PyObject *value,void *closure) {{
 ''',
 checkinit = IfElse(init_check.format(-1)))
 
-method = FormatWithCond('''
-PyObject *obj_{cname}_method_{name}(obj_{cname} *self{args}) {{
-{checkinit}
-{typecast}
-    try {{
-        {code}
-    }} EXCEPT_HANDLERS(0)
-}}
-''',
-checkinit = IfElse(init_check.format('0')),
-typecast = IfElse('    {type} &base = {typecast};',format=True))
-
 destruct = '''
 void obj_{name}_dealloc(obj_{name} *self) {{
     if(self->initialized) self->base.~{dname}();
@@ -582,7 +570,7 @@ PyTypeObject obj__CommonType = {{
 '''
 
 
-module_init = '''
+module_init = FormatWithCond('''
 PyMethodDef func_table[] = {{
 {funclist}
     {{0}}
@@ -593,7 +581,8 @@ extern "C" SHARED(void) init{module}(void) {{
     obj__CommonMetaType.tp_base = &PyType_Type;
     if(UNLIKELY(PyType_Ready(&obj__CommonMetaType) < 0)) return;
 
-    if(UNLIKELY(PyType_Ready(&obj__CommonType) < 0)) return;'''
+    if(UNLIKELY(PyType_Ready(&obj__CommonType) < 0)) return;''',
+funclist = ForEach('    {0},','\n'))
 
 module_class_prepare = FormatWithCond('''
     {base}
@@ -721,11 +710,11 @@ typecheck_else = '''
 }}
 '''
 
-typecheck_init_test = '''
-    if(PyObject_IsInstance(reinterpret_cast<PyObject*>(self),reinterpret_cast<PyObject*>(get_obj_{name}Type())))
-        return init_wrong_type();
-'''
-
-typecheck_init_else = '''
-    assert(PyObject_IsInstance(reinterpret_cast<PyObject*>(self),reinterpret_cast<PyObject*>(get_obj_{name}Type())));
+function = '''
+PyObject *{funcnameprefix}{name}({selfvar}{args}) {{
+{prolog}
+    try {{
+        {code}
+    }} EXCEPT_HANDLERS(0)
+}}
 '''

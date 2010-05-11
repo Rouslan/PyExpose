@@ -189,6 +189,9 @@ class CPPArrayType(CPPType):
 class CPPReferenceType(CPPType):
     __slots__ = 'type','size'
 
+    def __init__(self,type = None):
+        self.type = type
+
     link = link_item('type')
 
     def _typestr(self,deriv):
