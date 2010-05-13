@@ -104,24 +104,36 @@ class LevelBaseTraverser:
         self.nodes = [b.type for b in itertools.chain.from_iterable(n.bases for n in temp) if self.access >= b.access]
         return temp
 
-def namespace_find(self,x):
+def _namespace_find(self,x):
     parts = x.split('::',1)
     levels = LevelBaseTraverser(self) if isinstance(self,gccxml.CPPClass) else [[self]]
     for l in levels:
         matches = [m for m in itertools.chain.from_iterable(i.members for i in l) if hasattr(m,"name") and m.name == parts[0]]
 
-        if len(matches) > 1:
-            raise SpecificationError('"{0}" is ambiguous'.format(parts[0]))
-
         if matches:
             if len(parts) == 2:
-                if not isinstance(matches[0],Namespace):
+                if not isinstance(matches[0],(gccxml.CPPClass,gccxml.CPPNamespace)):
                     raise SpecificationError('"{0}" is not a namespace, struct or class type'.format(parts[0]))
-                return matches[0].find(parts[1])
+                assert len(matches) == 0
+                return _namespace_find(matches[0],parts[1])
 
-            return matches[0]
+            return matches
+    return []
 
-    raise SpecificationError('could not find "{0}" in this scope'.format(parts[0]))
+def namespace_find(self,x):
+    if x.startswith('::'): # explicit global namespace
+        while self.context: self = self.context
+        r = _namespace_find(self,x[2:])
+        if r: return r
+    else:
+        # if the symbol isn't found in this scope, check the outer scope
+        while self:
+            r = _namespace_find(self,x)
+            if r: return r
+            self = self.context
+
+    raise SpecificationError('could not find "{0}"'.format(x))
+
 gccxml.CPPClass.find = namespace_find
 gccxml.CPPNamespace.find = namespace_find
 
@@ -358,7 +370,7 @@ class MemberDef:
     doc = None
 
     def table_entry(self,classdef,classint,conv):
-        m = classint.find(self.cmember)
+        m = classint.find(self.cmember)[0]
         if not isinstance(m,gccxml.CPPField):
             raise SpecificationError('"{0}" is not a member variable'.format(self.cmember))
 
@@ -382,29 +394,34 @@ class DefDef:
     doc = None
 
     def _output(self,cf,conv,prolog,type_extra,selfvar,funcnameprefix,accessor):
-        if len(cf.args) == 0:
+        code = '{0}{1}({{0}})'.format(accessor,self.func)
+        def call_code(x):
+            return Conversion.Func(code + '; Py_RETURN_NONE;',True) if x.returns == conv.void else \
+                Conversion.Func('return {0};'.format(conv.topy(x.returns,self.retsemantic).format(code)),True)
+
+        arglens = [len(f.args) for f in cf]
+        maxargs = max(len(f.args) for f in cf)
+        minargs = min(map(mandatory_args,cf))
+
+        if maxargs == 0:
+            assert len(cf) == 1
             type = 'METH_NOARGS'
             funcargs = ',PyObject *'
-            argcode = cppcode('')
-        elif len(cf.args) == 1 and not cf.args[0].default:
-            type = 'METH_O'
-            funcargs = ',PyObject *arg'
-            argcode = cppcode(conv.frompy(cf.args[0].type)[0].format('arg'))
-        elif any(a.name for a in cf.args): # is there a named argument?
-            type = 'METH_VARARGS|METH_KEYWORDS'
-            funcargs = ',PyObject *args,PyObject *kwds'
-            argcode = conv.arg_parser(cf.args)
+            code = Tab().line(call_code(cf[0]).call.format(''))
         else:
-            type = 'METH_VARAGS'
-            funcargs = ',PyObject *args'
-            argcode = conv.arg_parser(cf.args,False)
-
-        code = '{0}\n        {1}{2}({3})'.format(argcode.prep,accessor,self.func,argcode.val)
-
-        if cf.returns == conv.void:
-            code += ';\n        Py_RETURN_NONE'
-        else:
-            code = 'return {0};'.format(conv.topy(cf.returns,self.retsemantic).format(code))
+            argss = [(call_code(f),f.args) for f in cf]
+            if maxargs == 1 and minargs == 1 and not cf[0].args[0].name:
+                type = 'METH_O'
+                funcargs = ',PyObject *arg'
+                code = conv.function_call_1arg(argss)
+            elif len(cf) == 1 and any(a.name for a in cf[0].args): # is there a named argument?
+                type = 'METH_VARARGS|METH_KEYWORDS'
+                funcargs = ',PyObject *args,PyObject *kwds'
+                code = conv.function_call(argss,use_kwds = True)
+            else:
+                type = 'METH_VARARGS'
+                funcargs = ',PyObject *args'
+                code = conv.function_call(argss,use_kwds = False)
 
 
         funcbody = tmpl.function.format(
@@ -427,7 +444,7 @@ class DefDef:
     def output(self,cppint,conv):
         cf = cppint.find(self.func)
 
-        if not isinstance(cf,gccxml.CPPFunction):
+        if not isinstance(cf[0],gccxml.CPPFunction):
             raise SpecificationError('"{0}" is not a function'.format(self.func))
 
         return self._output(cf,conv,'','','PyObject*','func_','')
@@ -451,14 +468,17 @@ class ClassDef:
     def method(self,m,classint,conv,need_cast):
         cm = classint.find(m.func)
 
-        if not isinstance(cm,gccxml.CPPMethod):
+        if not isinstance(cm[0],gccxml.CPPMethod):
             raise SpecificationError('"{0}" is not a method'.format(m.func))
 
         prolog = ''
         accessor = 'base.'
         type_extra = ''
 
-        if cm.static:
+        if any(c.static != cm[0].static for c in cm):
+            raise SpecificationError('The function overloads must be either be all static or all non-static',method=self.name)
+
+        if cm[0].static:
             type_extra = '|METH_STATIC'
             accessor = '{0}::'.format(self.type)
         else:
@@ -527,7 +547,7 @@ class ClassDef:
             methodsref = True
 
 
-        func = 'new(&self->base) ' + self.type
+        func = Conversion.Func('new(&self->base) {0}({{0}});'.format(self.type),False)
         if self.constructors:
             if self.constructors[0].overload is None:
                 # no overload specified means use all constructors
@@ -539,7 +559,7 @@ class ClassDef:
         else:
             cons = [(func,c.getConstructor().args)]
 
-        cons = out.conv.function_call(cons,True)
+        cons = out.conv.function_call(cons,'-1',True)
 
         print >> out.cpp, tmpl.classinit.format(
             name = self.name,
@@ -634,12 +654,14 @@ class Tab:
         if isinstance(val,unicode):
             return val + self.__unicode__()
         if isinstance(val,str):
-            return val + self.__str__() + val
+            return val + self.__str__()
         return Tab(self.amount + val)
 
     def __sub__(self,val):
         return Tab(self.amount - val)
-    __rsub__ = __sub__
+
+    def line(self,x):
+        return self.__unicode__() + x + u'\n' if isinstance(x,unicode) else self.__str__() + x + '\n'
 
 
 
@@ -703,7 +725,7 @@ class ArgBranchNode:
         self.objects.sort(key = (lambda x: base_count(strip_refptr(x[0]))),reverse = True)
         for n in self.child_nodes(): n.sort_objects()
 
-    def basic_and_objects_code(self,conv,argconv,skipsize,ind,exactlenchecked = False):
+    def basic_and_objects_code(self,conv,argconv,skipsize,ind,get_arg,exactlenchecked = False):
         r = ''
 
         # check for general classes
@@ -712,8 +734,8 @@ class ArgBranchNode:
                 check,cast = conv.check_and_cast(t)
                 r += '{0}if({1}) {{\n{2}{0}}}\n'.format(
                     ind,
-                    check.format('PyTuple_GET_ITEM(args,{0})'.format(len(argconv))),
-                    branch.get_code(conv,argconv + [cast],skipsize,ind + 1,exactlenchecked))
+                    check.format(get_arg(len(argconv))),
+                    branch.get_code(conv,argconv + [cast],skipsize,ind + 1,get_arg,exactlenchecked))
 
 
         # check for numeric types
@@ -724,50 +746,55 @@ class ArgBranchNode:
         if nums:
             for c,t in zip(coercion[nums],[TYPE_FLOAT,TYPE_INT,TYPE_LONG]):
                 if c:
-                    r += '{0}if({2}(PyTuple_GET_ITEM(args,{1}))) {{\n{3}{0}}}\n'.format(
+                    r += '{0}if({2}({1})) {{\n{3}{0}}}\n'.format(
                         ind,
-                        len(argconv),
+                        get_arg(len(argconv)),
                         c,
-                        self.basic[t].get_code(conv,argconv + [None],skipsize,ind + 1,exactlenchecked))
+                        self.basic[t].get_code(conv,argconv + [None],skipsize,ind + 1,get_arg,exactlenchecked))
 
 
         # check for string types
         if self.basic[TYPE_UNICODE]:
-            r += '{0}if(PyUnicode_Check(PyTuple_GET_ITEM(args,{1})){2}) {{\n{3}{0}}}\n'.format(
+            r += '{0}if(PyUnicode_Check({1}){2}) {{\n{3}{0}}}\n'.format(
                 ind,
-                len(argconv),
+                get_arg(len(argconv)),
                 '' if self.basic[TYPE_STR] else ' && PyString_Check(o)',
-                self.basic[TYPE_UNICODE].get_code(conv,argconv + [None],skipsize,ind + 1,exactlenchecked))
+                self.basic[TYPE_UNICODE].get_code(conv,argconv + [None],skipsize,ind + 1,get_arg,exactlenchecked))
 
         if self.basic[TYPE_STR]:
-            r += '{0}if(PyString_Check(PyTuple_GET_ITEM(args,{1}))) {{\n{2}{0}}}\n'.format(
+            r += '{0}if(PyString_Check({1})) {{\n{2}{0}}}\n'.format(
                 ind,
-                len(argconv),
-                self.basic[TYPE_STR].get_code(conv,argconv + [None],skipsize,ind + 1,exactlenchecked))
+                get_arg(len(argconv)),
+                self.basic[TYPE_STR].get_code(conv,argconv + [None],skipsize,ind + 1,get_arg,exactlenchecked))
 
         return r
 
-    def call_code(self,conv,argconv,ind):
-        return '{0}{1}(\n{0}    {2});\n{0}goto end;\n'.format(
-            ind,
-            self.call[0],
-            ',\n{0}    '.format(ind).join(
-                (c or conv.frompy(a.type)[0]).format('PyTuple_GET_ITEM(args,{0})'.format(i)) for i,a,c in zip(itertools.count(),self.call[1],argconv)))
+    def call_code(self,conv,argconv,ind,get_arg):
+        func,args = self.call
 
-    def get_code(self,conv,argconv = [],skipsize = 0,ind = Tab(2),exactlenchecked = False):
+        r = ind.line(
+            func.call.format('\n    {0}{1}'.format(ind,
+                ',\n{0}    '.format(ind).join(
+                    (c or conv.frompy(a.type)[0]).format(get_arg(i)) for i,a,c in zip(itertools.count(),args,argconv)))))
+        if not func.returns:
+            r += ind.line('goto end;')
+
+        return r
+
+    def get_code(self,conv,argconv = [],skipsize = 0,ind = Tab(2),get_arg = lambda x: 'PyTuple_GET_ITEM(args,{0})'.format(x),exactlenchecked = False):
         anychildnodes = any(self.basic.itervalues()) or self.objects
 
         assert anychildnodes or self.call
 
         r = ''
-        get_size = '{0}if(PyTuple_GET_SIZE(args) {1} {2}) {{\n'
+        get_size = ind.line('if(PyTuple_GET_SIZE(args) {1} {2}) {{')
 
         if skipsize > 0:
             assert anychildnodes
 
-            r += self.basic_and_objects_code(conv,argconv,skipsize-1,ind,exactlenchecked)
+            r += self.basic_and_objects_code(conv,argconv,skipsize-1,ind,get_arg,exactlenchecked)
             if self.call:
-                r += self.call_code(conv,argconv,ind)
+                r += self.call_code(conv,argconv,ind,get_arg)
 
         elif anychildnodes:
             # if the exact length was tested, "skipsize" should cover the rest of the arguments
@@ -780,35 +807,32 @@ class ArgBranchNode:
                 r += get_size.format(ind,'==',len(argconv) + min_args)
                 ind += 1
 
-                r += self.basic_and_objects_code(conv,argconv,min_args - 1,ind,True)
+                r += self.basic_and_objects_code(conv,argconv,min_args - 1,ind,get_arg,True)
                 if self.call:
-                    r += self.call_code(conv,argconv,ind)
+                    r += self.call_code(conv,argconv,ind,get_arg)
 
                 ind -= 1
-                r += ind + '}\n'
+                r += ind.line('}')
             else:
-                r += get_size.format(ind,'>',len(argconv) + min_args)
-                ind += 1
+                r += get_size.format(ind,'>',len(argconv))
 
-                r += self.basic_and_objects_code(conv,argconv,min_args - 1,ind)
-
-                ind -= 1
+                r += self.basic_and_objects_code(conv,argconv,min_args - 1,ind + 1,get_arg)
 
                 if self.call:
-                    r += ind + '} else {\n'
-                    r += self.call_code(conv,argconv,ind+1)
+                    r += ind.line('} else {')
+                    r += self.call_code(conv,argconv,ind+1,get_arg)
 
-                r += ind + '}\n'
+                r += ind.line('}')
 
         elif exactlenchecked:
             assert self.call
-            r += self.call_code(conv,argconv,ind)
+            r += self.call_code(conv,argconv,ind,get_arg)
 
         else:
             assert self.call
             r += get_size.format(ind,'==',len(argconv))
-            r += self.call_code(conv,argconv,ind + 1)
-            r += ind + '}\n'
+            r += self.call_code(conv,argconv,ind + 1,get_arg)
+            r += ind.line('}')
 
         return r
 
@@ -817,17 +841,26 @@ class ArgBranchNode:
 
 
 class Conversion:
+    class Func:
+        def __init__(self,call,returns):
+            """
+            call -- a format string with {0}
+            returns -- whether or not the expression returns from the caller
+            """
+            self.call = call
+            self.returns = returns
+
     def __init__(self,tns):
         # get the types specified by the typedefs
         for x in ("bool","sint","uint","sshort","ushort","slong","ulong",
                   "float","double","long_double","size_t","schar","uchar",
                   "char","wchar_t","py_unicode","void","stdstring",
                   "stdwstring"):
-            setattr(self,x,tns.find("type_"+x).type)
+            setattr(self,x,tns.find("type_"+x)[0].type)
 
         try:
             for x in ("slonglong","ulonglong"):
-                setattr(self,x,tns.find("type_"+x).type)
+                setattr(self,x,tns.find("type_"+x)[0].type)
         except SpecificationError:
             self.slonglong = None
             self.ulonglong = None
@@ -855,7 +888,8 @@ class Conversion:
             self.long_double : 'PyFloat_FromDouble(static_cast<double>({0}))',
             self.size_t : 'PyLong_FromSize_t({0})',
             self.pyobject : '{0}',
-            self.stdstring : 'StringToPy({0})'
+            self.stdstring : 'StringToPy({0})',
+            self.cstring : 'PyString_FromString({0})'
         }
 
         self.basic_types = {
@@ -882,7 +916,8 @@ class Conversion:
             self.ulong : (False,'PyToULong({0})'),
             self.float : (False,'static_cast<float>(PyToDouble({0}))'),
             self.double : (False,tod),
-            self.long_double : (False,tod)
+            self.long_double : (False,tod),
+            self.cstring : (False,'PyString_AsString({0})')
         }
 
         ts = 'T_STRING'
@@ -964,7 +999,7 @@ class Conversion:
         try:
             return self.__pymember[t]
         except LookupError:
-            # maybe this should be done automatically
+            # TODO: this should be done automatically
             raise SpecificationError('A member of type "{0}" cannot be exposed directly. Define a getter and/or setter for this value instead.'.format(t.typestr()))
 
     def check_and_cast(self,t):
@@ -973,15 +1008,13 @@ class Conversion:
         cast = '{0}reinterpret_cast<obj_{1}*>({{0}})->base'.format('&' if isinstance(t,gccxml.CPPPointerType) else '',cdef.name)
         return check,cast
 
-    def arg_parser(self,args,use_kwds = True,indent = None):
+    def arg_parser(self,args,use_kwds = True,indent = Tab(2)):
         # even if we are not taking any arguments, get_arg::finish should still be called (to report an error if arguments were received)
-
-        if indent is None: indent = ' ' * 8
 
         prep = '{0}get_arg ga(args,{1});\n'.format(indent,'kwds' if use_kwds else '0')
 
         if any(a.default for a in args):
-            prep += indent + 'PyObject *temp;\n'
+            prep += indent.line('PyObject *temp;')
 
         for i,a in enumerate(args):
             frompy, frompytype = self.frompy(a.type)
@@ -992,30 +1025,38 @@ class Conversion:
             else:
                 prep += '{0}{1} = {2};\n'.format(indent,var,frompy.format('ga({0},true)'.format(name)))
 
-        prep += indent + 'ga.finished();\n'
+        prep += indent.line('ga.finished();')
 
         return cppcode(','.join('_{0}'.format(i) for i in range(len(args))), prep)
 
-    def function_call(self,calls,use_kwds = True):
+    def function_call(self,calls,errval = '0',use_kwds = True):
         """Generate code to call one function from a list of overloads.
 
-        calls -- A sequence of tuples containing a function (str) and a list of arguments
-        use_kwds -- whether keyword arguments are available or not (does not apply if len(calls) is greater than 1)
+        calls -- A sequence of tuples containing a function (Conversion.Func)
+            and a list of arguments
+        errval -- The value to return to signal an error
+        use_kwds -- whether keyword arguments are available or not (does not
+            apply if len(calls) is greater than 1)
 
-        Caveat: only position arguments are checked, unless len(calls) == 1. Use of keywords will result in an exception being thrown.
+        Caveat: only position arguments are checked, unless len(calls) == 1. Use
+        of keywords will result in an exception being thrown.
 
-        Caveat: the resulting algorithm for overload resolution is different from the C++ standard. It will compare one argument at a time
-        and will stop after finding a viable match. The parallel arguments are sorted from most to least specific, however given classes S
-        and B, where B is the base class of S, if there are two overloads S,B,B and B,S,S and the arguments given are S,S,S then S,B,B will
-        be chosen because the first argument was a better match. The same limitation applies when S and B are built-in types that can be
-        converted to one-another (unicode vs str and float vs int vs long).
+        Caveat: the resulting algorithm for overload resolution is different
+        from the C++ standard. It will compare one argument at a time and will
+        stop after finding a viable match. The parallel arguments are sorted
+        from most to least specific, however given classes S and B, where B is
+        the base class of S, if there are two overloads S,B,B and B,S,S and the
+        arguments given are S,S,S then S,B,B will be chosen because the first
+        argument was a better match. The same limitation applies when S and B
+        are built-in types that can be converted to one-another (unicode vs str
+        and float vs int vs long).
 
         """
         assert calls
 
         if len(calls) == 1:
             code = self.arg_parser(calls[0][1],use_kwds)
-            return '{0}        {1}({2});\n'.format(code.prep,calls[0][0],code.val)
+            return code.prep + Tab(2).line(calls[0][0].call.format(code.val))
 
         # turn default values into overloads
         ovlds = []
@@ -1034,7 +1075,26 @@ class Conversion:
 
         return tmpl.overload_func_call.format(
             inner = tree.get_code(self),
-            nokwdscheck = use_kwds)
+            nokwdscheck = use_kwds,
+            args = 'args',
+            errval = errval,
+            endlabel = len(calls) > 1 and not all(c[0].returns for c in calls))
+
+    def function_call_1arg(self,calls,errval='0'):
+        assert calls
+
+        if len(calls) == 1:
+            return calls[0][0].call.format(self.frompy(calls[0][1][0].type))
+
+        tree = self.generate_arg_tree([(x[1],x) for x in calls])
+        tree.sort_objects()
+
+        return tmpl.overload_func_call.format(
+            inner = tree.basic_and_objects_code(self,[],0,Tab(2),(lambda x: 'arg'),True),
+            nokwdscheck = False,
+            args = 'arg',
+            errval = errval,
+            endlabel = False)
 
     def add_conv(self,t,to,from_):
         if to: self.__topy[t] = to
@@ -1089,7 +1149,7 @@ class ModuleDef:
 
     def _collect_overload_arg_lists(self,tns):
         for i,x in enumerate(self._funcs_with_overload()):
-            f = tns.find('dummy_func_{0}'.format(i))
+            f = tns.find('dummy_func_{0}'.format(i))[0]
             assert isinstance(f,gccxml.CPPFunction)
             x.overload = f.args
 
@@ -1097,7 +1157,7 @@ class ModuleDef:
         return "\n".join('#include "{0}"'.format(i) for i in self.includes)
 
     def write_file(self,path,cppint):
-        tns = cppint.find(TEST_NS)
+        tns = cppint.find(TEST_NS)[0]
 
         self._collect_overload_arg_lists(tns)
 
@@ -1118,7 +1178,7 @@ class ModuleDef:
         classes = {}
 
         for cdef in self.classes:
-            c = cppint.find(cdef.type)
+            c = cppint.find(cdef.type)[0]
             if not isinstance(c,gccxml.CPPClass):
                 raise SpecificationError('"{0}" is not a struct/class type'.format(cdef.type))
             classes[c] = ClassTypeInfo(cdef,c)

@@ -431,29 +431,33 @@ inline PyObject *StringToPy(const std::string &s) {{
 }}
 
 void NoSuchOverload(PyObject *args) {{
-    if(PyTuple_GET_SIZE(args)) {{
-        unsigned int needed = PyTuple_GET_SIZE(args); // len(args) - 1 commas and a terminating NUL
-        for(unsigned int i = 0; i < PyTuple_GET_SIZE(args); ++i) {{
-            assert(PyTuple_GET_ITEM(args,i)->ob_type && PyTuple_GET_ITEM(args,i)->ob_type->tp_name);
-            needed += strlen(PyTuple_GET_ITEM(args,i)->ob_type->tp_name);
+    const char *const format = "no overload takes (%s)";
+    if(PyTuple_Check(args)) {{
+        if(PyTuple_GET_SIZE(args)) {{
+            unsigned int needed = PyTuple_GET_SIZE(args); // len(args) - 1 commas and a terminating NUL
+            for(unsigned int i = 0; i < PyTuple_GET_SIZE(args); ++i) {{
+                assert(PyTuple_GET_ITEM(args,i)->ob_type && PyTuple_GET_ITEM(args,i)->ob_type->tp_name);
+                needed += strlen(PyTuple_GET_ITEM(args,i)->ob_type->tp_name);
+            }}
+
+            char *msg = new char[needed];
+            char *cur = msg;
+
+            for(unsigned int i = 0; i < PyTuple_GET_SIZE(args); ++i) {{
+                if(i) *cur++ = ',';
+                const char *other = PyTuple_GET_ITEM(args,i)->ob_type->tp_name;
+                while(*other) *cur++ = *other++;
+            }}
+            *cur = 0;
+
+            PyErr_Format(PyExc_TypeError,format,msg);
+            delete[] msg;
+        }} else {{
+            PyErr_SetString(PyExc_TypeError,"no overload takes 0 arguments");
         }}
-
-        char *msg = new char[needed];
-        char *cur = msg;
-
-        for(unsigned int i = 0; i < PyTuple_GET_SIZE(args); ++i) {{
-            if(i) *cur++ = ',';
-            const char *other = PyTuple_GET_ITEM(args,i)->ob_type->tp_name;
-            while(*other) *cur++ = *other++;
-        }}
-        *cur = 0;
-
-        PyErr_Format(PyExc_TypeError,"no overload takes (%s)",msg);
-        delete[] msg;
     }} else {{
-        PyErr_SetString(PyExc_TypeError,"no overload takes 0 arguments");
+        PyErr_Format(PyExc_TypeError,format,args->ob_type->tp_name);
     }}
-    throw py_error_set();
 }}
 
 
@@ -673,15 +677,17 @@ overload_func_call = FormatWithCond('''
 {nokwdscheck}
 {inner}
 
-        NoSuchOverload(args);
-end:    ;
+        NoSuchOverload({args});
+        return {errval};
+{endlabel}
 ''',
 nokwdscheck = IfElse('''
         if(kwds && PyDict_Size(kwds)) {
             PyErr_SetString(PyExc_TypeError,no_keywords_msg);
             throw py_error_set();
         }
-'''))
+'''),
+endlabel = IfElse('end:    ;'))
 
 typecheck_start = '''
 {type} &get_base_{name}(PyObject *x,bool safe = true) {{
@@ -693,10 +699,11 @@ typecheck_start = '''
 # to get a reference to the correct location in memory. Because {othertype}
 # derives from more than one type, the memory for {type} wont necessarily be at
 # the beginning of {othertype}. If however, {type} does occur at the beginning,
-# this added part will evaluate to false and the rest of the expression should
-# be subject to dead code removal by the compiler.
+# this added part will evaluate to false and the entire expression should be
+# subject to dead code removal by the compiler.
 typecheck_test = '''
-    if(reinterpret_cast<long>(static_cast<{type}*>(reinterpret_cast<{othertype}*>(1))) != 1 && PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{other}Type())))
+    if(reinterpret_cast<long>(static_cast<{type}*>(reinterpret_cast<{othertype}*>(1))) != 1 &&
+            PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{other}Type())))
         return reinterpret_cast<obj_{other}*>(x)->base;
 '''
 
@@ -714,7 +721,7 @@ function = '''
 PyObject *{funcnameprefix}{name}({selfvar}{args}) {{
 {prolog}
     try {{
-        {code}
+{code}
     }} EXCEPT_HANDLERS(0)
 }}
 '''
