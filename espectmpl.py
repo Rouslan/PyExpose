@@ -725,3 +725,13 @@ PyObject *{funcnameprefix}{name}({selfvar}{args}) {{
     }} EXCEPT_HANDLERS(0)
 }}
 '''
+
+richcompare_start = '''
+PyObject *_obj_{name}_richcompare(PyObject *self,PyObject *arg,int op) {{
+    switch(op) {{
+'''
+
+richcompare_end = '''
+    }
+}
+'''

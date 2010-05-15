@@ -21,6 +21,21 @@ GETTER = 1
 SETTER = 2
 
 
+SF_NO_ARGS = 1 # PyObject *()(PyObject *self)
+SF_ONE_ARG = 2 # PyObject *()(PyObject *self, PyObject *o)
+SF_TWO_ARGS = 3  # PyObject *()(PyObject *self, PyObject *o1, PyObject *o2)
+SF_KEYWORD_ARGS = 4 # PyObject *()(PyObject *self, PyObject *args, PyObject *kwds)
+SF_NO_ARGS_RET_LONG = 5 # long ()(PyObject *self)
+SF_ONE_ARG_RET_INT = 6 # int ()(PyObject *self, PyObject *o)
+SF_NO_ARGS_RET_INT = 7 # int ()(PyObject *self)
+SF_COERCE_ARGS = 8 # int ()(PyObject **p1, PyObject **p2)
+SF_SSIZE_ARG = 9 # PyObject *()(PyObject *self, Py_ssize_t i)
+SF_NO_ARGS_RET_SSIZE = 10 # Py_ssize_t ()(PyObject *self)
+SF_SSIZE_OBJ_ARGS = 11 # PyObject *()(PyObject *self, Py_ssize_t i, PyObject *o)
+SF_TWO_ARGS_RET_INT = 12 # int ()(PyObject *self, PyObject *o1, PyObject *o2)
+SF_TYPE_KEYWORD_ARGS = 13 # PyObject *()(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
+
+
 TYPE_FLOAT = 1
 TYPE_INT = 2
 TYPE_LONG = 3
@@ -450,6 +465,22 @@ class DefDef:
         return self._output(cf,conv,'','','PyObject*','func_','')
 
 
+
+class SpecialFunc:
+    def __init__(self,type):
+        self.type = type
+        self.funcs = []
+
+    def add_func(self,func):
+        self.funcs.append(func)
+
+class Disallowed:
+    def __init__(self,reason):
+        self.reason = reason
+
+    def add_func(self,func):
+        raise SpecificationError(self.reason)
+
 class ClassDef:
     def __init__(self):
         self.constructors = []
@@ -457,6 +488,155 @@ class ClassDef:
         self.properties = []
         self.vars = []
         self.doc = None
+
+        self.special_methods = {
+            '__new__':          SpecialFunc(SF_KEYWORD_ARGS), # tp_new
+            '__init__':         Disallowed('<def> cannot be used to implement __init__. Use <init> instead.'), # tp_init
+            '__del__':          Disallowed('<def> cannot be used to implement __del__. It is used to call the destructor.'), # tp_dealloc
+            '__repr__':         SpecialFunc(SF_ONE_ARG), # tp_repr
+            '__str__':          SpecialFunc(SF_ONE_ARG), # tp_str
+            '__lt__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
+            '__le__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
+            '__eq__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
+            '__ne__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
+            '__gt__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
+            '__ge__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
+            '__cmp__':          SpecialFunc(SF_ONE_ARG_RET_INT), # tp_compare
+            '__hash__':         SpecialFunc(SF_NO_ARGS_RET_LONG), # tp_hash
+            '__nonzero__':      SpecialFunc(SF_NO_ARGS_RET_INT), # tp_as_number.nb_nonzero
+            '__getattr__':      SpecialFunc(SF_ONE_ARG), # tp_getattro
+            '__setattr__':      SpecialFunc(SF_TWO_ARGS), # tp_setattro
+            '__get__':          SpecialFunc(SF_TWO_ARGS), # tp_descr_get
+            '__set__':          SpecialFunc(SF_TWO_ARGS_RET_INT), # tp_descr_set
+            '__call__':         SpecialFunc(SF_KEYWORD_ARGS), # tp_call
+            '__iter__':         SpecialFunc(SF_NO_ARGS), # tp_iter
+            'next':             SpecialFunc(SF_NO_ARGS), # tp_iternext
+            '__contains__':     SpecialFunc(SF_ONE_ARG_RET_INT), # tp_as_sequence.sq_contains(NULL)
+            '__add__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_add
+            '__sub__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_subtract
+            '__mul__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_multiply
+            '__floordiv__':     SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_floor_divide
+            '__mod__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_remainder
+            '__divmod__':       SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_divmod
+            '__pow__':          SpecialFunc(SF_TWO_ARGS), # tp_as_number.nb_power
+            '__lshift__':       SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_lshift
+            '__rshift__':       SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_rshift
+            '__and__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_and
+            '__xor__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_xor
+            '__or__':           SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_or
+            '__div__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_divide
+            '__truediv__':      SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_true_divide
+            '__iadd__':         SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_add
+            '__isub__':         SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_subtract
+            '__imul__':         SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_multiply
+            '__idiv__':         SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_divide
+            '__itruediv__':     SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_true_divide
+            '__ifloordiv__':    SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_floor_divide
+            '__imod__':         SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_remainder
+            '__ipow__':         SpecialFunc(SF_TWO_ARGS), # tp_as_number.nb_inplace_power
+            '__ilshift__':      SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_lshift
+            '__irshift__':      SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_rshift
+            '__iand__':         SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_and
+            '__ixor__':         SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_xor
+            '__ior__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_inplace_or
+            '__neg__':          SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_negative
+            '__pos__':          SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_positive
+            '__abs__':          SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_absolute
+            '__invert__':       SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_invert
+            '__int__':          SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_int
+            '__long__':         SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_long
+            '__float__':        SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_float
+            '__oct__':          SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_oct
+            '__hex__':          SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_hex
+            '__index__':        SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_index
+            '__coerce__':       SpecialFunc(SF_COERCE_ARGS), # tp_as_number.nb_coerce
+
+            # made-up names for special functions that don't have a distinct equivalent in Python
+            '__concat__':       SpecialFunc(SF_ONE_ARG), # tp_as_sequence.sq_concat
+            '__iconcat__':      SpecialFunc(SF_ONE_ARG), # tp_as_sequence.sq_inplace_concat
+            '__repeat__':       SpecialFunc(SF_SSIZE_ARG), # tp_as_sequence.sq_repeat
+            '__irepeat__':      SpecialFunc(SF_SSIZE_ARG), # tp_as_sequence.sq_inplace_repeat
+            'mapping__len__':   SpecialFunc(SF_NO_ARGS_RET_SSIZE), # tp_as_mapping.mp_length(NULL)
+            'sequence__len__':  SpecialFunc(SF_NO_ARGS_RET_SSIZE), # tp_as_sequence.sq_length
+            'mapping__getitem__': SpecialFunc(SF_ONE_ARG), # tp_as_mapping.mp_subscript(NULL)
+            'sequence__getitem__': SpecialFunc(SF_SSIZE_ARG), # tp_as_sequence.sq_item(NULL)
+            'mapping__setitem__': SpecialFunc(SF_TWO_ARGS), # tp_as_mapping.mp_ass_subscript(NULL)
+            'sequence__setitem__': SpecialFunc(SF_SSIZE_OBJ_ARGS) # tp_as_sequence.sq_ass_item(NULL)
+
+        }
+
+        for alias,key in [
+                ('<','__lt__'),
+                ('<=','__le__'),
+                ('==','__eq__'),
+                ('!=','__ne__'),
+                ('>','__gt__'),
+                ('>=','__ge__'),
+                ('()','__call__'),
+                ('+','__add__'),
+                ('+=','__iadd__'),
+                ('-','__sub__'),
+                ('-=','__isub__'),
+                ('*','__mul__'),
+                ('*=','__imul__'),
+                ('**','__pow__'),
+                ('**=','__ipow__'),
+                ('/','__div__'),
+                ('/=','__idiv__'),
+                ('//','__floordiv__'),
+                ('//=','__ifloordiv__'),
+                ('<<','__lshift__'),
+                ('<<=','__ilshift__'),
+                ('>>','__rshift__'),
+                ('>>=','__irshift__'),
+                ('&','__and__'),
+                ('&=','__iand__'),
+                ('^','__xor__'),
+                ('^','__ixor__'),
+                ('|','__or__'),
+                ('|=','__ior__'),
+                ('~','__invert__')]:
+            self.special_methods[alias] = self.special_methods[key]
+
+    def have_special(self,*keys):
+        return any(self.special_methods[k].funcs for k in keys)
+
+    def richcompare(self,out):
+        if not self.have_special('__lt__','__le__','__eq__','__ne__','__gt__','__ge__'):
+            return False
+
+        print >> out.cpp, tmpl.richcompare_start.format(self.name)
+
+        for f,c in [
+            ('__lt__','Py_LT'),
+            ('__le__','Py_LE'),
+            ('__eq__','Py_EQ'),
+            ('__ne__','Py_NE'),
+            ('__gt__','Py_GT'),
+            ('__ge__','Py_GE')]:
+            print >> out.cpp, '    case {0}:\n'.format(c)
+
+        print >> out.cpp, tmpl.richcompare_end
+
+        return True
+
+    def have_number(self):
+        return self.have_special('__nonzero__','__add__','__sub__','__mul__',
+            '__floordiv__','__mod__','__divmod__','__pow__','__lshift__',
+            '__rshift__','__and__','__xor__','__or__','__div__','__truediv__',
+            '__iadd__','__isub__','__imul__','__idiv__','__itruediv__',
+            '__ifloordiv__','__imod__','__ipow__','__ilshift__','__irshift__',
+            '__iand__','__ixor__','__ior__','__neg__','__pos__','__abs__',
+            '__invert__','__int__','__long__','__float__','__oct__','__hex__',
+            '__index__','__coerce__')
+
+    def have_sequence(self):
+        return self.have_special('sequence__len__','sequence__getitem__',
+            'sequence__setitem__','__contains__','__concat__','__iconcat__',
+            '__repeat__','__irepeat__')
+
+    def have_mapping(self):
+        return self.have_special('mapping__len__','mapping__getitem__','mapping__setitem__')
 
     def internconstructor(self,c):
         return tmpl.internconstruct.format(
@@ -505,6 +685,7 @@ class ClassDef:
 
         print >> out.h, tmpl.classdef_end,
 
+        #self.rich_compare(out)
 
         destructref = False
         initdestruct = ''
@@ -1254,7 +1435,11 @@ class tag_Class(tag):
         elif name == 'member':
             self.r.vars.append(data)
         elif name == 'def':
-            self.r.methods.append(data)
+            sm = self.r.special_methods.get(data.name)
+            if sm:
+                sm.add_func(data)
+            else:
+                self.r.methods.append(data)
 
     def end(self):
         if len(self.r.constructors) > 1 and any(con.overload is None for con in self.r.constructors):
