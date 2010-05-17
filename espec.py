@@ -119,17 +119,21 @@ class LevelBaseTraverser:
         self.nodes = [b.type for b in itertools.chain.from_iterable(n.bases for n in temp) if self.access >= b.access]
         return temp
 
+def real_type(x):
+    return real_type(x.type) if isinstance(x,gccxml.CPPTypeDef) else x
+
 def _namespace_find(self,x):
     parts = x.split('::',1)
     levels = LevelBaseTraverser(self) if isinstance(self,gccxml.CPPClass) else [[self]]
     for l in levels:
-        matches = [m for m in itertools.chain.from_iterable(i.members for i in l) if hasattr(m,"name") and m.name == parts[0]]
+        matches = [real_type(m) for m in itertools.chain.from_iterable(i.members for i in l) if hasattr(m,"name") and m.name == parts[0]]
 
         if matches:
             if len(parts) == 2:
                 if not isinstance(matches[0],(gccxml.CPPClass,gccxml.CPPNamespace)):
                     raise SpecificationError('"{0}" is not a namespace, struct or class type'.format(parts[0]))
-                assert len(matches) == 0
+
+                assert len(matches) == 1
                 return _namespace_find(matches[0],parts[1])
 
             return matches
@@ -259,7 +263,6 @@ class ClassTypeInfo:
 
         self.cdef.output(out, module, self.cppint, self.dynamic,bases,self.has_multi_inherit_subclass())
 
-    # get the get_base func, not get the base func
     def get_base_func(self):
         if self.has_multi_inherit_subclass():
             return self.heirarchy_chain().downcast_func()
@@ -405,15 +408,82 @@ class GetSetDef:
         self.func = func
         self.retsemantic = retsemantic
 
+
+
+
+class Tab:
+    """Yield 4 x self.amount whitespace characters when converted to a string.
+
+    An instance can be added to or subtracted from directly, to add to or subtract from "amount".
+
+    """
+    def __init__(self,amount = 1):
+        if isinstance(amount,Tab):
+            self.amount = amount.amount # copy constructor
+        else:
+            self.amount = amount
+
+    def __str__(self):
+        return self.amount * 4 * ' '
+
+    def __unicode__(self):
+        return self.amount * 4 * u' '
+
+    def __repr__(self):
+        return 'Tab({0})'.format(self.amount)
+
+    # in-place addition/subtraction omitted to prevent modification when passed as an argument to a function
+
+    def __add__(self,val):
+        if isinstance(val,unicode):
+            return self.__unicode__() + val
+        if isinstance(val,str):
+            return self.__str__() + val
+        return Tab(self.amount + val)
+
+    def __radd__(self,val):
+        if isinstance(val,unicode):
+            return val + self.__unicode__()
+        if isinstance(val,str):
+            return val + self.__str__()
+        return Tab(self.amount + val)
+
+    def __sub__(self,val):
+        return Tab(self.amount - val)
+
+    def line(self,x):
+        return self.__unicode__() + x + u'\n' if isinstance(x,unicode) else self.__str__() + x + '\n'
+
+
 class DefDef:
     doc = None
 
-    def _output(self,cf,conv,prolog,type_extra,selfvar,funcnameprefix,accessor):
-        code = '{0}{1}({{0}})'.format(accessor,self.func)
-        def call_code(x):
-            return Conversion.Func(code + '; Py_RETURN_NONE;',True) if x.returns == conv.void else \
-                Conversion.Func('return {0};'.format(conv.topy(x.returns,self.retsemantic).format(code)),True)
+    def call_code(self,conv,cpp,var):
+        code = cpp.canon_name
+        if isinstance(cpp,gccxml.CPPMethod):
+            if cpp.static:
+                code = cpp.full_name()
+            else:
+                assert var
+                code = var + '.' + code
+        code += '({0})'
 
+        return Conversion.Func(code + '; Py_RETURN_NONE;',True) if cpp.returns == conv.void else \
+            Conversion.Func('return {0};'.format(conv.topy(cpp.returns,self.retsemantic).format(code)),True)
+
+    def make_argss(self,conv,cf,var):
+        return [(self.call_code(conv,f,var),f.args) for f in cf]
+
+    def function_call(self,conv,cf,var,use_kwds):
+        return conv.function_call(self.make_argss(conv,cf,var),use_kwds = use_kwds)
+
+    def function_call_1arg(self,conv,cf,var,ind = Tab(2)):
+        return conv.function_call_1arg(self.make_argss(conv,cf,var),ind=ind)
+
+    def function_call_1arg_fallthrough(self,conv,cf,var,ind=Tab(2)):
+        return conv.function_call_1arg_fallthrough(self.make_argss(conv,cf,var),ind)
+
+    def _output(self,cf,conv,prolog,type_extra,selfvar,funcnameprefix,objvar = None):
         arglens = [len(f.args) for f in cf]
         maxargs = max(len(f.args) for f in cf)
         minargs = min(map(mandatory_args,cf))
@@ -422,21 +492,19 @@ class DefDef:
             assert len(cf) == 1
             type = 'METH_NOARGS'
             funcargs = ',PyObject *'
-            code = Tab().line(call_code(cf[0]).call.format(''))
+            code = Tab().line(self.call_code(conv,cf[0],objvar).call.format(''))
+        elif maxargs == 1 and minargs == 1 and not cf[0].args[0].name:
+            type = 'METH_O'
+            funcargs = ',PyObject *arg'
+            code = self.function_call_1arg(conv,cf,objvar)
+        elif len(cf) == 1 and any(a.name for a in cf[0].args): # is there a named argument?
+            type = 'METH_VARARGS|METH_KEYWORDS'
+            funcargs = ',PyObject *args,PyObject *kwds'
+            code = self.function_call(conv,cf,objvar,True)
         else:
-            argss = [(call_code(f),f.args) for f in cf]
-            if maxargs == 1 and minargs == 1 and not cf[0].args[0].name:
-                type = 'METH_O'
-                funcargs = ',PyObject *arg'
-                code = conv.function_call_1arg(argss)
-            elif len(cf) == 1 and any(a.name for a in cf[0].args): # is there a named argument?
-                type = 'METH_VARARGS|METH_KEYWORDS'
-                funcargs = ',PyObject *args,PyObject *kwds'
-                code = conv.function_call(argss,use_kwds = True)
-            else:
-                type = 'METH_VARARGS'
-                funcargs = ',PyObject *args'
-                code = conv.function_call(argss,use_kwds = False)
+            type = 'METH_VARARGS'
+            funcargs = ',PyObject *args'
+            code = self.function_call(conv,cf,objvar,False)
 
 
         funcbody = tmpl.function.format(
@@ -457,28 +525,32 @@ class DefDef:
         return tableentry,funcbody
 
     def output(self,cppint,conv):
-        cf = cppint.find(self.func)
+        cfuncs = []
+        for f in self.funcs:
+            cf = cppint.find(f)
 
-        if not isinstance(cf[0],gccxml.CPPFunction):
-            raise SpecificationError('"{0}" is not a function'.format(self.func))
+            # if the first one is a function, they all should be functions
+            if not isinstance(cf[0],gccxml.CPPFunction):
+                raise SpecificationError('"{0}" is not a function'.format(cf[0]))
+            cfuncs.extend(cf)
 
-        return self._output(cf,conv,'','','PyObject*','func_','')
+        return self._output(cfuncs,conv,'','','PyObject*','func_')
 
 
 
 class SpecialFunc:
     def __init__(self,type):
         self.type = type
-        self.funcs = []
+        self.func = None
 
-    def add_func(self,func):
-        self.funcs.append(func)
+    def set_func(self,func):
+        self.func = func
 
 class Disallowed:
     def __init__(self,reason):
         self.reason = reason
 
-    def add_func(self,func):
+    def set_func(self,func):
         raise SpecificationError(self.reason)
 
 class ClassDef:
@@ -599,22 +671,29 @@ class ClassDef:
             self.special_methods[alias] = self.special_methods[key]
 
     def have_special(self,*keys):
-        return any(self.special_methods[k].funcs for k in keys)
+        return any(self.special_methods[k].func for k in keys)
 
-    def richcompare(self,out):
+    def rich_compare(self,out,classint,need_cast):
         if not self.have_special('__lt__','__le__','__eq__','__ne__','__gt__','__ge__'):
             return False
 
-        print >> out.cpp, tmpl.richcompare_start.format(self.name)
+        print >> out.cpp, tmpl.richcompare_start.format(
+            name = self.name,
+            prolog = self.method_prolog(need_cast))
 
         for f,c in [
-            ('__lt__','Py_LT'),
-            ('__le__','Py_LE'),
-            ('__eq__','Py_EQ'),
-            ('__ne__','Py_NE'),
-            ('__gt__','Py_GT'),
-            ('__ge__','Py_GE')]:
-            print >> out.cpp, '    case {0}:\n'.format(c)
+                ('__lt__','Py_LT'),
+                ('__le__','Py_LE'),
+                ('__eq__','Py_EQ'),
+                ('__ne__','Py_NE'),
+                ('__gt__','Py_GT'),
+                ('__ge__','Py_GE')]:
+            code = ''
+            sf = self.special_methods[f]
+            if sf.func:
+                code = sf.func.function_call_1arg_fallthrough(out.conv,self.def_to_cpp(sf.func,classint),'base',Tab(3))
+
+            print >> out.cpp, tmpl.richcompare_op.format(op = c,code = code)
 
         print >> out.cpp, tmpl.richcompare_end
 
@@ -645,31 +724,42 @@ class ClassDef:
             args = ','.join('{0!s} _{1}'.format(a,i) for i,a in enumerate(c.args)),
             argvals = ','.join('_{0}'.format(i) for i in xrange(len(c.args))))
 
-    def method(self,m,classint,conv,need_cast):
-        cm = classint.find(m.func)
+    def def_to_cpp(self,m,classint):
+        cmeth = []
+        try:
+            for f in m.funcs:
+                cm = classint.find(f)
 
-        if not isinstance(cm[0],gccxml.CPPMethod):
-            raise SpecificationError('"{0}" is not a method'.format(m.func))
+                if not isinstance(cm[0],gccxml.CPPMethod):
+                    raise SpecificationError('"{0}" is not a method'.format(f))
+                cmeth.extend(cm)
+
+            if any(c.static != cmeth[0].static for c in cmeth):
+                raise SpecificationError('The function overloads must be either be all static or all non-static',method=self.name)
+        except err.Error as e:
+            e.info['class'] = self.name
+            raise
+
+        return cmeth
+
+    def method_prolog(self,need_cast):
+        return tmpl.init_check.format('0') + '\n    {type} &base = {typecast};\n'.format(
+            type = self.type,
+            typecast = 'get_base_{0}(reinterpret_cast<PyObject*>(self),false)'.format(self.name) if need_cast else 'self->base')
+
+
+    def method(self,m,classint,conv,need_cast):
+        cmeth = self.def_to_cpp(m,classint)
 
         prolog = ''
-        accessor = 'base.'
         type_extra = ''
 
-        if any(c.static != cm[0].static for c in cm):
-            raise SpecificationError('The function overloads must be either be all static or all non-static',method=self.name)
-
-        if cm[0].static:
+        if cmeth[0].static:
             type_extra = '|METH_STATIC'
-            accessor = '{0}::'.format(self.type)
         else:
-            prolog = tmpl.init_check.format('0') + '\n'
+            prolog = self.method_prolog(need_cast)
 
-            if need_cast:
-                prolog += '    {type} &base = {typecast};\n'.format(
-                    type = self.type,
-                    typecast = 'get_base_{0}(reinterpret_cast<PyObject*>(self),false)'.format(self.name) if need_cast else 'self->base')
-
-        return m._output(cm,conv,prolog,type_extra,'obj_{0} *self'.format(self.name),'obj_{0}_method_'.format(self.name),accessor)
+        return m._output(cmeth,conv,prolog,type_extra,'obj_{0} *self'.format(self.name),'obj_{0}_method_'.format(self.name),'base')
 
     def output(self,out,module,c,dynamic,bases,need_method_cast):
         assert isinstance(c,gccxml.CPPClass)
@@ -685,15 +775,15 @@ class ClassDef:
 
         print >> out.h, tmpl.classdef_end,
 
-        #self.rich_compare(out)
+        richcompare = self.rich_compare(out,c,need_method_cast)
 
         destructref = False
         initdestruct = ''
         d = c.getDestructor()
         if d:
-            print >> out.cpp, tmpl.destruct.format(name = self.name, dname = d.name),
+            print >> out.cpp, tmpl.destruct.format(name = self.name, dname = d.canon_name),
             destructref = True
-            initdestruct = '    if(self->initialized) self->base.~{0}();'.format(d.name)
+            initdestruct = '    if(self->initialized) self->base.{0}();'.format(d.canon_name)
 
 
         getsetref = False
@@ -757,6 +847,7 @@ class ClassDef:
                 getsetref = getsetref,
                 membersref = membersref,
                 methodsref = methodsref,
+                richcompare = richcompare,
                 baseslen = len(bases),
                 basesassign = enumerate(bases)),
         else:
@@ -769,6 +860,7 @@ class ClassDef:
                 getsetref = getsetref,
                 membersref = membersref,
                 methodsref = methodsref,
+                richcompare = richcompare,
                 base = bases[0] if bases else '0'),
 
 
@@ -799,51 +891,6 @@ def strip_refptr(x):
 def const_qualified(x):
     """This does NOT test for the "restrict" qualifier (because the code that this program generates never aliases mutable pointers)."""
     return isinstance(x,gccxml.CPPCvQualifiedType) and x.const and not x.volatile
-
-
-class Tab:
-    """Yield 4 x self.amount whitespace characters when converted to a string.
-
-    An instance can be added to or subtracted from directly, to add to or subtract from "amount".
-
-    """
-    def __init__(self,amount = 1):
-        if isinstance(amount,Tab):
-            self.amount = amount.amount # copy constructor
-        else:
-            self.amount = amount
-
-    def __str__(self):
-        return self.amount * 4 * ' '
-
-    def __unicode__(self):
-        return self.amount * 4 * u' '
-
-    def __repr__(self):
-        return 'Tab({0})'.format(self.amount)
-
-    # in-place addition/subtraction omitted to prevent modification when passed as an argument to a function
-
-    def __add__(self,val):
-        if isinstance(val,unicode):
-            return self.__unicode__() + val
-        if isinstance(val,str):
-            return self.__str__() + val
-        return Tab(self.amount + val)
-
-    def __radd__(self,val):
-        if isinstance(val,unicode):
-            return val + self.__unicode__()
-        if isinstance(val,str):
-            return val + self.__str__()
-        return Tab(self.amount + val)
-
-    def __sub__(self,val):
-        return Tab(self.amount - val)
-
-    def line(self,x):
-        return self.__unicode__() + x + u'\n' if isinstance(x,unicode) else self.__str__() + x + '\n'
-
 
 
 class ArgBranchNode:
@@ -1037,11 +1084,11 @@ class Conversion:
                   "float","double","long_double","size_t","schar","uchar",
                   "char","wchar_t","py_unicode","void","stdstring",
                   "stdwstring"):
-            setattr(self,x,tns.find("type_"+x)[0].type)
+            setattr(self,x,tns.find("type_"+x)[0])
 
         try:
             for x in ("slonglong","ulonglong"):
-                setattr(self,x,tns.find("type_"+x)[0].type)
+                setattr(self,x,tns.find("type_"+x)[0])
         except SpecificationError:
             self.slonglong = None
             self.ulonglong = None
@@ -1058,6 +1105,7 @@ class Conversion:
         fd = "PyFloat_FromDouble({0})"
 
         self.__topy = {
+            self.bool : 'bool_to_py({0})',
             self.sshort : fl,
             self.ushort : fl,
             self.sint : fl,
@@ -1089,6 +1137,7 @@ class Conversion:
         # a reference to the original value. If not, it cannot be passed by
         # non-const reference.
         self.__frompy = {
+            self.bool : (False,'static_cast<bool>(PyObject_IsTrue({0}))'),
             self.sshort : (False,'PyToShort({0})'),
             self.ushort : (False,'PyToUShort({0})'),
             self.sint : (False,'PyToInt({0})'),
@@ -1251,27 +1300,23 @@ class Conversion:
                 newargs.append(a)
             ovlds.append((f,args))
 
-        tree = self.generate_arg_tree([(x[1],x) for x in ovlds])
-        tree.sort_objects()
-
         return tmpl.overload_func_call.format(
-            inner = tree.get_code(self),
+            inner = self.generate_arg_tree(ovlds).get_code(self),
             nokwdscheck = use_kwds,
             args = 'args',
             errval = errval,
             endlabel = len(calls) > 1 and not all(c[0].returns for c in calls))
 
-    def function_call_1arg(self,calls,errval='0'):
+    def function_call_1arg_fallthrough(self,calls,ind=Tab(2)):
         assert calls
+        return self.generate_arg_tree(calls).basic_and_objects_code(self,[],0,ind,(lambda x: 'arg'),True)
 
+    def function_call_1arg(self,calls,errval='0',ind=Tab(2)):
         if len(calls) == 1:
-            return calls[0][0].call.format(self.frompy(calls[0][1][0].type))
-
-        tree = self.generate_arg_tree([(x[1],x) for x in calls])
-        tree.sort_objects()
+            return ind + calls[0][0].call.format(self.frompy(calls[0][1][0].type)[0].format('arg'))
 
         return tmpl.overload_func_call.format(
-            inner = tree.basic_and_objects_code(self,[],0,Tab(2),(lambda x: 'arg'),True),
+            inner = self.function_call_1arg_fallthrough(calls,ind),
             nokwdscheck = False,
             args = 'arg',
             errval = errval,
@@ -1285,13 +1330,18 @@ class Conversion:
         s = self.basic_types[py]
         return (t in s) or isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType)) and (strip_cvq(t.type) in s)
 
-    def generate_arg_tree(self,argss):
+    def generate_arg_tree(self,calls):
+        tree = self._generate_arg_tree([(x[1],x) for x in calls])
+        tree.sort_objects()
+        return tree
+
+    def _generate_arg_tree(self,argss):
         argss.sort(key = lambda x: len(x[0]) and x[0][0].type.typestr())
 
         node = ArgBranchNode()
         for k,g in itertools.groupby(argss,lambda x: bool(x[0]) and x[0][0].type):
             if k:
-                subnode = self.generate_arg_tree([(x[1:],orig) for x,orig in g])
+                subnode = self._generate_arg_tree([(x[1:],orig) for x,orig in g])
 
                 # see if the argument is any of the types that require special handling
                 for t in TYPES_LIST:
@@ -1437,7 +1487,7 @@ class tag_Class(tag):
         elif name == 'def':
             sm = self.r.special_methods.get(data.name)
             if sm:
-                sm.add_func(data)
+                sm.set_func(data)
             else:
                 self.r.methods.append(data)
 
@@ -1533,8 +1583,8 @@ class tag_GetSet(tag):
 class tag_Def(tag):
     def __init__(self,args):
         self.r = DefDef()
-        self.r.func = args["func"]
-        self.r.name = args.get("name",self.r.func)
+        self.r.funcs = [args["func"]]
+        self.r.name = args.get("name",self.r.funcs[0])
         self.r.retsemantic = get_ret_semantic(args)
         self.r.overload = args.get("overload")
 

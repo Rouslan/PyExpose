@@ -27,6 +27,21 @@ class ArgList(list):
 
 
 
+class CPPSymbol(object):
+    __slots__ = ()
+
+    @property
+    def canon_name(self):
+        return self.name
+
+    def full_name(self):
+        n = []
+        if self.context:
+            n.append(self.context.full_name())
+        n.append(self.canon_name)
+
+        return '::'.join(filter(None,n))
+
 class CPPType(object):
     __slots__ = 'typestr_cache'
 
@@ -50,7 +65,7 @@ class CPPType(object):
 
         return self.typestr_cache
 
-class CPPBasicType(CPPType):
+class CPPBasicType(CPPType,CPPSymbol):
     __slots__ = 'name','context'
 
     def __init__(self,name = None):
@@ -60,7 +75,7 @@ class CPPBasicType(CPPType):
         return '{0} {1}'.format(self.name,deriv) if deriv else self.name
 
 class CPPClass(CPPBasicType):
-    __slots__ = 'bases','members','size','context'
+    __slots__ = 'bases','members','size'
 
     def __init__(self,name = None):
         self.name = name
@@ -109,7 +124,7 @@ class CPPFunctionType(CPPType):
     def _typestr(self,deriv):
         return '{0} ({1})({2})'.format(self.returns.typestr(),deriv,','.join(map(str,self.args)))
 
-class CPPFunction(object):
+class CPPFunction(CPPSymbol):
     __slots__ = 'name','returns','args','context'
 
     def __init__(self):
@@ -139,7 +154,7 @@ class CPPFundamentalType(CPPBasicType):
     def link(self,items):
         pass
 
-class CPPNamespace(object):
+class CPPNamespace(CPPSymbol):
     __slots__ = 'name','members','context'
 
     def __init__(self):
@@ -148,11 +163,11 @@ class CPPNamespace(object):
     def link(self,items):
         pass
 
-class CPPField(object):
+class CPPField(CPPSymbol):
     __slots__ = 'name','type','access','offset','static','context'
     link = link_item('type')
 
-class CPPConstructor(object):
+class CPPConstructor(CPPSymbol):
     __slots__ = 'access','args','artificial','context'
 
     def __init__(self):
@@ -161,7 +176,11 @@ class CPPConstructor(object):
     def link(self,items):
         for a in self.args: a.link(items)
 
-class CPPMethod(object):
+    @property
+    def canon_name(self):
+        return self.context.name
+
+class CPPMethod(CPPSymbol):
     __slots__ = 'name','returns','access','const','virtual','pure_virtual','static','args','context'
 
     def __init__(self):
@@ -187,6 +206,10 @@ class CPPMethodType(CPPType):
 
 class CPPOperatorMethod(CPPMethod):
     __slots__ = ()
+
+    @property
+    def canon_name(self):
+        return 'operator ' + self.name
 
 class CPPArrayType(CPPType):
     __slots__ = 'type','max'
@@ -230,18 +253,22 @@ class CPPCvQualifiedType(CPPType):
         return self.type.typestr(' '.join(a))
 
 class CPPUnion(CPPBasicType):
-    __slots__ = 'size','members','context'
+    __slots__ = 'size','members'
     def __init__(self):
         self.members = []
 
     def link(self,items):
         pass
 
-class CPPDestructor(object):
-    __slots__ = 'name','access','virtual','context'
+class CPPDestructor(CPPSymbol):
+    __slots__ = 'access','virtual','context'
 
     def link(self,items):
         pass
+
+    @property
+    def canon_name(self):
+        return '~' + self.context.name
 
 class CPPOffsetType(CPPType):
     __slots__ = 'basetype','type','size'
@@ -250,7 +277,7 @@ class CPPOffsetType(CPPType):
     def _typestr(self,deriv):
         return '{0} ({1}::{2})'.format(self.returns.typestr(),self.basetype.typestr(),deriv)
 
-class CPPTypeDef(CPPType):
+class CPPTypeDef(CPPType,CPPSymbol):
     __slots__ = 'name','type','context'
     link = link_item('type')
 
@@ -258,7 +285,7 @@ class CPPTypeDef(CPPType):
         return self.type.typestr(deriv)
 
 class CPPEnumeration(CPPBasicType):
-    __slots__ = 'size','context'
+    __slots__ = 'size'
 
     def link(self,items):
         pass
@@ -272,9 +299,9 @@ no_default = _no_default()
 def zero_one(x):
     return bool(int(x))
 
-def common_init(OType,keys):
+def common_init(keys):
     def inner(self,args):
-        o = OType()
+        o = self.OType()
         self.r = args['id'],o
 
         for k in keys:
@@ -309,7 +336,8 @@ def function_child(self,name,data):
 
 
 class tag_Class(tag):
-    __init__ = common_init(CPPClass,[('name',None,None),('size',None,None),'context'])
+    OType = CPPClass
+    __init__ = common_init([('name',None,None),('size',None,None),'context'])
 
     def child(self,name,data):
         if name == "Base":
@@ -329,68 +357,85 @@ class tag_Base(tag):
         self.r.access = parse_access(args["access"])
 
 class tag_Function(tag):
-    __init__ = common_init(CPPFunction,["name","returns",'context'])
+    OType = CPPFunction
+    __init__ = common_init(["name","returns",'context'])
     child = function_child
 
 class tag_PointerType(tag):
-    __init__ = common_init(CPPPointerType,["type","size"])
+    OType = CPPPointerType
+    __init__ = common_init(["type","size"])
 
 class tag_FundamentalType(tag):
-    __init__ = common_init(CPPFundamentalType,[
+    OType = CPPFundamentalType
+    __init__ = common_init([
         "name",
         ("size",None,None)]) # the type "void" does not have a size
 
 class tag_FunctionType(tag):
-    __init__ = common_init(CPPFunctionType,["returns"])
+    OType = CPPFunctionType
+    __init__ = common_init(["returns"])
     child = function_child
 
 class tag_Namespace(tag):
-    __init__ = common_init(CPPNamespace,["name",('context',None,None)])
+    OType = CPPNamespace
+    __init__ = common_init([("name",lambda x: None if x == '::' else x),('context',None,None)])
 
 class tag_Field(tag):
-    __init__ = common_init(CPPField,["name","type",("access",parse_access),"offset",'context'] + bool_keys("static"))
+    OType = CPPField
+    __init__ = common_init(["name","type",("access",parse_access),"offset",'context'] + bool_keys("static"))
 
 class tag_Method(tag):
-    __init__ = common_init(CPPMethod,["name","returns",("access",parse_access),'context'] + bool_keys("const","virtual","pure_virtual","static"))
+    OType = CPPMethod
+    __init__ = common_init(["name","returns",("access",parse_access),'context'] + bool_keys("const","virtual","pure_virtual","static"))
     child = function_child
 
 class tag_Constructor(tag):
-    __init__ = common_init(CPPConstructor,[("access",parse_access),'context'] + bool_keys('artificial'))
+    OType = CPPConstructor
+    __init__ = common_init([("access",parse_access),'context'] + bool_keys('artificial'))
     child = function_child
 
 class tag_OperatorMethod(tag_Method):
-    pass
+    OType = CPPOperatorMethod
 
 class tag_ArrayType(tag):
-    __init__ = common_init(CPPArrayType,["type",("max",lambda x: int(x.rstrip("u")) if x else None)])
+    OType = CPPArrayType
+    __init__ = common_init(["type",("max",lambda x: int(x.rstrip("u")) if x else None)])
 
 class tag_ReferenceType(tag):
-    __init__ = common_init(CPPReferenceType,["type","size"])
+    OType = CPPReferenceType
+    __init__ = common_init(["type","size"])
 
 class tag_CvQualifiedType(tag):
-    __init__ = common_init(CPPCvQualifiedType,["type"] + bool_keys("const","volatile","restrict"))
+    OType = CPPCvQualifiedType
+    __init__ = common_init(["type"] + bool_keys("const","volatile","restrict"))
 
 class tag_MethodType(tag):
-    __init__ = common_init(CPPMethodType,["basetype","returns"] + bool_keys("const"))
+    OType = CPPMethodType
+    __init__ = common_init(["basetype","returns"] + bool_keys("const"))
     child = function_child
 
 class tag_OperatorFunction(tag_Function):
     pass
 
 class tag_Union(tag):
-    __init__ = common_init(CPPUnion,["size",("name",None,None),("members",unicode.split),'context'])
+    OType = CPPUnion
+    __init__ = common_init(["size",("name",None,None),("members",unicode.split),'context'])
 
 class tag_Destructor(tag):
-    __init__ = common_init(CPPDestructor,["name",("access",parse_access),'context'] + bool_keys("virtual"))
+    OType = CPPDestructor
+    __init__ = common_init([("access",parse_access),'context'] + bool_keys("virtual"))
 
 class tag_OffsetType(tag):
-    __init__ = common_init(CPPOffsetType,["basetype","type","size"])
+    OType = CPPOffsetType
+    __init__ = common_init(["basetype","type","size"])
 
 class tag_TypeDef(tag):
-    __init__ = common_init(CPPTypeDef,["name","type",'context'])
+    OType = CPPTypeDef
+    __init__ = common_init(["name","type",'context'])
 
 class tag_Enumeration(tag):
-    __init__ = common_init(CPPEnumeration,["name","size",'context'])
+    OType = CPPEnumeration
+    __init__ = common_init(["name","size",'context'])
 
 class tag_Ellipsis(tag):
     def __init__(self,args):

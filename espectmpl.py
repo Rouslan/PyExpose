@@ -79,7 +79,7 @@ checkinit = IfElse(init_check.format(-1)))
 
 destruct = '''
 void obj_{name}_dealloc(obj_{name} *self) {{
-    if(self->initialized) self->base.~{dname}();
+    if(self->initialized) self->base.{dname}();
     self->ob_type->tp_free(reinterpret_cast<PyObject*>(self));
 }}
 '''
@@ -176,7 +176,7 @@ PyTypeObject obj_{name}Type = {{
     {doc}, /* tp_doc */
     0,                         /* tp_traverse */
     0,                         /* tp_clear */
-    0,                         /* tp_richcompare */
+    {richcompare}, /* tp_richcompare */
     0,                         /* tp_weaklistoffset */
     0,                         /* tp_iter */
     0,                         /* tp_iternext */
@@ -196,7 +196,8 @@ PyTypeObject obj_{name}Type = {{
 destructref = IfElse('reinterpret_cast<destructor>(&obj_{name}_dealloc)','0',True),
 methodsref = IfElse('obj_{name}_methods','0',True),
 membersref = IfElse('obj_{name}_members','0',True),
-getsetref = IfElse('obj_{name}_getset','0',True))
+getsetref = IfElse('obj_{name}_getset','0',True),
+richcompare = IfElse('reinterpret_cast<richcmpfunc>(&_obj_{name}_richcompare)','0',True))
 
 class_dynamic_typedef = FormatWithCond('''
 PyTypeObject *obj_{name}Type;
@@ -234,6 +235,7 @@ inline PyTypeObject *create_obj_{name}Type() {{
     {methodsref}
     {membersref}
     {getsetref}
+    {richcompare}
     type->tp_init = reinterpret_cast<initproc>(&obj_{name}_init);
 
     return type;
@@ -244,7 +246,8 @@ destructref = IfElse('type->tp_dealloc = reinterpret_cast<destructor>(&obj_{name
 doc = IfElse('type->tp_doc = {doc};',format=True),
 methodsref = IfElse('type->tp_methods = obj_{name}_methods;',format=True),
 membersref = IfElse('type->tp_members = obj_{name}_members;',format=True),
-getsetref = IfElse('type->tp_getset = obj_{name}_getset;',format=True))
+getsetref = IfElse('type->tp_getset = obj_{name}_getset;',format=True),
+richcompare = IfElse('type->tp_richcompare = reinterpret_cast<richcmpfunc>(&_obj_{name}_richcompare);',format=True))
 
 gccxmlinput_start = '''
 #include <Python.h>
@@ -428,6 +431,12 @@ double PyToDouble(PyObject *po) {{
 
 inline PyObject *StringToPy(const std::string &s) {{
     return PyString_FromStringAndSize(s.c_str(),s.size());
+}}
+
+PyObject *bool_to_py(bool x) {{
+    PyObject *r = x ? Py_True : Py_False;
+    Py_INCREF(r);
+    return r;
 }}
 
 void NoSuchOverload(PyObject *args) {{
@@ -727,11 +736,22 @@ PyObject *{funcnameprefix}{name}({selfvar}{args}) {{
 '''
 
 richcompare_start = '''
-PyObject *_obj_{name}_richcompare(PyObject *self,PyObject *arg,int op) {{
-    switch(op) {{
+PyObject *_obj_{name}_richcompare(obj_{name} *self,PyObject *arg,int op) {{
+{prolog}
+    try {{
+        switch(op) {{
+'''
+
+richcompare_op = '''
+        case {op}:
+{code}
+            Py_INCREF(Py_NotImplemented);
+            return Py_NotImplemented;
 '''
 
 richcompare_end = '''
-    }
+        }
+    } EXCEPT_HANDLERS(0)
+    return 0;
 }
 '''

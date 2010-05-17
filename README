@@ -4,5 +4,5 @@ GCCXML is assumed to be installed and in the path. Get the CVS version by
 following the directions at http://www.gccxml.org/HTML/Download.html
 
 The specification file specifies what interface to expose to python. It is an
-XML file described by expose.xsd (not verified). See "test/test_compile.py" for
-a very basic example. More documentation will be added later.
+XML file described by expose.xsd. See "test/test_compile.py" for a very basic
+example. More documentation will be added later.
