@@ -16,24 +16,25 @@ TEST_NS = "___gccxml_types_test_ns___"
 UNINITIALIZED_ERR_TYPE = "PyExc_RuntimeError"
 
 RET_COPY = 1
+RET_MANAGED_REF = 2
 
 GETTER = 1
 SETTER = 2
 
 
-SF_NO_ARGS = 1 # PyObject *()(PyObject *self)
-SF_ONE_ARG = 2 # PyObject *()(PyObject *self, PyObject *o)
-SF_TWO_ARGS = 3  # PyObject *()(PyObject *self, PyObject *o1, PyObject *o2)
-SF_KEYWORD_ARGS = 4 # PyObject *()(PyObject *self, PyObject *args, PyObject *kwds)
-SF_NO_ARGS_RET_LONG = 5 # long ()(PyObject *self)
-SF_ONE_ARG_RET_INT = 6 # int ()(PyObject *self, PyObject *o)
-SF_NO_ARGS_RET_INT = 7 # int ()(PyObject *self)
-SF_COERCE_ARGS = 8 # int ()(PyObject **p1, PyObject **p2)
-SF_SSIZE_ARG = 9 # PyObject *()(PyObject *self, Py_ssize_t i)
-SF_NO_ARGS_RET_SSIZE = 10 # Py_ssize_t ()(PyObject *self)
-SF_SSIZE_OBJ_ARGS = 11 # PyObject *()(PyObject *self, Py_ssize_t i, PyObject *o)
-SF_TWO_ARGS_RET_INT = 12 # int ()(PyObject *self, PyObject *o1, PyObject *o2)
-SF_TYPE_KEYWORD_ARGS = 13 # PyObject *()(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
+SF_NO_ARGS = 1 # (PyObject *self)
+SF_ONE_ARG = 2 # (PyObject *self, PyObject *o)
+SF_TWO_ARGS = 3  # (PyObject *self, PyObject *o1, PyObject *o2)
+SF_KEYWORD_ARGS = 4 # (PyObject *self, PyObject *args, PyObject *kwds)
+SF_COERCE_ARGS = 5 # (PyObject **p1, PyObject **p2)
+SF_SSIZE_ARG = 6 # (PyObject *self, Py_ssize_t i)
+SF_SSIZE_OBJ_ARGS = 7 # (PyObject *self, Py_ssize_t i, PyObject *o)
+SF_TYPE_KEYWORD_ARGS = 8 # (PyTypeObject *subtype, PyObject *args, PyObject *kwds)
+
+SF_RET_OBJ = 0
+SF_RET_INT = 1
+SF_RET_LONG = 2
+SF_RET_SSIZE = 3
 
 
 TYPE_FLOAT = 1
@@ -126,12 +127,12 @@ def _namespace_find(self,x):
     parts = x.split('::',1)
     levels = LevelBaseTraverser(self) if isinstance(self,gccxml.CPPClass) else [[self]]
     for l in levels:
-        matches = [real_type(m) for m in itertools.chain.from_iterable(i.members for i in l) if hasattr(m,"name") and m.name == parts[0]]
+        matches = [real_type(m) for m in itertools.chain.from_iterable(i.members for i in l) if hasattr(m,"canon_name") and m.canon_name == parts[0]]
 
         if matches:
             if len(parts) == 2:
                 if not isinstance(matches[0],(gccxml.CPPClass,gccxml.CPPNamespace)):
-                    raise SpecificationError('"{0}" is not a namespace, struct or class type'.format(parts[0]))
+                    raise SpecificationError('"{0}" is not a namespace, struct or class'.format(parts[0]))
 
                 assert len(matches) == 1
                 return _namespace_find(matches[0],parts[1])
@@ -165,9 +166,26 @@ def quote_c(x):
 def mandatory_args(x):
     return len(list(itertools.takewhile(lambda a: a.default is None, x.args)))
 
+def can_accept(x,args):
+    if not (mandatory_args(x) <= args <= len(x.args)):
+        raise SpecificationError('"{0}" must take {1} argument(s)'.format(x.canon_name,args))
+
 def varargs(x):
     return x.args and x.args[-1] is gccxml.cppellipsis
 
+
+class ObjFeatures:
+    """Specifies the way a class may be stored.
+
+    managed_ref -- A reference and the object that actually holds the object is
+        stored
+    managed_ptr -- A pointer is held and delete will be called upon destruction
+    unmanaged_ref -- A reference is stored. The object's lifetime is not managed
+
+    """
+    managed_ref = False
+    managed_ptr = False
+    unmanaged_ref = False
 
 
 class MultiInheritNode:
@@ -198,7 +216,7 @@ class MultiInheritNode:
             other = self.main_type.cdef.name)
         return r
 
-    def downcast_func(self):
+    def downcast_func(self,features):
         r = tmpl.typecheck_start.format(
             name = self.main_type.cdef.name,
             type = self.main_type.cdef.type)
@@ -220,6 +238,7 @@ class ClassTypeInfo:
         self.cppint = cppint
         self.bases = []
         self.derived = []
+        self.features = ObjFeatures()
 
     @property
     def name(self):
@@ -261,11 +280,17 @@ class ClassTypeInfo:
                 # common type needed for multiple inheritance
                 bases = ['&obj__CommonType']
 
-        self.cdef.output(out, module, self.cppint, self.dynamic,bases,self.has_multi_inherit_subclass())
+        self.cdef.output(out, module, self.cppint, self.dynamic,bases,self.has_multi_inherit_subclass(),self.features)
+
+    def cast_base_func(self):
+        return tmpl.cast_base.format(
+            type = self.cppint.typestr(),
+            name = self.name,
+            canholdref = self.features.managed_ref)
 
     def get_base_func(self):
         if self.has_multi_inherit_subclass():
-            return self.heirarchy_chain().downcast_func()
+            return self.heirarchy_chain().downcast_func(self.features)
         else:
             return tmpl.get_base.format(
                 type = self.cppint.typestr(),
@@ -282,7 +307,7 @@ class ClassTypeInfo:
         return (tmpl.module_dynamic_class_add if self.dynamic else tmpl.module_class_add).format(self.cdef.name)
 
     def __repr__(self):
-        return '<espec.ClassTypeInfo for {0}>'.format(self.cdef.name)
+        return '<ClassTypeInfo for {0}>'.format(self.cdef.name)
 
     def _heirarchy_chain(self,node):
         if self.multi_inherit:
@@ -333,7 +358,7 @@ def check_getsetint(name,x,which):
 
     # maybe this should be allowed
     if x.static:
-        raise SpecificationError('"{0}" cannot be used as a {1} because it is static'.format(name,'setter' if which == 2 else 'getter'))
+        raise SpecificationError('"{0}" cannot be used as a {1} because it is static'.format(name,'setter' if which == SETTER else 'getter'))
 
 class PropertyDef:
     doc = None
@@ -360,7 +385,7 @@ class PropertyDef:
             f = classint.find(self.set.func)
             check_getsetint(self.get.func,f,SETTER)
 
-            if mandatory_args(f) != 1:
+            if can_accep(f,1):
                 raise SpecificationError('"{0}" must take exactly one argument'.format(self.set.func))
 
             r += tmpl.property_set.format(
@@ -455,10 +480,20 @@ class Tab:
         return self.__unicode__() + x + u'\n' if isinstance(x,unicode) else self.__str__() + x + '\n'
 
 
-class DefDef:
-    doc = None
+class Overload:
+    def __init__(self,func,retsemantic=None,args=None):
+        self.func = func
+        self.retsemantic = retsemantic
+        self.args = args
 
-    def call_code(self,conv,cpp,var):
+class DefDef:
+    def __init__(self,name,doc = None):
+        self.name = name
+        self.doc = doc
+        self.overloads = []
+
+    def call_code(self,conv,f,var):
+        ovld,cpp = f
         code = cpp.canon_name
         if isinstance(cpp,gccxml.CPPMethod):
             if cpp.static:
@@ -469,10 +504,10 @@ class DefDef:
         code += '({0})'
 
         return Conversion.Func(code + '; Py_RETURN_NONE;',True) if cpp.returns == conv.void else \
-            Conversion.Func('return {0};'.format(conv.topy(cpp.returns,self.retsemantic).format(code)),True)
+            Conversion.Func('return {0};'.format(conv.topy(cpp.returns,ovld.retsemantic).format(code)),True)
 
     def make_argss(self,conv,cf,var):
-        return [(self.call_code(conv,f,var),f.args) for f in cf]
+        return [(self.call_code(conv,f,var),f[1].args) for f in cf]
 
     def function_call(self,conv,cf,var,use_kwds):
         return conv.function_call(self.make_argss(conv,cf,var),use_kwds = use_kwds)
@@ -484,20 +519,20 @@ class DefDef:
         return conv.function_call_1arg_fallthrough(self.make_argss(conv,cf,var),ind)
 
     def _output(self,cf,conv,prolog,type_extra,selfvar,funcnameprefix,objvar = None):
-        arglens = [len(f.args) for f in cf]
-        maxargs = max(len(f.args) for f in cf)
-        minargs = min(map(mandatory_args,cf))
+        arglens = [len(f[1].args) for f in cf]
+        maxargs = max(len(f[1].args) for f in cf)
+        minargs = min(mandatory_args(f[1]) for f in cf)
 
         if maxargs == 0:
             assert len(cf) == 1
             type = 'METH_NOARGS'
             funcargs = ',PyObject *'
             code = Tab().line(self.call_code(conv,cf[0],objvar).call.format(''))
-        elif maxargs == 1 and minargs == 1 and not cf[0].args[0].name:
+        elif maxargs == 1 and minargs == 1 and not cf[0][1].args[0].name:
             type = 'METH_O'
             funcargs = ',PyObject *arg'
             code = self.function_call_1arg(conv,cf,objvar)
-        elif len(cf) == 1 and any(a.name for a in cf[0].args): # is there a named argument?
+        elif len(cf) == 1 and any(a.name for a in cf[0][1].args): # is there a named argument?
             type = 'METH_VARARGS|METH_KEYWORDS'
             funcargs = ',PyObject *args,PyObject *kwds'
             code = self.function_call(conv,cf,objvar,True)
@@ -526,25 +561,71 @@ class DefDef:
 
     def output(self,cppint,conv):
         cfuncs = []
-        for f in self.funcs:
-            cf = cppint.find(f)
+        for ov in self.overloads:
+            cf = cppint.find(ov.func)
 
             # if the first one is a function, they all should be functions
             if not isinstance(cf[0],gccxml.CPPFunction):
                 raise SpecificationError('"{0}" is not a function'.format(cf[0]))
-            cfuncs.extend(cf)
+            assert all(isinstance(f,gccxml.CPPFunction) for f in cf)
+
+            cfuncs.extend((ov,f) for f in cf if (not ov.args) or same_args(ov.args,f.args))
 
         return self._output(cfuncs,conv,'','','PyObject*','func_')
 
 
 
+
 class SpecialFunc:
-    def __init__(self,type):
-        self.type = type
+    def __init__(self,argtype,rettype = SF_RET_OBJ):
+        self.argtype = argtype
+        self.rettype = rettype
         self.func = None
 
     def set_func(self,func):
         self.func = func
+
+
+
+    def check_static(self,cfunc):
+        if not cfunc.static:
+            raise SpecificationError('"{0}" must be static'.format(cfunc.canon_name))
+
+    def check_integer_first(self,cfunc,conv):
+        if not self.func.args[0].type in conv.integers:
+            raise SpecificationError('The first argument to "{0}" must be an integer type'.format(cfunc.canon_name))
+
+
+    def check_args_ret(self,cfunc,conv):
+        if self.argtype <= SF_TWO_ARGS:
+            can_accept(cfunc,self.argtype-1)
+        elif self.argtype == SF_COERCE_ARGS:
+            # no conversion is done
+            can_accept(cfunc,2)
+            t = cptr(cptr(gccxml.CPPBasicType('PyObject')))
+            if cfunc.args[0].type != t or cfunc.args[1].type != t:
+                raise SpecificationError('"{0}" must accept 2 arguments of PyObject**'.format(cfunc.canon_name))
+            self.check_static(cfunc)
+        elif self.argtype == SF_SSIZE_ARG:
+            can_accept(cfunc,1)
+            self.check_integer_first(cfunc,conv)
+        elif self.argtype == SSIZE_OBJ_ARGS:
+            can_accept(cfunc,2)
+            self.check_integer_first(cfunc,conv)
+        elif self.argtype == SF_TYPE_KEYWORD_ARGS:
+            # no conversion is done for the first arg
+            if len(cfunc.args) == 0:
+                raise Specification('"{0}" must accept at least one argument'.format(cfunc.canon_name))
+            if cfunc.args[0].type != cptr(gccxml.CPPBasicType('PyTypeObject')):
+                raise Specification('The first argument to "{0}" must be PyTypeObject*'.format(cfunc.canon_name))
+            self.check_static()
+
+
+        if self.rettype != SF_RET_OB:
+            if not self.func.returns in conv.integers:
+                raise SpecificationError('"{0}" must return an integer type'.format(self.func))
+
+
 
 class Disallowed:
     def __init__(self,reason):
@@ -553,10 +634,14 @@ class Disallowed:
     def set_func(self,func):
         raise SpecificationError(self.reason)
 
+    @property
+    def func(self):
+        return None
+
 class ClassDef:
     def __init__(self):
         self.constructors = []
-        self.methods = []
+        self.methods = {}
         self.properties = []
         self.vars = []
         self.doc = None
@@ -565,25 +650,25 @@ class ClassDef:
             '__new__':          SpecialFunc(SF_KEYWORD_ARGS), # tp_new
             '__init__':         Disallowed('<def> cannot be used to implement __init__. Use <init> instead.'), # tp_init
             '__del__':          Disallowed('<def> cannot be used to implement __del__. It is used to call the destructor.'), # tp_dealloc
-            '__repr__':         SpecialFunc(SF_ONE_ARG), # tp_repr
-            '__str__':          SpecialFunc(SF_ONE_ARG), # tp_str
+            '__repr__':         SpecialFunc(SF_NO_ARGS), # tp_repr
+            '__str__':          SpecialFunc(SF_NO_ARGS), # tp_str
             '__lt__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
             '__le__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
             '__eq__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
             '__ne__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
             '__gt__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
             '__ge__':           SpecialFunc(SF_ONE_ARG), # tp_richcompare
-            '__cmp__':          SpecialFunc(SF_ONE_ARG_RET_INT), # tp_compare
-            '__hash__':         SpecialFunc(SF_NO_ARGS_RET_LONG), # tp_hash
-            '__nonzero__':      SpecialFunc(SF_NO_ARGS_RET_INT), # tp_as_number.nb_nonzero
+            '__cmp__':          SpecialFunc(SF_ONE_ARG,SF_RET_INT), # tp_compare
+            '__hash__':         SpecialFunc(SF_NO_ARGS,SF_RET_LONG), # tp_hash
+            '__nonzero__':      SpecialFunc(SF_NO_ARGS,SF_RET_INT), # tp_as_number.nb_nonzero
             '__getattr__':      SpecialFunc(SF_ONE_ARG), # tp_getattro
             '__setattr__':      SpecialFunc(SF_TWO_ARGS), # tp_setattro
             '__get__':          SpecialFunc(SF_TWO_ARGS), # tp_descr_get
-            '__set__':          SpecialFunc(SF_TWO_ARGS_RET_INT), # tp_descr_set
+            '__set__':          SpecialFunc(SF_TWO_ARGS,SF_RET_INT), # tp_descr_set
             '__call__':         SpecialFunc(SF_KEYWORD_ARGS), # tp_call
             '__iter__':         SpecialFunc(SF_NO_ARGS), # tp_iter
             'next':             SpecialFunc(SF_NO_ARGS), # tp_iternext
-            '__contains__':     SpecialFunc(SF_ONE_ARG_RET_INT), # tp_as_sequence.sq_contains(NULL)
+            '__contains__':     SpecialFunc(SF_ONE_ARG,SF_RET_INT), # tp_as_sequence.sq_contains(NULL)
             '__add__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_add
             '__sub__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_subtract
             '__mul__':          SpecialFunc(SF_ONE_ARG), # tp_as_number.nb_multiply
@@ -621,19 +706,19 @@ class ClassDef:
             '__oct__':          SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_oct
             '__hex__':          SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_hex
             '__index__':        SpecialFunc(SF_NO_ARGS), # tp_as_number.nb_index
-            '__coerce__':       SpecialFunc(SF_COERCE_ARGS), # tp_as_number.nb_coerce
+            '__coerce__':       SpecialFunc(SF_COERCE_ARGS,SF_RET_INT), # tp_as_number.nb_coerce
 
             # made-up names for special functions that don't have a distinct equivalent in Python
             '__concat__':       SpecialFunc(SF_ONE_ARG), # tp_as_sequence.sq_concat
             '__iconcat__':      SpecialFunc(SF_ONE_ARG), # tp_as_sequence.sq_inplace_concat
             '__repeat__':       SpecialFunc(SF_SSIZE_ARG), # tp_as_sequence.sq_repeat
             '__irepeat__':      SpecialFunc(SF_SSIZE_ARG), # tp_as_sequence.sq_inplace_repeat
-            'mapping__len__':   SpecialFunc(SF_NO_ARGS_RET_SSIZE), # tp_as_mapping.mp_length(NULL)
-            'sequence__len__':  SpecialFunc(SF_NO_ARGS_RET_SSIZE), # tp_as_sequence.sq_length
-            'mapping__getitem__': SpecialFunc(SF_ONE_ARG), # tp_as_mapping.mp_subscript(NULL)
-            'sequence__getitem__': SpecialFunc(SF_SSIZE_ARG), # tp_as_sequence.sq_item(NULL)
-            'mapping__setitem__': SpecialFunc(SF_TWO_ARGS), # tp_as_mapping.mp_ass_subscript(NULL)
-            'sequence__setitem__': SpecialFunc(SF_SSIZE_OBJ_ARGS) # tp_as_sequence.sq_ass_item(NULL)
+            '__mapping__len__':   SpecialFunc(SF_NO_ARGS,SF_RET_SSIZE), # tp_as_mapping.mp_length(NULL)
+            '__sequence__len__':  SpecialFunc(SF_NO_ARGS,SF_RET_SSIZE), # tp_as_sequence.sq_length
+            '__mapping__getitem__': SpecialFunc(SF_ONE_ARG), # tp_as_mapping.mp_subscript(NULL)
+            '__sequence__getitem__': SpecialFunc(SF_SSIZE_ARG), # tp_as_sequence.sq_item(NULL)
+            '__mapping__setitem__': SpecialFunc(SF_TWO_ARGS), # tp_as_mapping.mp_ass_subscript(NULL)
+            '__sequence__setitem__': SpecialFunc(SF_SSIZE_OBJ_ARGS) # tp_as_sequence.sq_ass_item(NULL)
 
         }
 
@@ -710,14 +795,15 @@ class ClassDef:
             '__index__','__coerce__')
 
     def have_sequence(self):
-        return self.have_special('sequence__len__','sequence__getitem__',
-            'sequence__setitem__','__contains__','__concat__','__iconcat__',
+        return self.have_special('__sequence__len__','__sequence__getitem__',
+            '__sequence__setitem__','__contains__','__concat__','__iconcat__',
             '__repeat__','__irepeat__')
 
     def have_mapping(self):
-        return self.have_special('mapping__len__','mapping__getitem__','mapping__setitem__')
+        return self.have_special('__mapping__len__','__mapping__getitem__','__mapping__setitem__')
 
     def internconstructor(self,c):
+        """Generate a forwarding constructor for our object."""
         return tmpl.internconstruct.format(
             name = self.name,
             checkinit = True,
@@ -727,14 +813,16 @@ class ClassDef:
     def def_to_cpp(self,m,classint):
         cmeth = []
         try:
-            for f in m.funcs:
-                cm = classint.find(f)
+            for ov in m.overloads:
+                cm = classint.find(ov.func)
 
                 if not isinstance(cm[0],gccxml.CPPMethod):
                     raise SpecificationError('"{0}" is not a method'.format(f))
-                cmeth.extend(cm)
+                assert all(isinstance(m,gccxml.CPPMethod) for m in cm)
 
-            if any(c.static != cmeth[0].static for c in cmeth):
+                cmeth.extend((ov,m) for m in cm if (not ov.args) or same_args(ov.args,m.args))
+
+            if any(c.static != cmeth[0][1].static for ov,c in cmeth):
                 raise SpecificationError('The function overloads must be either be all static or all non-static',method=self.name)
         except err.Error as e:
             e.info['class'] = self.name
@@ -745,7 +833,8 @@ class ClassDef:
     def method_prolog(self,need_cast):
         return tmpl.init_check.format('0') + '\n    {type} &base = {typecast};\n'.format(
             type = self.type,
-            typecast = 'get_base_{0}(reinterpret_cast<PyObject*>(self),false)'.format(self.name) if need_cast else 'self->base')
+            typecast = ('get_base_{0}(reinterpret_cast<PyObject*>(self),false)'
+                if need_cast else 'cast_base_{0}(reinterpret_cast<PyObject*>(self))').format(self.name))
 
 
     def method(self,m,classint,conv,need_cast):
@@ -754,20 +843,21 @@ class ClassDef:
         prolog = ''
         type_extra = ''
 
-        if cmeth[0].static:
+        if cmeth[0][1].static:
             type_extra = '|METH_STATIC'
         else:
             prolog = self.method_prolog(need_cast)
 
         return m._output(cmeth,conv,prolog,type_extra,'obj_{0} *self'.format(self.name),'obj_{0}_method_'.format(self.name),'base')
 
-    def output(self,out,module,c,dynamic,bases,need_method_cast):
+    def output(self,out,module,c,dynamic,bases,need_method_cast,features):
         assert isinstance(c,gccxml.CPPClass)
 
         print >> out.h, tmpl.classdef_start.format(
             name = self.name,
             type = self.type,
-            dynamic = dynamic),
+            dynamic = dynamic,
+            canholdref = features.managed_ref),
 
         for m in c.members:
             if isinstance(m,gccxml.CPPConstructor) and not varargs(m):
@@ -781,9 +871,12 @@ class ClassDef:
         initdestruct = ''
         d = c.getDestructor()
         if d:
-            print >> out.cpp, tmpl.destruct.format(name = self.name, dname = d.canon_name),
+            print >> out.cpp, tmpl.destruct.format(
+                name = self.name,
+                dname = d.canon_name,
+                canholdref = features.managed_ref),
             destructref = True
-            initdestruct = '    if(self->initialized) self->base.{0}();'.format(d.canon_name)
+            initdestruct = '    if(self->mode) self->base.{0}();'.format(d.canon_name)
 
 
         getsetref = False
@@ -807,7 +900,7 @@ class ClassDef:
 
         methodsref = False
         if self.methods:
-            tentries,bodies = zip(*[self.method(m,c,out.conv,need_method_cast) for m in self.methods])
+            tentries,bodies = zip(*[self.method(m,c,out.conv,need_method_cast) for m in self.methods.itervalues()])
             for b in bodies:
                 print >> out.cpp, b,
 
@@ -820,13 +913,13 @@ class ClassDef:
 
         func = Conversion.Func('new(&self->base) {0}({{0}});'.format(self.type),False)
         if self.constructors:
-            if self.constructors[0].overload is None:
+            if self.constructors[0].args is None:
                 # no overload specified means use all constructors
 
                 assert len(self.constructors) == 1
                 cons = [(func,con.args) for con in c.members if isinstance(con,gccxml.CPPConstructor)]
             else:
-                cons = [(func,c.getConstructor(con.overload).args) for con in self.constructors]
+                cons = [(func,c.getConstructor(con.args).args) for con in self.constructors]
         else:
             cons = [(func,c.getConstructor().args)]
 
@@ -1081,8 +1174,8 @@ class Conversion:
     def __init__(self,tns):
         # get the types specified by the typedefs
         for x in ("bool","sint","uint","sshort","ushort","slong","ulong",
-                  "float","double","long_double","size_t","schar","uchar",
-                  "char","wchar_t","py_unicode","void","stdstring",
+                  "float","double","long_double","size_t","py_size_t","schar",
+                  "uchar","char","wchar_t","py_unicode","void","stdstring",
                   "stdwstring"):
             setattr(self,x,tns.find("type_"+x)[0])
 
@@ -1132,7 +1225,7 @@ class Conversion:
         self.basic_types[TYPE_LONG if self.uint.size == self.ulong.size else TYPE_INT].add(self.slong)
 
 
-        tod = 'PyToDouble({0})'
+        tod = (False,'PyToDouble({0})')
         # The first value of each tuple specifies whether the converted type is
         # a reference to the original value. If not, it cannot be passed by
         # non-const reference.
@@ -1145,8 +1238,8 @@ class Conversion:
             self.slong : (False,'PyToLong({0})'),
             self.ulong : (False,'PyToULong({0})'),
             self.float : (False,'static_cast<float>(PyToDouble({0}))'),
-            self.double : (False,tod),
-            self.long_double : (False,tod),
+            self.double : tod,
+            self.long_double : tod,
             self.cstring : (False,'PyString_AsString({0})')
         }
 
@@ -1181,6 +1274,10 @@ class Conversion:
             self.__pymember[self.ulonglong] = 'T_ULONGLONG'
 
         self.cppclasstopy = {}
+
+        self.integers = set((self.sint,self.uint,self.sshort,self.ushort,
+            self.slong,self.ulong,self.size_t,self.py_size_t,self.schar,
+            self.uchar,self.char))
 
     def __topy_pointee(self,x):
         return self.__topy.get(strip_cvq(x.type))
@@ -1365,7 +1462,7 @@ class Conversion:
 class ModuleDef:
     def __init__(self):
         self.classes = []
-        self.functions = []
+        self.functions = {}
         self.doc = ''
 
     def print_gccxml_input(self,out):
@@ -1374,7 +1471,7 @@ class ModuleDef:
 
         # declare a bunch of dummy functions with the arguments we want gccxml to parse for us
         for i,x in enumerate(self._funcs_with_overload()):
-            print >> out, 'void dummy_func_{0}({1});\n'.format(i,x.overload)
+            print >> out, 'void dummy_func_{0}({1});\n'.format(i,x.args)
 
         print >> out, '}\n'
 
@@ -1382,7 +1479,7 @@ class ModuleDef:
         for i,x in enumerate(self._funcs_with_overload()):
             f = tns.find('dummy_func_{0}'.format(i))[0]
             assert isinstance(f,gccxml.CPPFunction)
-            x.overload = f.args
+            x.args = f.args
 
     def _formatted_includes(self):
         return "\n".join('#include "{0}"'.format(i) for i in self.includes)
@@ -1425,13 +1522,16 @@ class ModuleDef:
         classes = sorted(classes.values(),key=ClassTypeInfo.basecount)
 
         for c in classes:
+            print >> out.cpp, c.cast_base_func()
+
+        for c in classes:
             print >> out.cpp, c.get_base_func()
 
         for c in classes:
             c.output(out,self.name)
 
         functable = []
-        for m in self.functions:
+        for m in self.functions.itervalues():
             tentry,body = m.output(cppint,conv)
             print >> out.cpp, body
             functable.append(tentry)
@@ -1458,12 +1558,65 @@ class ModuleDef:
 
         for c in self.classes:
             for x in c.constructors:
-                if x.overload: yield x
-            for meth in c.methods:
-                if x.overload: yield x
+                if x.args: yield x
+            for m in c.methods.itervalues():
+                for x in m.overloads:
+                    if x.args: yield x
 
-        for f in self.functions:
-            if f.overload: yield m
+        for f in self.functions.itervalues():
+            for x in f.overloads:
+                if x.args: yield x
+
+
+pykeywords = set((
+    'and','as','assert','break','class','continue','def','del','elif','else',
+    'except','exec','finally','for','from','global','if','import','in','is',
+    'lambda','not','or','pass','print','raise','return','try','while','with',
+    'yield'))
+
+def get_valid_py_ident(x,backup):
+    if x:
+        m = re.match(r'[a-zA-Z_]\w*',x)
+        if not (m and m.end() == len(x)):
+            raise SpecificationError('"{0}" is not a valid Python indentifier')
+        if x in pykeywords:
+            raise SpecificationError('"{0}" is a reserved identifier')
+        return x
+    if backup in pykeywords:
+        return backup + '_'
+    return re.sub('\W','_',backup)
+
+
+def _add_func(x,ref):
+    cur = ref.func
+    if cur:
+        if x.doc:
+            if cur.doc:
+                raise SpecificationError("<doc> was defined twice for the same function/method")
+            cur.doc = x.doc
+        cur.overloads.extend(x.overloads)
+    else:
+        ref.set_func(x)
+
+class DictRef:
+    def __init__(self,dict,key):
+        self.dict = dict
+        self.key = key
+
+    @property
+    def func(self):
+        return self.dict.get(self.key)
+
+    def set_func(self,val):
+        self.dict[self.key] = val
+
+
+def add_func(funcs,x):
+    _add_func(x,DictRef(funcs,x.name))
+
+def add_func_sm(sm,x):
+    _add_func(x,sm)
+
 
 
 def stripsplit(x):
@@ -1473,7 +1626,7 @@ class tag_Class(tag):
     def __init__(self,args):
         self.r = ClassDef()
         self.r.type = args["type"]
-        self.r.name = args.get("name",self.r.type)
+        self.r.name = get_valid_py_ident(args.get("name"),self.r.type)
 
     def child(self,name,data):
         if name == "init":
@@ -1487,9 +1640,9 @@ class tag_Class(tag):
         elif name == 'def':
             sm = self.r.special_methods.get(data.name)
             if sm:
-                sm.set_func(data)
+                add_func_sm(sm,data)
             else:
-                self.r.methods.append(data)
+                add_func(self.r.methods,data)
 
     def end(self):
         if len(self.r.constructors) > 1 and any(con.overload is None for con in self.r.constructors):
@@ -1503,7 +1656,7 @@ class tag_Init(tag):
     def __init__(self,args):
         self.r = InitDef()
         # Don't parse the overload. gccxml will do that for us.
-        self.r.overload = args.get("overload")
+        self.r.args = args.get("overload")
 
 class tag_Module(tag):
     def __init__(self,args):
@@ -1515,7 +1668,7 @@ class tag_Module(tag):
         if name == "class":
             self.r.classes.append(data)
         if name == "def":
-            self.r.functions.append(data)
+            add_func(self.r.functions,data)
         elif name == "doc":
             self.r.doc = data
 
@@ -1557,7 +1710,7 @@ class tag_Member(tag):
     def __init__(self,args):
         self.r = MemberDef()
         self.r.cmember = args['cmember']
-        self.r.name = args.get('name',self.r.cmember)
+        self.r.name = get_valid_py_ident(args.get('name'),self.r.cmember)
         self.r.readonly = args.get('readonly',False)
         if self.r.readonly is not False:
             try:
@@ -1569,7 +1722,7 @@ class tag_Member(tag):
 def get_ret_semantic(args):
     rs = args.get("return-semantic")
     if rs is not None:
-        mapping = {"copy" : RET_COPY, "default" : None}
+        mapping = {"copy" : RET_COPY, "managedref" : RET_MANAGED_REF, "default" : None}
         try:
             rs = mapping[rs]
         except LookupError:
@@ -1582,11 +1735,23 @@ class tag_GetSet(tag):
 
 class tag_Def(tag):
     def __init__(self,args):
-        self.r = DefDef()
-        self.r.funcs = [args["func"]]
-        self.r.name = args.get("name",self.r.funcs[0])
-        self.r.retsemantic = get_ret_semantic(args)
-        self.r.overload = args.get("overload")
+        func = args['func']
+        self.r = DefDef(get_valid_py_ident(args.get("name"),func))
+        func = args.get('func')
+        if func:
+            # Don't parse the overload. gccxml will do that for us.
+            self.r.overloads.append(Overload(tag_Def.operator_parse(func),get_ret_semantic(args),args.get("overload")))
+
+
+    op_parse_re = re.compile('operator\b')
+
+    @staticmethod
+    def operator_parse(x):
+        """Normalize operator function names"""
+        m = tag_Def.op_parse_re.match(x)
+        if m:
+            return 'operator ' + ''.join(x[m.end():].split())
+        return x
 
 tagdefs = {
     "class" : tag_Class,

@@ -214,7 +214,7 @@ class TestOverloading(TestCompile):
         double overloaded(int) { return 2e50; }
         const char *overloaded(int,float,const char*) { return "yellow submarine"; }
         float overloaded(int,float,int,int) { return 6.0f; }
-        unsigned short overloaded(int,int,const char*) { return 9; }
+        unsigned short different_name(int,int,const char*) { return 9; }
 
         void overload_1arg(int) {}
         float overload_1arg(float) { return 2.0; }
@@ -223,6 +223,7 @@ class TestOverloading(TestCompile):
     spec_file = '''<?xml version="1.0"?>
         <module name="testmodule" include="main.h">
             <def func="overloaded"/>
+            <def name="overloaded" func="different_name"/>
             <def func="overload_1arg"/>
         </module>
     '''

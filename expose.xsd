@@ -59,7 +59,14 @@
         <xsd:element ref="class"/>
         <xsd:element ref="doc"/>
       </xsd:choice>
-      <xsd:attribute name="name" type="ident" use="required"/>
+      <xsd:attribute name="name" type="ident" use="required">
+        <xsd:annotation>
+          <xsd:documentation>
+            The name of the module. This will be the name by which the module is
+            imported.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
       <xsd:attribute name="include" type="includelist" use="required">
         <xsd:annotation>
           <xsd:documentation>
@@ -75,8 +82,131 @@
   <xsd:element name="def">
     <xsd:annotation>
       <xsd:documentation>
-        Specifies a method when inside &lt;class&gt;, specifies a function when
-        inside &lt;module&gt;.
+        <p>Specifies a method when inside &lt;class&gt;, specifies a function when
+        inside &lt;module&gt;.</p>
+
+        <p>Special methods can be defined by using the equivalent Python method name</p>
+        <table>
+          <tr><th>Python</th><th>C++</th></tr>
+          <tr><td>__new__</td><td>tp_new</td></tr>
+          <tr><td>__repr__</td><td>tp_repr</td></tr>
+          <tr><td>__str__</td><td>tp_str</td></tr>
+          <tr><td>__lt__</td><td>tp_richcompare</td></tr>
+          <tr><td>__le__</td><td>tp_richcompare</td></tr>
+          <tr><td>__eq__</td><td>tp_richcompare</td></tr>
+          <tr><td>__ne__</td><td>tp_richcompare</td></tr>
+          <tr><td>__gt__</td><td>tp_richcompare</td></tr>
+          <tr><td>__ge__</td><td>tp_richcompare</td></tr>
+          <tr><td>__cmp__</td><td>tp_compare</td></tr>
+          <tr><td>__hash__</td><td>tp_hash</td></tr>
+          <tr><td>__nonzero__</td><td>tp_as_number->nb_nonzero</td></tr>
+          <tr><td>__getattr__</td><td>tp_getattro</td></tr>
+          <tr><td>__setattr__</td><td>tp_setattro</td></tr>
+          <tr><td>__get__</td><td>tp_descr_get</td></tr>
+          <tr><td>__set__</td><td>tp_descr_set</td></tr>
+          <tr><td>__call__</td><td>tp_call</td></tr>
+          <tr><td>__iter__</td><td>tp_iter</td></tr>
+          <tr><td>next</td><td>tp_iternext</td></tr>
+          <tr><td>__contains__</td><td>tp_as_sequence->sq_contains</td></tr>
+          <tr><td>__add__</td><td>tp_as_number->nb_add</td></tr>
+          <tr><td>__sub__</td><td>tp_as_number->nb_subtract</td></tr>
+          <tr><td>__mul__</td><td>tp_as_number->nb_multiply</td></tr>
+          <tr><td>__floordiv__</td><td>tp_as_number->nb_floor_divide</td></tr>
+          <tr><td>__mod__</td><td>tp_as_number->nb_remainder</td></tr>
+          <tr><td>__divmod__</td><td>tp_as_number->nb_divmod</td></tr>
+          <tr><td>__pow__</td><td>tp_as_number->nb_power</td></tr>
+          <tr><td>__lshift__</td><td>tp_as_number->nb_lshift</td></tr>
+          <tr><td>__rshift__</td><td>tp_as_number->nb_rshift</td></tr>
+          <tr><td>__and__</td><td>tp_as_number->nb_and</td></tr>
+          <tr><td>__xor__</td><td>tp_as_number->nb_xor</td></tr>
+          <tr><td>__or__</td><td>tp_as_number->nb_or</td></tr>
+          <tr><td>__div__</td><td>tp_as_number->nb_divide</td></tr>
+          <tr><td>__truediv__</td><td>tp_as_number->nb_true_divide</td></tr>
+          <tr><td>__iadd__</td><td>tp_as_number->nb_inplace_add</td></tr>
+          <tr><td>__isub__</td><td>tp_as_number->nb_inplace_subtract</td></tr>
+          <tr><td>__imul__</td><td>tp_as_number->nb_inplace_multiply</td></tr>
+          <tr><td>__idiv__</td><td>tp_as_number->nb_inplace_divide</td></tr>
+          <tr><td>__itruediv__</td><td>tp_as_number->nb_inplace_true_divide</td></tr>
+          <tr><td>__ifloordiv__</td><td>tp_as_number->nb_inplace_floor_divide</td></tr>
+          <tr><td>__imod__</td><td>tp_as_number->nb_inplace_remainder</td></tr>
+          <tr><td>__ipow__</td><td>tp_as_number->nb_inplace_power</td></tr>
+          <tr><td>__ilshift__</td><td>tp_as_number->nb_inplace_lshift</td></tr>
+          <tr><td>__irshift__</td><td>tp_as_number->nb_inplace_rshift</td></tr>
+          <tr><td>__iand__</td><td>tp_as_number->nb_inplace_and</td></tr>
+          <tr><td>__ixor__</td><td>tp_as_number->nb_inplace_xor</td></tr>
+          <tr><td>__ior__</td><td>tp_as_number->nb_inplace_or</td></tr>
+          <tr><td>__neg__</td><td>tp_as_number->nb_negative</td></tr>
+          <tr><td>__pos__</td><td>tp_as_number->nb_positive</td></tr>
+          <tr><td>__abs__</td><td>tp_as_number->nb_absolute</td></tr>
+          <tr><td>__invert__</td><td>tp_as_number->nb_invert</td></tr>
+          <tr><td>__int__</td><td>tp_as_number->nb_int</td></tr>
+          <tr><td>__long__</td><td>tp_as_number->nb_long</td></tr>
+          <tr><td>__float__</td><td>tp_as_number->nb_float</td></tr>
+          <tr><td>__oct__</td><td>tp_as_number->nb_oct</td></tr>
+          <tr><td>__hex__</td><td>tp_as_number->nb_hex</td></tr>
+          <tr><td>__index__</td><td>tp_as_number->nb_index</td></tr>
+          <tr><td>__coerce__</td><td>tp_as_number->nb_coerce</td></tr>
+        </table>
+
+        <p>The following two cannot be used because they correspond to the
+        constructor and destructor. To specify the constructor, use
+        the &lt;init&gt; tag.</p>
+        <table>
+          <tr><th>Python</th><th>C++</th></tr>
+          <tr><td>__init__</td><td>tp_init</td></tr>
+          <tr><td>__del__</td><td>tp_dealloc</td></tr>
+        </table>
+
+        <p>For functions that dont have a distinct equivalent in Python, the
+        following names are provided:</p>
+        <table>
+          <tr><th>Name</th><th>C++</th></tr>
+          <tr><td>__concat__</td><td>tp_as_sequence->sq_concat</td></tr>
+          <tr><td>__iconcat__</td><td>tp_as_sequence->sq_inplace_concat</td></tr>
+          <tr><td>__repeat__</td><td>tp_as_sequence->sq_repeat</td></tr>
+          <tr><td>__irepeat__</td><td>tp_as_sequence->sq_inplace_repeat</td></tr>
+          <tr><td>__mapping__len__</td><td>tp_as_mapping->mp_length</td></tr>
+          <tr><td>__sequence__len__</td><td>tp_as_sequence->sq_length</td></tr>
+          <tr><td>__mapping__getitem__</td><td>tp_as_mapping->mp_subscript</td></tr>
+          <tr><td>__sequence__getitem__</td><td>tp_as_sequence->sq_item</td></tr>
+          <tr><td>__mapping__setitem__</td><td>tp_as_mapping->mp_ass_subscript</td></tr>
+          <tr><td>__sequence__setitem__</td><td>tp_as_sequence->sq_ass_item</td></tr>
+        </table>
+
+        <p>Operator methods can also be specified by their operators. The
+        following are equivalent:</p>
+        <table>
+          <tr><td>&lt;</td><td>__lt__</td></tr>
+          <tr><td>&lt;=</td><td>__le__</td></tr>
+          <tr><td>==</td><td>__eq__</td></tr>
+          <tr><td>!=</td><td>__ne__</td></tr>
+          <tr><td>&gt;</td><td>__gt__</td></tr>
+          <tr><td>&gt;=</td><td>__ge__</td></tr>
+          <tr><td>()</td><td>__call__</td></tr>
+          <tr><td>+</td><td>__add__</td></tr>
+          <tr><td>+=</td><td>__iadd__</td></tr>
+          <tr><td>-</td><td>__sub__</td></tr>
+          <tr><td>-=</td><td>__isub__</td></tr>
+          <tr><td>*</td><td>__mul__</td></tr>
+          <tr><td>*=</td><td>__imul__</td></tr>
+          <tr><td>**</td><td>__pow__</td></tr>
+          <tr><td>**=</td><td>__ipow__</td></tr>
+          <tr><td>/</td><td>__div__</td></tr>
+          <tr><td>/=</td><td>__idiv__</td></tr>
+          <tr><td>//</td><td>__floordiv__</td></tr>
+          <tr><td>//=</td><td>__ifloordiv__</td></tr>
+          <tr><td>&lt;&lt;</td><td>__lshift__</td></tr>
+          <tr><td>&lt;&lt;=</td><td>__ilshift__</td></tr>
+          <tr><td>&gt;&gt;</td><td>__rshift__</td></tr>
+          <tr><td>&gt;&gt;=</td><td>__irshift__</td></tr>
+          <tr><td>&amp;</td><td>__and__</td></tr>
+          <tr><td>&amp;=</td><td>__iand__</td></tr>
+          <tr><td>^</td><td>__xor__</td></tr>
+          <tr><td>^</td><td>__ixor__</td></tr>
+          <tr><td>|</td><td>__or__</td></tr>
+          <tr><td>|=</td><td>__ior__</td></tr>
+          <tr><td>~</td><td>__invert__</td></tr>
+        </table>
       </xsd:documentation>
     </xsd:annotation>
     <xsd:complexType>
@@ -116,7 +246,7 @@
             If the function returns by value, this attribute is meaningless. The
             options are "default" and "copy". "default" is the same as ommitting
             this attribute. "copy" means the value will be dereferenced and
-            copied by value.
+            copied.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>

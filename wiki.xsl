@@ -10,6 +10,8 @@
         doctype-system="http://www.w3.org/TR/xhtml1/xhtml1-strict.dtd"
         omit-xml-declaration="yes"/>
 
+    <xsl:namespace-alias stylesheet-prefix="html" result-prefix="#default"/>
+
     <xsl:template match="/">
         <html>
             <head>
@@ -24,7 +26,7 @@
                 <h1>PyExpose Specification File Format</h1>
                 <xsl:apply-templates select="xsd:annotation"/>
                 <ul>
-                    <xsl:for-each select="//xsd:element">
+                    <xsl:for-each select="//xsd:element[@name]">
                         <li>
                             <a href="#element-{@name}">
                                 <xsl:value-of select="@name"/>
@@ -49,10 +51,12 @@
     </xsl:template>
 
     <xsl:template match="xsd:documentation/text()">
-        <p><xsl:value-of select="."/></p>
+        <xsl:if test="string-length(normalize-space())">
+            <p><xsl:value-of select="."/></p>
+        </xsl:if>
     </xsl:template>
 
-    <xsl:template match="xsd:documentation/node()">
+    <xsl:template match="xsd:documentation//*">
         <xsl:element name="{name()}">
             <xsl:copy-of select="@*"/>
             <xsl:apply-templates/>
@@ -66,9 +70,7 @@
                 <xsl:value-of select="@name"/>
             </a>
         </h2>
-        <p>
-            <xsl:value-of select="xsd:annotation/xsd:documentation"/>
-        </p>
+        <xsl:apply-templates select="xsd:annotation/xsd:documentation"/>
         <xsl:if test="xsd:complexType/*/xsd:element">
             <p>
                 Child elements:

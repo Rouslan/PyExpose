@@ -3,11 +3,26 @@
 import string
 
 init_check = '''
-    if(!self->initialized) {{
+    if(!self->mode) {{
         PyErr_SetString(PyExc_RuntimeError,not_init_msg);
         return {0};
     }}
 '''
+
+class DelayedFormat(object):
+    def __init__(self,value,args,kwds):
+        self.value = value
+        self.args = args
+        self.kwds = kwds
+
+    def __getitem__(self,key):
+        return DelayedFormat(self.value[key],self.args,self.kwds)
+
+    def __getattr__(self,name):
+        return DelayedFormat(getattr(self.value,name),self.args,self.kwds)
+
+    def __format__(self,spec):
+        return format(self.value.format(*self.args,**self.kwds),spec)
 
 class IfElse:
     def __init__(self,iftrue,iffalse = '',format = False):
@@ -17,7 +32,7 @@ class IfElse:
 
     def __call__(self,val,args,kwds):
         r = self.iftrue if val else self.iffalse
-        return r.format(*args,**kwds) if self.format else r
+        return DelayedFormat(r,args,kwds) if self.format else r
 
 class ForEach:
     def __init__(self,pattern,join = ''):
@@ -77,12 +92,17 @@ int obj_{cname}_set{name}({ctype} *self,PyObject *value,void *closure) {{
 ''',
 checkinit = IfElse(init_check.format(-1)))
 
-destruct = '''
+destruct = FormatWithCond('''
 void obj_{name}_dealloc(obj_{name} *self) {{
-    if(self->initialized) self->base.{dname}();
+    if(self->mode == CONTAINS) self->base.{dname}();
+{canholdref}
     self->ob_type->tp_free(reinterpret_cast<PyObject*>(self));
 }}
-'''
+''',
+canholdref = IfElse('''    else if(self->mode == MANAGEDREF) {{
+        PyObject *ref = reinterpret_cast<ref_{name}>(self)->container;
+        Py_DECREF(ref);
+    }}'''))
 
 getset_table = '''
 PyGetSetDef obj_{name}_getset[] = {{
@@ -111,15 +131,15 @@ internconstruct = FormatWithCond('''
 {checkinit}
     }}
 ''',
-checkinit = IfElse('        initialized = true;'))
+checkinit = IfElse('        mode = CONTAINS;'))
 
 classdef_start = FormatWithCond('''
 extern PyTypeObject {dynamic[0]}obj_{name}Type;
 inline PyTypeObject *get_obj_{name}Type() {{ return {dynamic[1]}obj_{name}Type; }}
-
+{canholdref[0]}
 struct obj_{name} {{
     PyObject_HEAD
-    bool initialized;
+    storage_mode mode;
     {type} base;
 
     void *operator new(size_t s) {{
@@ -132,7 +152,15 @@ struct obj_{name} {{
         PyMem_Free(ptr);
     }}
 ''',
-dynamic = IfElse(['*',''],['','&']))
+dynamic = IfElse(['*',''],['','&']),
+canholdref = IfElse(['''
+struct ref_{name} {{
+    PyObject_HEAD
+    storage_mode mode;
+    {type} &base;
+    PyObject *container;
+}};
+''','    storage store;'],['',''],True))
 
 classdef_end = '''
 };
@@ -145,7 +173,7 @@ int obj_{name}_init(obj_{name} *self,PyObject *args,PyObject *kwds) {{
     try {{
 {initcode}
     }} EXCEPT_HANDLERS(-1)
-    self->initialized = true;
+    self->mode = CONTAINS;
     return 0;
 }}
 '''
@@ -280,6 +308,7 @@ typedef Py_UNICODE type_py_unicode;
 typedef std::string type_stdstring;
 typedef std::wstring type_stdwstring;
 typedef void type_void;
+typedef Py_ssize_t type_py_size_t;
 
 '''
 
@@ -470,7 +499,7 @@ void NoSuchOverload(PyObject *args) {{
 }}
 
 
-// A common metatype for our types, to distinguish from user-defined types
+// A common metatype for our types, to distinguish from script-defined sub-types
 PyTypeObject obj__CommonMetaType = {{
     PyObject_HEAD_INIT(0)
     0,                         /* ob_size */
@@ -534,7 +563,7 @@ bool safe_to_call_init(PyTypeObject *target,PyObject *self) {{
 
 struct obj__Common {{
     PyObject_HEAD
-    bool initialized;
+    storage_mode mode;
 }};
 
 /* trying to inherit from more than one type raises a TypeError if there isn't a
@@ -632,19 +661,25 @@ module_end = '''
 #pragma GCC visibility pop
 '''
 
-get_base = FormatWithCond('''
-inline {type} &get_base_{name}(PyObject *o) {{
+cast_base = FormatWithCond('''
+{type} &cast_base_{name}(PyObject *o) {{
+{canholdref}
+    return reinterpret_cast<obj_{name}*>(o)->base;
+}}
+''',
+canholdref = IfElse(
+'''    if(reinterpret_cast<obj__CommonType*>(o)->mode == MANAGEDREF)
+        return reinterpret_cast<ref_{name}*>(o)->base;''',format=True))
+
+get_base = '''
+{type} &get_base_{name}(PyObject *o) {{
     if(UNLIKELY(!PyObject_TypeCheck(o,get_obj_{name}Type()))) {{
         PyErr_SetString(PyExc_TypeError,"object is not an instance of {name}");
         throw py_error_set();
     }}
-    return reinterpret_cast<obj_{name}*>(o)->base;
+    return cast_base_{name}(o);
 }}
-''',
-typecast = IfElse(
-    '*dynamic_cast<{type}*>(static_cast<void*>(&reinterpret_cast<obj_{name}*>(o)->base))',
-    'reinterpret_cast<obj_{name}*>(o)->base',
-    True))
+'''
 
 header_start = '''
 #pragma once
@@ -673,6 +708,8 @@ header_start = '''
 /* when thrown, indicates that a PyErr_X function was already called with the
    details of the exception. As such, it carries no information of its own. */
 struct py_error_set {{}};
+
+enum storage_mode {{UNINITIALIZED = 0,CONTAINS,MANAGEDREF}};
 
 '''
 
@@ -713,7 +750,7 @@ typecheck_start = '''
 typecheck_test = '''
     if(reinterpret_cast<long>(static_cast<{type}*>(reinterpret_cast<{othertype}*>(1))) != 1 &&
             PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{other}Type())))
-        return reinterpret_cast<obj_{other}*>(x)->base;
+        return cast_base_{other}(x);
 '''
 
 typecheck_else = '''
@@ -722,7 +759,7 @@ typecheck_else = '''
         throw py_error_set();
     }}
     assert(PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{name}Type())));
-    return reinterpret_cast<obj_{name}*>(x)->base;
+    return cast_base_{name}(x);
 }}
 '''
 
