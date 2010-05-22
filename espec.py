@@ -211,133 +211,23 @@ class MultiInheritNode:
         for d in self.derived_nodes:
             r += d.output(root)
         r += tmpl.typecheck_test.format(
-            type = root.main_type.cdef.type,
-            othertype = self.main_type.cdef.type,
-            other = self.main_type.cdef.name)
+            type = root.main_type.type.canon_name,
+            othertype = self.main_type.type.canon_name,
+            other = self.main_type.name)
         return r
 
     def downcast_func(self,features):
         r = tmpl.typecheck_start.format(
-            name = self.main_type.cdef.name,
-            type = self.main_type.cdef.type)
+            name = self.main_type.name,
+            type = self.main_type.type.canon_name)
 
         for d in self.derived_nodes:
             r += d.output(self)
 
         r += tmpl.typecheck_else.format(
-            name = self.main_type.cdef.name)
+            name = self.main_type.type.canon_name)
 
         return r
-
-
-
-
-class ClassTypeInfo:
-    def __init__(self,cdef,cppint):
-        self.cdef = cdef
-        self.cppint = cppint
-        self.bases = []
-        self.derived = []
-        self.features = ObjFeatures()
-
-    @property
-    def name(self):
-        return self.cdef.name
-
-    def basecount(self):
-        return sum(1 + b.basecount() for b in self.bases)
-
-    @property
-    def dynamic(self):
-        return len(self.bases) > 1
-
-    # a seperate property in case a dynamic declration is ever needed for a single/no-inheritance class
-    multi_inherit = dynamic
-
-    @property
-    def static_from_dynamic(self):
-        return len(self.bases) == 1 and self.bases[0].dynamic
-
-    def has_multi_inherit_subclass(self):
-        return any(c.multi_inherit or c.has_multi_inherit_subclass() for c in self.derived)
-
-    def findbases(self,classdefs):
-        assert len(self.bases) == 0
-        for b in self.cppint.bases:
-            cd = classdefs.get(b.type)
-            if cd:
-                self.bases.append(cd)
-                cd.derived.append(self)
-
-    def output(self,out,module):
-        # If this is a statically declared class and its base is a dynamic
-        # class, don't set tp_base yet (we don't have an address for it yet).
-        bases = []
-        if not self.static_from_dynamic:
-            if self.bases:
-                bases = map((lambda x: 'get_obj_{0}Type()'.format(x.cdef.name)), self.bases)
-            elif self.has_multi_inherit_subclass():
-                # common type needed for multiple inheritance
-                bases = ['&obj__CommonType']
-
-        self.cdef.output(out, module, self.cppint, self.dynamic,bases,self.has_multi_inherit_subclass(),self.features)
-
-    def cast_base_func(self):
-        return tmpl.cast_base.format(
-            type = self.cppint.typestr(),
-            name = self.name,
-            canholdref = self.features.managed_ref)
-
-    def get_base_func(self):
-        if self.has_multi_inherit_subclass():
-            return self.heirarchy_chain().downcast_func(self.features)
-        else:
-            return tmpl.get_base.format(
-                type = self.cppint.typestr(),
-                name = self.name)
-
-    def prepare_for_module(self):
-        if not self.dynamic:
-            return tmpl.module_class_prepare.format(
-                name = self.cdef.name,
-                base = self.static_from_dynamic and self.bases[0].cdef.name)
-        return ''
-
-    def add_to_module(self):
-        return (tmpl.module_dynamic_class_add if self.dynamic else tmpl.module_class_add).format(self.cdef.name)
-
-    def __repr__(self):
-        return '<ClassTypeInfo for {0}>'.format(self.cdef.name)
-
-    def _heirarchy_chain(self,node):
-        if self.multi_inherit:
-            node = node.new_node(self)
-        else:
-            node.append_single(self)
-
-        for c in self.derived:
-            c._heirarchy_chain(node)
-
-    def heirarchy_chain(self):
-        """Return a tree of lists of derived classes divided at classes with
-        multiple inheritance.
-
-        The tree is the result when you take the tree containing all direct and
-        indirect derived classes of this class, plus this class, then combine
-        each class that does not inherit from more than one class (any class,
-        not necessarily from this tree), with its base class so each node has a
-        list that either starts with this class, or a class the inherits from
-        more than one class.
-
-        If there are no classes with multiple inheritance, the result will be a
-        single node.
-
-        """
-        node = MultiInheritNode(self)
-        for c in self.derived:
-            c._heirarchy_chain(node)
-
-        return node
 
 
 
@@ -492,54 +382,75 @@ class DefDef:
         self.doc = doc
         self.overloads = []
 
-    def call_code(self,conv,f,var):
-        ovld,cpp = f
-        code = cpp.canon_name
-        if isinstance(cpp,gccxml.CPPMethod):
-            if cpp.static:
-                code = cpp.full_name()
+
+class TypedOverload:
+    def __init__(self,func,overload):
+        self.func = func
+        self.retsemantic = overload.retsemantic
+
+class TypedDefDef:
+    def __init__(self,scope,defdef):
+        self.name = defdef.name
+        self.doc = defdef.doc
+        self.overloads = []
+
+        for ov in defdef.overloads:
+            cf = scope.find(ov.func)
+
+            # if the first one is a function, they all should be functions
+            if not isinstance(cf[0],(gccxml.CPPFunction,gccxml.CPPMethod)):
+                raise SpecificationError('"{0}" is not a function or method'.format(cf[0]))
+            assert all(isinstance(f,(gccxml.CPPFunction,gccxml.CPPMethod)) for f in cf)
+
+            self.overloads.extend(TypedOverload(f,ov) for f in cf if (not ov.args) or same_args(ov.args,f.args))
+
+    def call_code(self,conv,ov,var):
+        code = ov.func.canon_name
+        if isinstance(ov.func,gccxml.CPPMethod):
+            if ov.func.static:
+                code = ov.func.full_name()
             else:
                 assert var
                 code = var + '.' + code
         code += '({0})'
 
-        return Conversion.Func(code + '; Py_RETURN_NONE;',True) if cpp.returns == conv.void else \
-            Conversion.Func('return {0};'.format(conv.topy(cpp.returns,ovld.retsemantic).format(code)),True)
+        return Conversion.Func(code + '; Py_RETURN_NONE;',True) if ov.func.returns == conv.void else \
+            Conversion.Func('return {0};'.format(conv.topy(ov.func.returns,ov.retsemantic).format(code)),True)
 
-    def make_argss(self,conv,cf,var):
-        return [(self.call_code(conv,f,var),f[1].args) for f in cf]
+    def make_argss(self,conv,var):
+        return [(self.call_code(conv,ov,var),ov.func.args) for ov in self.overloads]
 
-    def function_call(self,conv,cf,var,use_kwds):
-        return conv.function_call(self.make_argss(conv,cf,var),use_kwds = use_kwds)
+    def function_call(self,conv,var,use_kwds):
+        return conv.function_call(self.make_argss(conv,var),use_kwds = use_kwds)
 
-    def function_call_1arg(self,conv,cf,var,ind = Tab(2)):
-        return conv.function_call_1arg(self.make_argss(conv,cf,var),ind=ind)
+    def function_call_1arg(self,conv,var,ind=Tab(2)):
+        return conv.function_call_1arg(self.make_argss(conv,var),ind=ind)
 
-    def function_call_1arg_fallthrough(self,conv,cf,var,ind=Tab(2)):
-        return conv.function_call_1arg_fallthrough(self.make_argss(conv,cf,var),ind)
+    def function_call_1arg_fallthrough(self,conv,var,ind=Tab(2)):
+        return conv.function_call_1arg_fallthrough(self.make_argss(conv,var),ind)
 
-    def _output(self,cf,conv,prolog,type_extra,selfvar,funcnameprefix,objvar = None):
-        arglens = [len(f[1].args) for f in cf]
-        maxargs = max(len(f[1].args) for f in cf)
-        minargs = min(mandatory_args(f[1]) for f in cf)
+    def _output(self,conv,prolog,type_extra,selfvar,funcnameprefix,objvar = None):
+        arglens = [len(ov.func.args) for ov in self.overloads]
+        maxargs = max(len(ov.func.args) for ov in self.overloads)
+        minargs = min(mandatory_args(ov.func) for ov in self.overloads)
 
         if maxargs == 0:
-            assert len(cf) == 1
+            assert len(self.overloads) == 1
             type = 'METH_NOARGS'
             funcargs = ',PyObject *'
-            code = Tab().line(self.call_code(conv,cf[0],objvar).call.format(''))
-        elif maxargs == 1 and minargs == 1 and not cf[0][1].args[0].name:
+            code = Tab().line(self.call_code(conv,self.overloads[0],objvar).call.format(''))
+        elif maxargs == 1 and minargs == 1 and not self.overloads[0].func.args[0].name:
             type = 'METH_O'
             funcargs = ',PyObject *arg'
-            code = self.function_call_1arg(conv,cf,objvar)
-        elif len(cf) == 1 and any(a.name for a in cf[0][1].args): # is there a named argument?
+            code = self.function_call_1arg(conv,objvar)
+        elif len(self.overloads) == 1 and any(a.name for a in self.overloads[0].func.args): # is there a named argument?
             type = 'METH_VARARGS|METH_KEYWORDS'
             funcargs = ',PyObject *args,PyObject *kwds'
-            code = self.function_call(conv,cf,objvar,True)
+            code = self.function_call(conv,objvar,True)
         else:
             type = 'METH_VARARGS'
             funcargs = ',PyObject *args'
-            code = self.function_call(conv,cf,objvar,False)
+            code = self.function_call(conv,objvar,False)
 
 
         funcbody = tmpl.function.format(
@@ -559,19 +470,8 @@ class DefDef:
 
         return tableentry,funcbody
 
-    def output(self,cppint,conv):
-        cfuncs = []
-        for ov in self.overloads:
-            cf = cppint.find(ov.func)
-
-            # if the first one is a function, they all should be functions
-            if not isinstance(cf[0],gccxml.CPPFunction):
-                raise SpecificationError('"{0}" is not a function'.format(cf[0]))
-            assert all(isinstance(f,gccxml.CPPFunction) for f in cf)
-
-            cfuncs.extend((ov,f) for f in cf if (not ov.args) or same_args(ov.args,f.args))
-
-        return self._output(cfuncs,conv,'','','PyObject*','func_')
+    def output(self,conv):
+        return self._output(conv,'','','PyObject*','func_')
 
 
 
@@ -585,8 +485,6 @@ class SpecialFunc:
     def set_func(self,func):
         self.func = func
 
-
-
     def check_static(self,cfunc):
         if not cfunc.static:
             raise SpecificationError('"{0}" must be static'.format(cfunc.canon_name))
@@ -594,7 +492,6 @@ class SpecialFunc:
     def check_integer_first(self,cfunc,conv):
         if not self.func.args[0].type in conv.integers:
             raise SpecificationError('The first argument to "{0}" must be an integer type'.format(cfunc.canon_name))
-
 
     def check_args_ret(self,cfunc,conv):
         if self.argtype <= SF_TWO_ARGS:
@@ -755,10 +652,123 @@ class ClassDef:
                 ('~','__invert__')]:
             self.special_methods[alias] = self.special_methods[key]
 
+
+class TypedClassDef:
+    def __init__(self,scope,classdef):
+        self.name = classdef.name
+        self.type = scope.find(classdef.type)[0]
+        if not isinstance(self.type,gccxml.CPPClass):
+            raise SpecificationError('"{0}" is not a struct/class type'.format(classdef.type))
+
+        self.constructors = classdef.constructors
+        self.methods = [TypedDefDef(self.type,dd) for dd in classdef.methods.itervalues()]
+
+        self.special_methods = {}
+        for name,m in classdef.special_methods.iteritems():
+            if isinstance(m,SpecialFunc) and (name[0] == '_' or name[0] == 'n'): # skip the aliases
+                new = copy.copy(m)
+                if new.func:
+                    new.func = TypedDefDef(self.type,new.func)
+                self.special_methods[name] = new
+
+        self.properties = classdef.properties
+        self.vars = classdef.vars
+        self.doc = classdef.doc
+
+        self.bases = []
+        self.derived = []
+        self.features = ObjFeatures()
+
+        for m in self.methods:
+            if any(ov.func.static != m.overloads[0].func.static for ov in m.overloads):
+                raise SpecificationError('The function overloads must be either be all static or all non-static',method=m.name)
+
+    def basecount(self):
+        return sum(1 + b.basecount() for b in self.bases)
+
+    @property
+    def dynamic(self):
+        return len(self.bases) > 1
+
+    # a seperate property in case a dynamic declration is ever needed for a single/no-inheritance class
+    multi_inherit = dynamic
+
+    @property
+    def static_from_dynamic(self):
+        return len(self.bases) == 1 and self.bases[0].dynamic
+
+    def has_multi_inherit_subclass(self):
+        return any(c.multi_inherit or c.has_multi_inherit_subclass() for c in self.derived)
+
+    def findbases(self,classdefs):
+        assert len(self.bases) == 0
+        for b in self.type.bases:
+            cd = classdefs.get(b.type)
+            if cd:
+                self.bases.append(cd)
+                cd.derived.append(self)
+
+    def cast_base_func(self):
+        return tmpl.cast_base.format(
+            type = self.type.typestr(),
+            name = self.name,
+            canholdref = self.features.managed_ref)
+
+    def get_base_func(self):
+        if self.has_multi_inherit_subclass():
+            return self.heirarchy_chain().downcast_func(self.features)
+        else:
+            return tmpl.get_base.format(
+                type = self.type.typestr(),
+                name = self.name)
+
+    def prepare_for_module(self):
+        if not self.dynamic:
+            return tmpl.module_class_prepare.format(
+                name = self.name,
+                base = self.static_from_dynamic and self.bases[0].name)
+        return ''
+
+    def add_to_module(self):
+        return (tmpl.module_dynamic_class_add if self.dynamic else tmpl.module_class_add).format(self.name)
+
+    def __repr__(self):
+        return '<TypedClassDef: {0}>'.format(self.name)
+
+    def _heirarchy_chain(self,node):
+        if self.multi_inherit:
+            node = node.new_node(self)
+        else:
+            node.append_single(self)
+
+        for c in self.derived:
+            c._heirarchy_chain(node)
+
+    def heirarchy_chain(self):
+        """Return a tree of lists of derived classes divided at classes with
+        multiple inheritance.
+
+        The tree is the result when you take the tree containing all direct and
+        indirect derived classes of this class, plus this class, then combine
+        each class that does not inherit from more than one class (any class,
+        not necessarily from this tree), with its base class so each node has a
+        list that either starts with this class, or a class the inherits from
+        more than one class.
+
+        If there are no classes with multiple inheritance, the result will be a
+        single node.
+
+        """
+        node = MultiInheritNode(self)
+        for c in self.derived:
+            c._heirarchy_chain(node)
+
+        return node
+
     def have_special(self,*keys):
         return any(self.special_methods[k].func for k in keys)
 
-    def rich_compare(self,out,classint,need_cast):
+    def rich_compare(self,out,need_cast):
         if not self.have_special('__lt__','__le__','__eq__','__ne__','__gt__','__ge__'):
             return False
 
@@ -776,7 +786,7 @@ class ClassDef:
             code = ''
             sf = self.special_methods[f]
             if sf.func:
-                code = sf.func.function_call_1arg_fallthrough(out.conv,self.def_to_cpp(sf.func,classint),'base',Tab(3))
+                code = sf.func.function_call_1arg_fallthrough(out.conv,'base',Tab(3))
 
             print >> out.cpp, tmpl.richcompare_op.format(op = c,code = code)
 
@@ -810,71 +820,58 @@ class ClassDef:
             args = ','.join('{0!s} _{1}'.format(a,i) for i,a in enumerate(c.args)),
             argvals = ','.join('_{0}'.format(i) for i in xrange(len(c.args))))
 
-    def def_to_cpp(self,m,classint):
-        cmeth = []
-        try:
-            for ov in m.overloads:
-                cm = classint.find(ov.func)
-
-                if not isinstance(cm[0],gccxml.CPPMethod):
-                    raise SpecificationError('"{0}" is not a method'.format(f))
-                assert all(isinstance(m,gccxml.CPPMethod) for m in cm)
-
-                cmeth.extend((ov,m) for m in cm if (not ov.args) or same_args(ov.args,m.args))
-
-            if any(c.static != cmeth[0][1].static for ov,c in cmeth):
-                raise SpecificationError('The function overloads must be either be all static or all non-static',method=self.name)
-        except err.Error as e:
-            e.info['class'] = self.name
-            raise
-
-        return cmeth
-
     def method_prolog(self,need_cast):
         return tmpl.init_check.format('0') + '\n    {type} &base = {typecast};\n'.format(
-            type = self.type,
+            type = self.type.canon_name,
             typecast = ('get_base_{0}(reinterpret_cast<PyObject*>(self),false)'
                 if need_cast else 'cast_base_{0}(reinterpret_cast<PyObject*>(self))').format(self.name))
 
-
     def method(self,m,classint,conv,need_cast):
-        cmeth = self.def_to_cpp(m,classint)
-
         prolog = ''
         type_extra = ''
 
-        if cmeth[0][1].static:
+        if m.overloads[0].func.static:
             type_extra = '|METH_STATIC'
         else:
             prolog = self.method_prolog(need_cast)
 
-        return m._output(cmeth,conv,prolog,type_extra,'obj_{0} *self'.format(self.name),'obj_{0}_method_'.format(self.name),'base')
+        return m._output(conv,prolog,type_extra,'obj_{0} *self'.format(self.name),'obj_{0}_method_'.format(self.name),'base')
 
-    def output(self,out,module,c,dynamic,bases,need_method_cast,features):
-        assert isinstance(c,gccxml.CPPClass)
+    def output(self,out,module):
+        # If this is a statically declared class and its base is a dynamic
+        # class, don't set tp_base yet (we don't have an address for it yet).
+        bases = []
+        if not self.static_from_dynamic:
+            if self.bases:
+                bases = map((lambda x: 'get_obj_{0}Type()'.format(x.name)), self.bases)
+            elif self.has_multi_inherit_subclass():
+                # common type needed for multiple inheritance
+                bases = ['&obj__CommonType']
+
+        need_method_cast = self.has_multi_inherit_subclass()
 
         print >> out.h, tmpl.classdef_start.format(
             name = self.name,
-            type = self.type,
-            dynamic = dynamic,
-            canholdref = features.managed_ref),
+            type = self.type.canon_name,
+            dynamic = self.dynamic,
+            canholdref = self.features.managed_ref),
 
-        for m in c.members:
+        for m in self.type.members:
             if isinstance(m,gccxml.CPPConstructor) and not varargs(m):
                 print >> out.h, self.internconstructor(m),
 
         print >> out.h, tmpl.classdef_end,
 
-        richcompare = self.rich_compare(out,c,need_method_cast)
+        richcompare = self.rich_compare(out,need_method_cast)
 
         destructref = False
         initdestruct = ''
-        d = c.getDestructor()
+        d = self.type.getDestructor()
         if d:
             print >> out.cpp, tmpl.destruct.format(
                 name = self.name,
                 dname = d.canon_name,
-                canholdref = features.managed_ref),
+                canholdref = self.features.managed_ref),
             destructref = True
             initdestruct = '    if(self->mode) self->base.{0}();'.format(d.canon_name)
 
@@ -882,7 +879,7 @@ class ClassDef:
         getsetref = False
         if self.properties:
             for p in self.properties:
-                print >> out.cpp, p.output(self,c,cppint,out.conv),
+                print >> out.cpp, p.output(self,self.type,cppint,out.conv),
 
             print >> out.cpp,  tmpl.getset_table.format(
                 name = self.name,
@@ -894,13 +891,13 @@ class ClassDef:
         if self.vars:
             print >> out.cpp, tmpl.member_table.format(
                 name = self.name,
-                items = ',\n    '.join(v.table_entry(self,c,out.conv) for v in self.vars)),
+                items = ',\n    '.join(v.table_entry(self,self.type,out.conv) for v in self.vars)),
             membersref = True
 
 
         methodsref = False
         if self.methods:
-            tentries,bodies = zip(*[self.method(m,c,out.conv,need_method_cast) for m in self.methods.itervalues()])
+            tentries,bodies = zip(*[self.method(m,self.type,out.conv,need_method_cast) for m in self.methods])
             for b in bodies:
                 print >> out.cpp, b,
 
@@ -911,17 +908,17 @@ class ClassDef:
             methodsref = True
 
 
-        func = Conversion.Func('new(&self->base) {0}({{0}});'.format(self.type),False)
+        func = Conversion.Func('new(&self->base) {0}({{0}});'.format(self.type.canon_name),False)
         if self.constructors:
             if self.constructors[0].args is None:
                 # no overload specified means use all constructors
 
                 assert len(self.constructors) == 1
-                cons = [(func,con.args) for con in c.members if isinstance(con,gccxml.CPPConstructor)]
+                cons = [(func,con.args) for con in self.type.members if isinstance(con,gccxml.CPPConstructor)]
             else:
-                cons = [(func,c.getConstructor(con.args).args) for con in self.constructors]
+                cons = [(func,self.type.getConstructor(con.args).args) for con in self.constructors]
         else:
-            cons = [(func,c.getConstructor().args)]
+            cons = [(func,self.type.getConstructor().args)]
 
         cons = out.conv.function_call(cons,'-1',True)
 
@@ -931,7 +928,7 @@ class ClassDef:
             initdestruct = initdestruct,
             initcode = cons),
 
-        if dynamic:
+        if self.dynamic:
             print >> out.cpp, tmpl.class_dynamic_typedef.format(
                 name = self.name,
                 module = module,
@@ -1484,8 +1481,8 @@ class ModuleDef:
     def _formatted_includes(self):
         return "\n".join('#include "{0}"'.format(i) for i in self.includes)
 
-    def write_file(self,path,cppint):
-        tns = cppint.find(TEST_NS)[0]
+    def write_file(self,path,scope):
+        tns = scope.find(TEST_NS)[0]
 
         self._collect_overload_arg_lists(tns)
 
@@ -1506,20 +1503,29 @@ class ModuleDef:
         classes = {}
 
         for cdef in self.classes:
-            c = cppint.find(cdef.type)[0]
-            if not isinstance(c,gccxml.CPPClass):
-                raise SpecificationError('"{0}" is not a struct/class type'.format(cdef.type))
-            classes[c] = ClassTypeInfo(cdef,c)
+            c = TypedClassDef(scope,cdef)
+            classes[c.type] = c
 
             # these assume the class has copy constructors
-            conv.add_conv(c,'new obj_{0}({{0}})'.format(cdef.name),(True,'get_base_{0}({{0}})'.format(cdef.name)))
-            conv.cppclasstopy[c] = cdef
+            conv.add_conv(c.type,'new obj_{0}({{0}})'.format(c.name),(True,'get_base_{0}({{0}})'.format(c.name)))
+            conv.cppclasstopy[c.type] = c
 
-        for c in classes.values():
+        for c in classes.itervalues():
             c.findbases(classes)
 
+        # find all methods and functions that return objects that require special storage
+        for c in classes.itervalues():
+            for m in c.methods:
+                for ov in m.overloads:
+                    if ov.retsemantic == RET_MANAGED_REF and isinstance(ov.func.returns,(gccxml.CPPReferenceType,gccxml.CPPPointerType)):
+                        t = strip_cvq(ov.func.returns.type)
+                        retcdef = classes.get(t)
+                        if not retcdef:
+                            raise SpecificationError('return type of "{0}" is not an exposed type'.format(cm.name))
+                        retcdef.features.managed_ref = True
+
         # Sort classes by heirarchy. Base classes need to be declared before derived classes.
-        classes = sorted(classes.values(),key=ClassTypeInfo.basecount)
+        classes = sorted(classes.values(),key=TypedClassDef.basecount)
 
         for c in classes:
             print >> out.cpp, c.cast_base_func()
@@ -1531,8 +1537,8 @@ class ModuleDef:
             c.output(out,self.name)
 
         functable = []
-        for m in self.functions.itervalues():
-            tentry,body = m.output(cppint,conv)
+        for f in self.functions.itervalues():
+            tentry,body = TypedDefDef(scope,f).output(conv)
             print >> out.cpp, body
             functable.append(tentry)
 
