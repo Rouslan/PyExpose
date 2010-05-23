@@ -1,108 +1,73 @@
 # the template strings used by espec.py, put here to keep espec.py uncluttered
 
-import string
+import jinja2
 
-init_check = '''
-    if(!self->mode) {{
+
+def quote_c(x):
+    # python's non-unicode string syntax appears to be the same as C's
+    return '"'+x.encode('utf_8').encode('string_escape')+'"'
+
+env = jinja2.Environment(
+    block_start_string = '<@',
+    block_end_string = '@>',
+    variable_start_string = '<%',
+    variable_end_string = '%>',
+    comment_start_string = '<#',
+    comment_end_string = '#>',
+    line_statement_prefix = '==',
+    line_comment_prefix = '=#',
+    autoescape = False)
+
+env.filters['quote'] = quote_c
+
+
+
+property_get = env.from_string('''
+PyObject *obj_<% cname %>_get<% name %>(<% ctype %> *self,void *closure) {
+== if checkinit
+    if(!self->mode) {
         PyErr_SetString(PyExc_RuntimeError,not_init_msg);
-        return {0};
-    }}
-'''
+        return 0;
+    }
+== endif
+    try {
+        return <% code %>;
+    } EXCEPT_HANDLERS(0)
+}
+''')
 
-class DelayedFormat(object):
-    def __init__(self,value,args,kwds):
-        self.value = value
-        self.args = args
-        self.kwds = kwds
-
-    def __getitem__(self,key):
-        return DelayedFormat(self.value[key],self.args,self.kwds)
-
-    def __getattr__(self,name):
-        return DelayedFormat(getattr(self.value,name),self.args,self.kwds)
-
-    def __format__(self,spec):
-        return format(self.value.format(*self.args,**self.kwds),spec)
-
-class IfElse:
-    def __init__(self,iftrue,iffalse = '',format = False):
-        self.iftrue = iftrue
-        self.iffalse = iffalse
-        self.format = format
-
-    def __call__(self,val,args,kwds):
-        r = self.iftrue if val else self.iffalse
-        return DelayedFormat(r,args,kwds) if self.format else r
-
-class ForEach:
-    def __init__(self,pattern,join = ''):
-        self.pattern = pattern
-        self.join = join
-
-    def __call__(self,val,args,kwds):
-        return self.join.join(self.pattern.format(x,*args,**kwds) for x in val)
-
-class WithCondFormatter(string.Formatter):
-    """Allow conditional inclusion of parts of a format string."""
-    def __init__(self,conds):
-        super(WithCondFormatter,self).__init__()
-        self.conds = conds
-
-    def get_value(self,key,args,kwds):
-        val = kwds[key] if isinstance(key,basestring) else args[key]
-        cond = self.conds.get(key)
-        if cond:
-            return cond(val,args,kwds)
-        return val
-
-class FormatWithCond(object):
-    def __init__(self,body,**conds):
-        self.formatter = WithCondFormatter(conds)
-        self.body = body
-
-    def format(self,*args,**kwds):
-        return self.formatter.vformat(self.body,args,kwds)
-
-    def __setitem__(self,key,val):
-        self.formatter.conds[key] = val
-
-property_get = FormatWithCond('''
-PyObject *obj_{cname}_get{name}({ctype} *self,void *closure) {{
-{checkinit}
-    try {{
-        return {code};
-    }} EXCEPT_HANDLERS(0)
-}}
-''',
-checkinit = IfElse(init_check.format('0')))
-
-property_set = FormatWithCond('''
-int obj_{cname}_set{name}({ctype} *self,PyObject *value,void *closure) {{
-    if(!value) {{
+property_set = env.from_string('''
+int obj_<% cname %>_set<% name %>(<% ctype %> *self,PyObject *value,void *closure) {{
+    if(!value) {
         PyErr_SetString(PyExc_TypeError,no_delete_msg);
         return -1;
-    }}
-{checkinit}
-    try {{
-        self->base.{cppfunc}({code});
-    }} EXCEPT_HANDLERS(-1)
+    }
+== if checkinit
+    if(!self->mode) {
+        PyErr_SetString(PyExc_RuntimeError,not_init_msg);
+        return -1;
+    }
+== endif
+    try {
+        self->base.<% cppfunc %>(<% code %>);
+    } EXCEPT_HANDLERS(-1)
 
     return 0;
 }}
-''',
-checkinit = IfElse(init_check.format(-1)))
+''')
 
-destruct = FormatWithCond('''
-void obj_{name}_dealloc(obj_{name} *self) {{
-    if(self->mode == CONTAINS) self->base.{dname}();
-{canholdref}
-    self->ob_type->tp_free(reinterpret_cast<PyObject*>(self));
-}}
-''',
-canholdref = IfElse('''    else if(self->mode == MANAGEDREF) {{
-        PyObject *ref = reinterpret_cast<ref_{name}>(self)->container;
+destruct = env.from_string('''
+void obj_<% name %>_dealloc(obj_<% name %> *self) {
+    if(self->mode == CONTAINS) self->base.~<% type %>();
+== if canholdref
+    else if(self->mode == MANAGEDREF) {
+        PyObject *ref = reinterpret_cast<ref_<% name %>>(self)->container;
         Py_DECREF(ref);
-    }}'''))
+    }
+== endif
+    self->ob_type->tp_free(reinterpret_cast<PyObject*>(self));
+}
+''')
 
 getset_table = '''
 PyGetSetDef obj_{name}_getset[] = {{
@@ -125,67 +90,121 @@ PyMethodDef obj_{name}_methods[] = {{
 }};
 '''
 
-internconstruct = FormatWithCond('''
-    obj_{name}({args}) : base({argvals}) {{
-        PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_{name}Type());
-{checkinit}
-    }}
-''',
-checkinit = IfElse('        mode = CONTAINS;'))
+method_prolog = env.from_string('''
+    if(!self->mode) {
+        PyErr_SetString(PyExc_RuntimeError,not_init_msg);
+        return 0;
+    }
+    <% type %> &base = <@ if needcast
+        @>get_base_<% name %>(reinterpret_cast<PyObject*>(self),false)<@ else
+        @>cast_base_<% name %>(reinterpret_cast<PyObject*>(self))<@ endif @>;
+''')
 
-classdef_start = FormatWithCond('''
-extern PyTypeObject {dynamic[0]}obj_{name}Type;
-inline PyTypeObject *get_obj_{name}Type() {{ return {dynamic[1]}obj_{name}Type; }}
-{canholdref[0]}
-struct obj_{name} {{
+classdef = env.from_string('''
+extern PyTypeObject <% '*' if dynamic %>obj_<% name %>Type;
+PyTypeObject *get_obj_<% name %>Type() { return <% '&' if not dynamic %>obj_<% name %>Type; }
+
+== if canholdref
+struct ref_{name} {
     PyObject_HEAD
     storage_mode mode;
-    {type} base;
+    <% type %> &base;
+    PyObject *container;
+};
+== endif
 
-    void *operator new(size_t s) {{
+struct obj_<% name %> {
+    PyObject_HEAD
+== if checkinit or canholdref
+    storage_mode mode;
+== endif
+    <% type %> base;
+
+    void *operator new(size_t s) {
         void *ptr = PyMem_Malloc(s);
         if(!ptr) throw std::bad_alloc();
         return ptr;
-    }}
+    }
 
-    void operator delete(void *ptr) {{
+    void operator delete(void *ptr) {
         PyMem_Free(ptr);
-    }}
-''',
-dynamic = IfElse(['*',''],['','&']),
-canholdref = IfElse(['''
-struct ref_{name} {{
-    PyObject_HEAD
-    storage_mode mode;
-    {type} &base;
-    PyObject *container;
-}};
-''','    storage store;'],['',''],True))
-
-classdef_end = '''
+    }
+== for con in constructors
+    obj_<% name %>(<% con.args %>) : base(<% con.argvals %>) {
+        PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
+==     if checkinit or canholdref
+        mode = CONTAINS;
+==     endif
+    }
+== endfor
 };
-'''
+''')
 
-classinit = '''
-int obj_{name}_init(obj_{name} *self,PyObject *args,PyObject *kwds) {{
-    if(UNLIKELY(!safe_to_call_init(get_obj_{name}Type(),reinterpret_cast<PyObject*>(self)))) return -1;
-{initdestruct}
-    try {{
-{initcode}
-    }} EXCEPT_HANDLERS(-1)
+
+classtypedef = env.from_string('''
+int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
+    if(UNLIKELY(!safe_to_call_init(get_obj_<% name %>Type(),reinterpret_cast<PyObject*>(self)))) return -1;
+==if initdestruct
+    if(self->mode) self->base.~<% type %>();
+== endif
+    try {
+<% initcode %>
+    } EXCEPT_HANDLERS(-1)
     self->mode = CONTAINS;
     return 0;
-}}
-'''
+}
 
-classtypedef = FormatWithCond('''
-PyTypeObject obj_{name}Type = {{
+== if dynamic
+PyTypeObject *obj_<% name %>Type;
+
+inline PyTypeObject *create_obj_<% name %>Type() {
+    PyObject *bases = PyTuple_New(<% bases|length %>);
+    if(UNLIKELY(!bases)) return 0;
+==     for base in bases
+    PyTuple_SET_ITEM(bases,<% loop.index0 %>,reinterpret_cast<PyObject*>(<% base %>));
+==     endfor
+
+    PyObject *name = PyString_FromString("<% module %>.<% name %>");
+    if(UNLIKELY(!name)) {
+        Py_DECREF(bases);
+        return 0;
+    }
+    PyObject *dict = PyDict_New();
+    if(UNLIKELY(!dict)) {
+        Py_DECREF(bases);
+        Py_DECREF(name);
+        return 0;
+    }
+
+    PyTypeObject *type = reinterpret_cast<PyTypeObject*>(
+        PyObject_CallFunctionObjArgs(reinterpret_cast<PyObject*>(&obj__CommonMetaType),name,bases,dict,0));
+
+    Py_DECREF(bases);
+    Py_DECREF(name);
+    Py_DECREF(dict);
+    if(UNLIKELY(!type)) return 0;
+
+    type->tp_basicsize = sizeof(obj_<% name %>);
+    type->tp_dictoffset = 0;
+    type->tp_weaklistoffset = 0;
+<@ if destructref @>    type->tp_dealloc = reinterpret_cast<destructor>(&obj_<% name %>_dealloc);<@ endif @>
+<@ if doc @>    type->tp_doc = <% doc|quote %>;<@ endif @>
+<@ if methodsref @>    type->tp_methods = obj_<% name %>_methods;<@ endif @>
+<@ if membersref @>    type->tp_members = obj_<% name %>_members;<@ endif @>
+<@ if getsetref @>    type->tp_getset = obj_<% name %>_getset;<@ endif @>
+<@ if richcompare @>    type->tp_richcompare = reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare);<@ endif @>
+    type->tp_init = reinterpret_cast<initproc>(&obj_<% name %>_init);
+
+    return type;
+}
+== else
+PyTypeObject obj_<% name %>Type = {
     PyObject_HEAD_INIT(&obj__CommonMetaType)
     0,                         /* ob_size */
-    "{module}.{name}", /* tp_name */
-    sizeof(obj_{name}), /* tp_basicsize */
+    "<% module %>.<% name %>", /* tp_name */
+    sizeof(obj_<% name %>), /* tp_basicsize */
     0,                         /* tp_itemsize */
-    {destructref}, /* tp_dealloc */
+    <@ if destructref @>reinterpret_cast<destructor>(&obj_<% name %>_dealloc)<@ else @>0<@ endif @>, /* tp_dealloc */
     0,                         /* tp_print */
     0,                         /* tp_getattr */
     0,                         /* tp_setattr */
@@ -201,81 +220,27 @@ PyTypeObject obj_{name}Type = {{
     0,                         /* tp_setattro */
     0,                         /* tp_as_buffer */
     Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE, /* tp_flags */
-    {doc}, /* tp_doc */
+    <@ if doc @><% doc|quote %><@ else @>0<@ endif @>, /* tp_doc */
     0,                         /* tp_traverse */
     0,                         /* tp_clear */
-    {richcompare}, /* tp_richcompare */
+    <@ if richcompare @>reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare)<@ else @>0<@ endif @>, /* tp_richcompare */
     0,                         /* tp_weaklistoffset */
     0,                         /* tp_iter */
     0,                         /* tp_iternext */
-    {methodsref}, /* tp_methods */
-    {membersref}, /* tp_members */
-    {getsetref}, /* tp_getset */
-    {base}, /* tp_base */
+    <@ if methodsref @>obj_<% name %>_methods<@ else @>0<@ endif @>, /* tp_methods */
+    <@ if membersref @>obj_<% name %>_members<@ else @>0<@ endif @>, /* tp_members */
+    <@ if getsetref @>obj_<% name %>_getset<@ else @>0<@ endif @>, /* tp_getset */
+    <@ if bases @><% bases|first %><@ else @>0<@ endif @>, /* tp_base */
     0,                         /* tp_dict */
     0,                         /* tp_descr_get */
     0,                         /* tp_descr_set */
     0,                         /* tp_dictoffset */
-    reinterpret_cast<initproc>(&obj_{name}_init), /* tp_init */
+    reinterpret_cast<initproc>(&obj_<% name %>_init), /* tp_init */
     0,                         /* tp_alloc */
     0                          /* tp_new */
-}};
-''',
-destructref = IfElse('reinterpret_cast<destructor>(&obj_{name}_dealloc)','0',True),
-methodsref = IfElse('obj_{name}_methods','0',True),
-membersref = IfElse('obj_{name}_members','0',True),
-getsetref = IfElse('obj_{name}_getset','0',True),
-richcompare = IfElse('reinterpret_cast<richcmpfunc>(&_obj_{name}_richcompare)','0',True))
-
-class_dynamic_typedef = FormatWithCond('''
-PyTypeObject *obj_{name}Type;
-
-inline PyTypeObject *create_obj_{name}Type() {{
-    PyObject *bases = PyTuple_New({baseslen});
-    if(UNLIKELY(!bases)) return 0;
-    {basesassign}
-
-    PyObject *name = PyString_FromString("{module}.{name}");
-    if(UNLIKELY(!name)) {{
-        Py_DECREF(bases);
-        return 0;
-    }}
-    PyObject *dict = PyDict_New();
-    if(UNLIKELY(!dict)) {{
-        Py_DECREF(bases);
-        Py_DECREF(name);
-        return 0;
-    }}
-
-    PyTypeObject *type = reinterpret_cast<PyTypeObject*>(
-        PyObject_CallFunctionObjArgs(reinterpret_cast<PyObject*>(&obj__CommonMetaType),name,bases,dict,0));
-
-    Py_DECREF(bases);
-    Py_DECREF(name);
-    Py_DECREF(dict);
-    if(UNLIKELY(!type)) return 0;
-
-    type->tp_basicsize = sizeof(obj_{name});
-    type->tp_dictoffset = 0;
-    type->tp_weaklistoffset = 0;
-    {destructref}
-    {doc}
-    {methodsref}
-    {membersref}
-    {getsetref}
-    {richcompare}
-    type->tp_init = reinterpret_cast<initproc>(&obj_{name}_init);
-
-    return type;
-}}
-''',
-basesassign = ForEach('PyTuple_SET_ITEM(bases,{0[0]},reinterpret_cast<PyObject*>({0[1]}));','\n    '),
-destructref = IfElse('type->tp_dealloc = reinterpret_cast<destructor>(&obj_{name}_dealloc);',format=True),
-doc = IfElse('type->tp_doc = {doc};',format=True),
-methodsref = IfElse('type->tp_methods = obj_{name}_methods;',format=True),
-membersref = IfElse('type->tp_members = obj_{name}_members;',format=True),
-getsetref = IfElse('type->tp_getset = obj_{name}_getset;',format=True),
-richcompare = IfElse('type->tp_richcompare = reinterpret_cast<richcmpfunc>(&_obj_{name}_richcompare);',format=True))
+};
+== endif
+''')
 
 gccxmlinput_start = '''
 #include <Python.h>
@@ -612,29 +577,31 @@ PyTypeObject obj__CommonType = {{
 '''
 
 
-module_init = FormatWithCond('''
-PyMethodDef func_table[] = {{
-{funclist}
-    {{0}}
-}};
+module = env.from_string('''
+PyMethodDef func_table[] = {
+== for f in funclist
+    <% f %>,
+== endfor
+    {0}
+};
 
 
-extern "C" SHARED(void) init{module}(void) {{
+extern "C" SHARED(void) init<% module %>(void) {
     obj__CommonMetaType.tp_base = &PyType_Type;
     if(UNLIKELY(PyType_Ready(&obj__CommonMetaType) < 0)) return;
 
-    if(UNLIKELY(PyType_Ready(&obj__CommonType) < 0)) return;''',
-funclist = ForEach('    {0},','\n'))
+    if(UNLIKELY(PyType_Ready(&obj__CommonType) < 0)) return;
 
-module_class_prepare = FormatWithCond('''
-    {base}
-    obj_{name}Type.tp_new = &PyType_GenericNew;
-    if(UNLIKELY(PyType_Ready(&obj_{name}Type) < 0)) return;
-''',
-base = IfElse('obj_{name}Type.tp_base = get_obj_{base}Type();',format=True))
+== set classes = classes|list
+== for c in classes if not c.dynamic
+==     if c.base
+    obj_<% c.name %>Type.tp_base = get_obj_<% c.base %>Type();
+==     endif
+    obj_<% c.name %>Type.tp_new = &PyType_GenericNew;
+    if(UNLIKELY(PyType_Ready(&obj_<% c.name %>Type) < 0)) return;
+== endfor
 
-module_create = '''
-    PyObject *m = Py_InitModule3("{name}",func_table,{doc});
+    PyObject *m = Py_InitModule3("<% module %>",func_table,<% doc|quote if doc else '0' %>);
     if(UNLIKELY(!m)) return;
 
     Py_INCREF(&obj__CommonMetaType);
@@ -642,34 +609,31 @@ module_create = '''
 
     Py_INCREF(&obj__CommonType);
     PyModule_AddObject(m,"_internal_class",reinterpret_cast<PyObject*>(&obj__CommonType));
-'''
 
-module_class_add = '''
-    Py_INCREF(&obj_{0}Type);
-    PyModule_AddObject(m,"{0}",reinterpret_cast<PyObject*>(&obj_{0}Type));
-'''
-
-module_dynamic_class_add = '''
-    obj_{0}Type = create_obj_{0}Type();
-    if(UNLIKELY(!obj_{0}Type)) return;
-    PyModule_AddObject(m,"{0}",reinterpret_cast<PyObject*>(obj_{0}Type));
-'''
-
-module_end = '''
+== for c in classes
+==     if c.dynamic
+    obj_<% c.name %>Type = create_obj_<% c.name %>Type();
+    if(UNLIKELY(!obj_<% c.name %>Type)) return;
+    PyModule_AddObject(m,"<% c.name %>",reinterpret_cast<PyObject*>(obj_<% c.name %>Type));
+==     else
+    Py_INCREF(&obj_<% c.name %>Type);
+    PyModule_AddObject(m,"<% c.name %>",reinterpret_cast<PyObject*>(&obj_<% c.name %>Type));
+==     endif
+== endfor
 }
 
 #pragma GCC visibility pop
-'''
+''')
 
-cast_base = FormatWithCond('''
-{type} &cast_base_{name}(PyObject *o) {{
-{canholdref}
-    return reinterpret_cast<obj_{name}*>(o)->base;
-}}
-''',
-canholdref = IfElse(
-'''    if(reinterpret_cast<obj__CommonType*>(o)->mode == MANAGEDREF)
-        return reinterpret_cast<ref_{name}*>(o)->base;''',format=True))
+cast_base = env.from_string('''
+<% type %> &cast_base_<% name %>(PyObject *o) {
+== if canholdref
+    if(reinterpret_cast<obj__CommonType*>(o)->mode == MANAGEDREF)
+        return reinterpret_cast<ref_<% name %>*>(o)->base;
+== endif
+    return reinterpret_cast<obj_<% name %>*>(o)->base;
+}
+''')
 
 get_base = '''
 {type} &get_base_{name}(PyObject *o) {{
@@ -719,21 +683,21 @@ header_end = '''
 #endif
 '''
 
-overload_func_call = FormatWithCond('''
-{nokwdscheck}
-{inner}
-
-        NoSuchOverload({args});
-        return {errval};
-{endlabel}
-''',
-nokwdscheck = IfElse('''
+overload_func_call = env.from_string('''
+== if nokwdscheck
         if(kwds && PyDict_Size(kwds)) {
             PyErr_SetString(PyExc_TypeError,no_keywords_msg);
             throw py_error_set();
         }
-'''),
-endlabel = IfElse('end:    ;'))
+== endif
+<% inner %>
+
+        NoSuchOverload(<% args %>);
+        return <% errval %>;
+== if endlabel
+end:    ;
+== endif
+''')
 
 typecheck_start = '''
 {type} &get_base_{name}(PyObject *x,bool safe = true) {{
@@ -773,7 +737,7 @@ PyObject *{funcnameprefix}{name}({selfvar}{args}) {{
 '''
 
 richcompare_start = '''
-PyObject *_obj_{name}_richcompare(obj_{name} *self,PyObject *arg,int op) {{
+PyObject *obj_{name}_richcompare(obj_{name} *self,PyObject *arg,int op) {{
 {prolog}
     try {{
         switch(op) {{

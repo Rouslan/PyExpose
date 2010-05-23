@@ -159,10 +159,6 @@ gccxml.CPPNamespace.find = namespace_find
 
 
 
-def quote_c(x):
-    # python's non-unicode string syntax appears to be the same as C's
-    return '"'+x.encode('utf_8').encode('string_escape')+'"'
-
 def mandatory_args(x):
     return len(list(itertools.takewhile(lambda a: a.default is None, x.args)))
 
@@ -264,7 +260,7 @@ class PropertyDef:
             if mandatory_args(f):
                 raise SpecificationError('"{0}" should not require any arguments'.format(self.get.func))
 
-            r = tmpl.property_get.format(
+            r = tmpl.property_get.render(
                 cname = classdef.name,
                 ctype = classdef.type,
                 name = self.name,
@@ -278,7 +274,7 @@ class PropertyDef:
             if can_accep(f,1):
                 raise SpecificationError('"{0}" must take exactly one argument'.format(self.set.func))
 
-            r += tmpl.property_set.format(
+            r += tmpl.property_set.render(
                 cname = classdef.name,
                 ctype = classdef.type,
                 name = self.name,
@@ -297,7 +293,7 @@ class PropertyDef:
             name = self.name,
             getter = funccast.format("get") if self.get else "0",
             setter = funccast.format("set") if self.set else "0",
-            doc = quote_c(self.doc) if self.doc else "0")
+            doc = tmpl.quote_c(self.doc) if self.doc else "0")
 
 class MemberDef:
     doc = None
@@ -316,7 +312,7 @@ class MemberDef:
             classname = classint.name,
             mname = self.cmember,
             flags = 'READONLY' if self.readonly else '0',
-            doc = 'const_cast<char*>({0})'.format(quote_c(self.doc)) if self.doc else '0')
+            doc = 'const_cast<char*>({0})'.format(tmpl.quote_c(self.doc)) if self.doc else '0')
 
 class GetSetDef:
     def __init__(self,func,retsemantic = None):
@@ -466,7 +462,7 @@ class TypedDefDef:
             name = self.name,
             type = type,
             typeextra = type_extra,
-            doc = quote_c(self.doc) if self.doc else '0')
+            doc = tmpl.quote_c(self.doc) if self.doc else '0')
 
         return tableentry,funcbody
 
@@ -709,7 +705,7 @@ class TypedClassDef:
                 cd.derived.append(self)
 
     def cast_base_func(self):
-        return tmpl.cast_base.format(
+        return tmpl.cast_base.render(
             type = self.type.typestr(),
             name = self.name,
             canholdref = self.features.managed_ref)
@@ -721,16 +717,6 @@ class TypedClassDef:
             return tmpl.get_base.format(
                 type = self.type.typestr(),
                 name = self.name)
-
-    def prepare_for_module(self):
-        if not self.dynamic:
-            return tmpl.module_class_prepare.format(
-                name = self.name,
-                base = self.static_from_dynamic and self.bases[0].name)
-        return ''
-
-    def add_to_module(self):
-        return (tmpl.module_dynamic_class_add if self.dynamic else tmpl.module_class_add).format(self.name)
 
     def __repr__(self):
         return '<TypedClassDef: {0}>'.format(self.name)
@@ -812,19 +798,11 @@ class TypedClassDef:
     def have_mapping(self):
         return self.have_special('__mapping__len__','__mapping__getitem__','__mapping__setitem__')
 
-    def internconstructor(self,c):
-        """Generate a forwarding constructor for our object."""
-        return tmpl.internconstruct.format(
-            name = self.name,
-            checkinit = True,
-            args = ','.join('{0!s} _{1}'.format(a,i) for i,a in enumerate(c.args)),
-            argvals = ','.join('_{0}'.format(i) for i in xrange(len(c.args))))
-
-    def method_prolog(self,need_cast):
-        return tmpl.init_check.format('0') + '\n    {type} &base = {typecast};\n'.format(
+    def method_prolog(self,has_mi_subclass):
+        return tmpl.method_prolog.render(
             type = self.type.canon_name,
-            typecast = ('get_base_{0}(reinterpret_cast<PyObject*>(self),false)'
-                if need_cast else 'cast_base_{0}(reinterpret_cast<PyObject*>(self))').format(self.name))
+            name = self.name,
+            needcast = has_mi_subclass)
 
     def method(self,m,classint,conv,need_cast):
         prolog = ''
@@ -838,42 +816,42 @@ class TypedClassDef:
         return m._output(conv,prolog,type_extra,'obj_{0} *self'.format(self.name),'obj_{0}_method_'.format(self.name),'base')
 
     def output(self,out,module):
+        has_mi_subclass = self.has_multi_inherit_subclass()
+
         # If this is a statically declared class and its base is a dynamic
         # class, don't set tp_base yet (we don't have an address for it yet).
         bases = []
         if not self.static_from_dynamic:
             if self.bases:
                 bases = map((lambda x: 'get_obj_{0}Type()'.format(x.name)), self.bases)
-            elif self.has_multi_inherit_subclass():
+            elif has_mi_subclass:
                 # common type needed for multiple inheritance
                 bases = ['&obj__CommonType']
 
-        need_method_cast = self.has_multi_inherit_subclass()
 
-        print >> out.h, tmpl.classdef_start.format(
+        print >> out.h, tmpl.classdef.render(
             name = self.name,
             type = self.type.canon_name,
+            checkinit = True,
             dynamic = self.dynamic,
-            canholdref = self.features.managed_ref),
+            canholdref = self.features.managed_ref,
+            constructors = ({
+                'args' : ','.join('{0!s} _{1}'.format(a,i) for i,a in enumerate(m.args)),
+                'argvals' : ','.join('_{0}'.format(i) for i in xrange(len(m.args)))}
+                    for m in self.type.members if isinstance(m,gccxml.CPPConstructor) and not varargs(m))),
 
-        for m in self.type.members:
-            if isinstance(m,gccxml.CPPConstructor) and not varargs(m):
-                print >> out.h, self.internconstructor(m),
-
-        print >> out.h, tmpl.classdef_end,
-
-        richcompare = self.rich_compare(out,need_method_cast)
+        richcompare = self.rich_compare(out,has_mi_subclass)
 
         destructref = False
-        initdestruct = ''
+        initdestruct = False
         d = self.type.getDestructor()
         if d:
-            print >> out.cpp, tmpl.destruct.format(
+            print >> out.cpp, tmpl.destruct.render(
                 name = self.name,
-                dname = d.canon_name,
+                type = self.type.canon_name,
                 canholdref = self.features.managed_ref),
             destructref = True
-            initdestruct = '    if(self->mode) self->base.{0}();'.format(d.canon_name)
+            initdestruct = True
 
 
         getsetref = False
@@ -897,7 +875,7 @@ class TypedClassDef:
 
         methodsref = False
         if self.methods:
-            tentries,bodies = zip(*[self.method(m,self.type,out.conv,need_method_cast) for m in self.methods])
+            tentries,bodies = zip(*[self.method(m,self.type,out.conv,has_mi_subclass) for m in self.methods])
             for b in bodies:
                 print >> out.cpp, b,
 
@@ -922,36 +900,20 @@ class TypedClassDef:
 
         cons = out.conv.function_call(cons,'-1',True)
 
-        print >> out.cpp, tmpl.classinit.format(
+        print >> out.cpp, tmpl.classtypedef.render(
+            dynamic = self.dynamic,
             name = self.name,
-            type = self.type,
+            type = self.type.canon_name,
             initdestruct = initdestruct,
-            initcode = cons),
-
-        if self.dynamic:
-            print >> out.cpp, tmpl.class_dynamic_typedef.format(
-                name = self.name,
-                module = module,
-                destructref = destructref,
-                doc = self.doc and quote_c(self.doc),
-                getsetref = getsetref,
-                membersref = membersref,
-                methodsref = methodsref,
-                richcompare = richcompare,
-                baseslen = len(bases),
-                basesassign = enumerate(bases)),
-        else:
-            assert len(bases) <= 1
-            print >> out.cpp, tmpl.classtypedef.format(
-                name = self.name,
-                module = module,
-                destructref = destructref,
-                doc = quote_c(self.doc) if self.doc else '0',
-                getsetref = getsetref,
-                membersref = membersref,
-                methodsref = methodsref,
-                richcompare = richcompare,
-                base = bases[0] if bases else '0'),
+            initcode = cons,
+            module = module,
+            destructref = destructref,
+            doc = self.doc,
+            getsetref = getsetref,
+            membersref = membersref,
+            methodsref = methodsref,
+            richcompare = richcompare,
+            bases = bases),
 
 
 class cppcode:
@@ -1036,10 +998,14 @@ class ArgBranchNode:
         return self
 
     def sort_objects(self):
-        """Sort self.objects on this instance and all child instances so that no CPPClass is preceded by its base class.
+        """Sort self.objects on this instance and all child instances so that no
+        CPPClass is preceded by its base class.
 
-        When comparing types, if S inherits from B, and our type T matches S, then T will always match B, so S must be tested first, since
-        the tests will stop after finding the first viable match."""
+        When comparing types, if S inherits from B, and our type T matches S,
+        then T will always match B, so S must be tested first, since the tests
+        will stop after finding the first viable match.
+
+        """
         self.objects.sort(key = (lambda x: base_count(strip_refptr(x[0]))),reverse = True)
         for n in self.child_nodes(): n.sort_objects()
 
@@ -1394,7 +1360,7 @@ class Conversion:
                 newargs.append(a)
             ovlds.append((f,args))
 
-        return tmpl.overload_func_call.format(
+        return tmpl.overload_func_call.render(
             inner = self.generate_arg_tree(ovlds).get_code(self),
             nokwdscheck = use_kwds,
             args = 'args',
@@ -1409,7 +1375,7 @@ class Conversion:
         if len(calls) == 1:
             return ind + calls[0][0].call.format(self.frompy(calls[0][1][0].type)[0].format('arg'))
 
-        return tmpl.overload_func_call.format(
+        return tmpl.overload_func_call.render(
             inner = self.function_call_1arg_fallthrough(calls,ind),
             nokwdscheck = False,
             args = 'arg',
@@ -1542,25 +1508,21 @@ class ModuleDef:
             print >> out.cpp, body
             functable.append(tentry)
 
-        print >> out.cpp, tmpl.module_init.format(
+        print >> out.cpp, tmpl.module.render(
             funclist = functable,
-            module = self.name)
+            module = self.name,
+            doc = self.doc,
+            classes = ({
+                'name' : c.name,
+                'dynamic' : c.dynamic,
+                'base' : c.static_from_dynamic and c.bases[0].name}
+                    for c in classes)
+        )
 
-        for c in classes:
-            print >> out.cpp, c.prepare_for_module()
-
-        print >> out.cpp, tmpl.module_create.format(
-            name = self.name,
-            doc = quote_c(self.doc) if self.doc else '0')
-
-        for c in classes:
-            print >> out.cpp, c.add_to_module()
-
-        print >> out.cpp, tmpl.module_end
         print >> out.h, tmpl.header_end
 
     def _funcs_with_overload(self):
-        '''yields function-like objects that have a non-empty overload defined'''
+        """yields function-like objects that have a non-empty overload defined"""
 
         for c in self.classes:
             for x in c.constructors:

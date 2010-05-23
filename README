@@ -1,4 +1,5 @@
 To use this program, type "python expose.py spec-file" at the command line.
+Jinja2 must be installed (http://jinja.pocoo.org/2/).
 
 GCCXML is assumed to be installed and in the path. Get the CVS version by
 following the directions at http://www.gccxml.org/HTML/Download.html
