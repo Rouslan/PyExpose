@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import distutils.ccompiler
 import distutils.sysconfig
+import gc
 
 
 sys.path.insert(0,os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -231,17 +232,65 @@ class TestOverloading(TestCompile):
     def runTest(self):
         tm = self.compile()
 
-        try:
-            self.assertEqual(tm.overloaded(1.0,2.0,3.0,4.0),3)
-            self.assertAlmostEqual(tm.overloaded(1),2e50)
-            self.assertEqual(tm.overloaded(1,2.0,"3"),"yellow submarine")
-            self.assertAlmostEqual(tm.overloaded(1,2.0,3,4),6.0)
-            self.assertEqual(tm.overloaded(1,2,"3"),9)
+        self.assertEqual(tm.overloaded(1.0,2.0,3.0,4.0),3)
+        self.assertAlmostEqual(tm.overloaded(1),2e50)
+        self.assertEqual(tm.overloaded(1,2.0,"3"),"yellow submarine")
+        self.assertAlmostEqual(tm.overloaded(1,2.0,3,4),6.0)
+        self.assertEqual(tm.overloaded(1,2,"3"),9)
 
-            self.assertEqual(tm.overload_1arg(1),None)
-            self.assertAlmostEqual(tm.overload_1arg(1.0),2.0)
-        except Exception as e:
-            self.fail(str(e))
+        self.assertEqual(tm.overload_1arg(1),None)
+        self.assertAlmostEqual(tm.overload_1arg(1.0),2.0)
+
+
+class TestManagedRef(TestCompile):
+    header_file = '''
+        struct A {
+            int value;
+            A(int value) : value(value) {}
+            int get_value() const { return value; }
+            void set_value(int v) { value = v; }
+        };
+
+        struct B {
+            int othervalue;
+            A a;
+            B(int value) : othervalue(value), a(value * 2) {}
+            ~B() { a.value = -1; }
+            int get_value() const { return a.value; }
+            A &get_a() { return a; }
+        };
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="A">
+                <init/>
+                <property name="value" get="get_value" set="set_value"/>
+            </class>
+            <class type="B">
+                <init/>
+                <def func="get_a" return-semantic="managedref"/>
+                <def func="get_value"/>
+            </class>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+
+        b = tm.B(11)
+        self.assertEqual(b.get_value(),22)
+        a = b.get_a()
+        self.assertEqual(a.value,22)
+        a.value = 23
+        self.assertEqual(a.value,23)
+        self.assertEqual(b.get_value(),23)
+        a.__init__(24)
+        self.assertEqual(a.value,24)
+        self.assertEqual(b.get_value(),24)
+        del b
+        gc.collect()
+        self.assertEqual(a.value,24)
 
 
 

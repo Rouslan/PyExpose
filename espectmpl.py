@@ -23,22 +23,23 @@ env.filters['quote'] = quote_c
 
 
 property_get = env.from_string('''
-PyObject *obj_<% cname %>_get<% name %>(<% ctype %> *self,void *closure) {
+PyObject *obj_<% cname %>_get<% name %>(obj_<% cname %> *self,void *closure) {
 == if checkinit
     if(!self->mode) {
         PyErr_SetString(PyExc_RuntimeError,not_init_msg);
         return 0;
     }
 == endif
+<% prolog %>
     try {
-        return <% code %>;
+<% code %>
     } EXCEPT_HANDLERS(0)
 }
 ''')
 
 property_set = env.from_string('''
-int obj_<% cname %>_set<% name %>(<% ctype %> *self,PyObject *value,void *closure) {{
-    if(!value) {
+int obj_<% cname %>_set<% name %>(obj_<% cname %> *self,PyObject *arg,void *closure) {
+    if(!arg) {
         PyErr_SetString(PyExc_TypeError,no_delete_msg);
         return -1;
     }
@@ -48,23 +49,28 @@ int obj_<% cname %>_set<% name %>(<% ctype %> *self,PyObject *value,void *closur
         return -1;
     }
 == endif
+<% prolog %>
     try {
-        self->base.<% cppfunc %>(<% code %>);
+<% code %>
     } EXCEPT_HANDLERS(-1)
-
-    return 0;
-}}
+}
 ''')
 
 destruct = env.from_string('''
 void obj_<% name %>_dealloc(obj_<% name %> *self) {
-    if(self->mode == CONTAINS) self->base.~<% type %>();
+    switch(self->mode) {
+
 == if canholdref
-    else if(self->mode == MANAGEDREF) {
-        PyObject *ref = reinterpret_cast<ref_<% name %>>(self)->container;
-        Py_DECREF(ref);
-    }
+    case MANAGEDREF:
+        reinterpret_cast<ref_<% name %>*>(self)->~ref_<% name %>();
+        break;
 == endif
+    case CONTAINS:
+        self->base.~<% type %>();
+        break;
+    default: // suppress warnings
+        break;
+    }
     self->ob_type->tp_free(reinterpret_cast<PyObject*>(self));
 }
 ''')
@@ -105,11 +111,22 @@ extern PyTypeObject <% '*' if dynamic %>obj_<% name %>Type;
 PyTypeObject *get_obj_<% name %>Type() { return <% '&' if not dynamic %>obj_<% name %>Type; }
 
 == if canholdref
-struct ref_{name} {
+struct ref_<% name %> {
     PyObject_HEAD
     storage_mode mode;
     <% type %> &base;
     PyObject *container;
+
+    PY_MEM_NEW_DELETE
+
+    ref_<% name %>(<% type %> &base,PyObject *container) : mode(MANAGEDREF), base(base), container(container) {
+        Py_INCREF(container);
+        PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
+    }
+
+    ~ref_<% name %>() {
+        Py_DECREF(container);
+    }
 };
 == endif
 
@@ -120,15 +137,8 @@ struct obj_<% name %> {
 == endif
     <% type %> base;
 
-    void *operator new(size_t s) {
-        void *ptr = PyMem_Malloc(s);
-        if(!ptr) throw std::bad_alloc();
-        return ptr;
-    }
+    PY_MEM_NEW_DELETE
 
-    void operator delete(void *ptr) {
-        PyMem_Free(ptr);
-    }
 == for con in constructors
     obj_<% name %>(<% con.args %>) : base(<% con.argvals %>) {
         PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
@@ -142,16 +152,40 @@ struct obj_<% name %> {
 
 
 classtypedef = env.from_string('''
+<@ macro objsize() @><@
+    if features.managed_ref
+        @>sizeof(ref_<% name %>) > sizeof(obj_<% name %>) ? sizeof(ref_<% name %>) : <@
+    endif
+    @>sizeof(obj_<% name %>)<@ endmacro @>
+
 int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
     if(UNLIKELY(!safe_to_call_init(get_obj_<% name %>Type(),reinterpret_cast<PyObject*>(self)))) return -1;
-==if initdestruct
-    if(self->mode) self->base.~<% type %>();
+
+    <% type %> *addr = &self->base;
+
+== if features.managed_ref or initdestruct
+    /* before we can call the constructor, the destructor needs to be called if
+       we already have an initialized object */
+    switch(self->mode) {
+==     if features.managed_ref
+    case MANAGEDREF:
+        reinterpret_cast<ref_<% name %>*>(self)->base.~<% type %>();
+        addr = &reinterpret_cast<ref_<% name %>*>(self)->base;
+        break;
+==     endif
+==     if initdestruct
+    case CONTAINS:
+        self->base.~<% type %>();
+        break;
+==     endif
+    default:
+        self->mode = CONTAINS;
+        break;
+    }
 == endif
     try {
 <% initcode %>
     } EXCEPT_HANDLERS(-1)
-    self->mode = CONTAINS;
-    return 0;
 }
 
 == if dynamic
@@ -184,7 +218,7 @@ inline PyTypeObject *create_obj_<% name %>Type() {
     Py_DECREF(dict);
     if(UNLIKELY(!type)) return 0;
 
-    type->tp_basicsize = sizeof(obj_<% name %>);
+    type->tp_basicsize = <% objsize() %>;
     type->tp_dictoffset = 0;
     type->tp_weaklistoffset = 0;
 <@ if destructref @>    type->tp_dealloc = reinterpret_cast<destructor>(&obj_<% name %>_dealloc);<@ endif @>
@@ -202,7 +236,7 @@ PyTypeObject obj_<% name %>Type = {
     PyObject_HEAD_INIT(&obj__CommonMetaType)
     0,                         /* ob_size */
     "<% module %>.<% name %>", /* tp_name */
-    sizeof(obj_<% name %>), /* tp_basicsize */
+    <% objsize() %>, /* tp_basicsize */
     0,                         /* tp_itemsize */
     <@ if destructref @>reinterpret_cast<destructor>(&obj_<% name %>_dealloc)<@ else @>0<@ endif @>, /* tp_dealloc */
     0,                         /* tp_print */
@@ -628,7 +662,7 @@ extern "C" SHARED(void) init<% module %>(void) {
 cast_base = env.from_string('''
 <% type %> &cast_base_<% name %>(PyObject *o) {
 == if canholdref
-    if(reinterpret_cast<obj__CommonType*>(o)->mode == MANAGEDREF)
+    if(reinterpret_cast<obj__Common*>(o)->mode == MANAGEDREF)
         return reinterpret_cast<ref_<% name %>*>(o)->base;
 == endif
     return reinterpret_cast<obj_<% name %>*>(o)->base;
@@ -667,6 +701,17 @@ header_start = '''
 #endif
 
 
+#define PY_MEM_NEW_DELETE void *operator new(size_t s) {{            \\
+        void *ptr = PyMem_Malloc(s);                                \\
+        if(!ptr) throw std::bad_alloc();                            \\
+        return ptr;                                                 \\
+    }}                                                               \\
+                                                                    \\
+    void operator delete(void *ptr) {{                               \\
+        PyMem_Free(ptr);                                            \\
+    }}
+
+
 #pragma GCC visibility push(hidden)
 
 /* when thrown, indicates that a PyErr_X function was already called with the
@@ -694,9 +739,6 @@ overload_func_call = env.from_string('''
 
         NoSuchOverload(<% args %>);
         return <% errval %>;
-== if endlabel
-end:    ;
-== endif
 ''')
 
 typecheck_start = '''
