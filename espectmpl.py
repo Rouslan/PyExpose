@@ -43,18 +43,18 @@ int obj_<% cname %>_set<% name %>(obj_<% cname %> *self,PyObject *arg,void *clos
         PyErr_SetString(PyExc_TypeError,no_delete_msg);
         return -1;
     }
-== if checkinit
-    if(!self->mode) {
-        PyErr_SetString(PyExc_RuntimeError,not_init_msg);
-        return -1;
-    }
-== endif
 <% prolog %>
     try {
 <% code %>
     } EXCEPT_HANDLERS(-1)
 }
 ''')
+
+property_table = env.from_string('''<@
+    macro _ter(x,what) @><@
+        if x @>reinterpret_cast<<% what %>ter>(&obj_<% cname %>_<% what %><% name %>)<@
+        else @>0<@ endif @><@
+    endmacro @>{const_cast<char*>("<% name %>"),<% _ter(get,"get") %>,<% _ter(set,"set") %>,<@ if doc @>const_cast<char*>(<% doc|quote %>)<@ else @>0<@ endif @>,0}''')
 
 destruct = env.from_string('''
 void obj_<% name %>_dealloc(obj_<% name %> *self) {
@@ -99,7 +99,7 @@ PyMethodDef obj_{name}_methods[] = {{
 method_prolog = env.from_string('''
     if(!self->mode) {
         PyErr_SetString(PyExc_RuntimeError,not_init_msg);
-        return 0;
+        return <% errval %>;
     }
     <% type %> &base = <@ if needcast
         @>get_base_<% name %>(reinterpret_cast<PyObject*>(self),false)<@ else

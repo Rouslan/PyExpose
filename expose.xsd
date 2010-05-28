@@ -34,6 +34,7 @@
     <xsd:restriction base="xsd:string">
       <xsd:enumeration value="default"/>
       <xsd:enumeration value="copy"/>
+      <xsd:enumeration value="managedref"/>
     </xsd:restriction>
   </xsd:simpleType>
 
@@ -244,9 +245,11 @@
           <xsd:documentation>
             Specifies how a pointer or reference return value is to be handled.
             If the function returns by value, this attribute is meaningless. The
-            options are "default" and "copy". "default" is the same as ommitting
-            this attribute. "copy" means the value will be dereferenced and
-            copied.
+            options are "default", "copy" and "managedref". "default" is the
+            same as ommitting this attribute. "copy" means the value will be
+            dereferenced and copied. "managedref" means the returned Python
+            object will keep a reference and a pointer to the class, in order to
+            keep the class alive while the reference exists.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -264,21 +267,21 @@
 
   <xsd:element name="property">
     <xsd:complexType>
-      <xsd:all>
-        <xsd:element ref="doc" minOccurs="0"/>
-        <xsd:element name="get" minOccurs="0">
+      <xsd:choice maxOccurs="unbounded" minOccurs="0">
+        <xsd:element ref="doc"/>
+        <xsd:element name="get">
           <xsd:complexType>
             <xsd:attribute name="func" type="symbol" use="required"/>
             <xsd:attribute name="return-semantic" type="retsemantictype" default="default"/>
           </xsd:complexType>
         </xsd:element>
-        <xsd:element name="set" minOccurs="0">
+        <xsd:element name="set">
           <xsd:complexType>
             <xsd:attribute name="func" type="symbol" use="required"/>
             <xsd:attribute name="overload" type="arglist"/>
           </xsd:complexType>
         </xsd:element>
-      </xsd:all>
+      </xsd:choice>
 
       <xsd:attribute name="name" type="ident" use="required"/>
       <xsd:attribute name="get" type="symbol"/>
@@ -287,7 +290,7 @@
   </xsd:element>
 
 
-  <xsd:element name="member">
+  <xsd:element name="attr">
     <xsd:annotation>
       <xsd:documentation>
         Expose a member variable as a Python attribute.
@@ -322,7 +325,7 @@
         <xsd:element ref="init"/>
         <xsd:element ref="def"/>
         <xsd:element ref="property"/>
-        <xsd:element ref="member"/>
+        <xsd:element ref="attr"/>
         <xsd:element ref="doc"/>
       </xsd:choice>
 

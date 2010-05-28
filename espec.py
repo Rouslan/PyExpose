@@ -394,16 +394,23 @@ class TypedDefDef(object):
         return self._output(conv,'','','PyObject*','func_')
 
 
+def base_prefix(x):
+    if x.static:
+        return x.full_name()
+
+    return 'base.' + x.canon_name
+
+
 class TypedMethodDef(TypedDefDef):
     def __init__(self,classdef,defdef):
         super(TypedMethodDef,self).__init__(classdef.type,defdef)
         self.classdef = classdef
 
-    def call_code_base(self,ov):
-        if ov.func.static:
-            return ov.func.full_name()
+    def static(self):
+        return all(ov.func.static for ov in self.overloads)
 
-        return 'base.' + ov.func.canon_name
+    def call_code_base(self,ov):
+        return base_prefix(ov.func)
 
     def topy(self,conv,t,retsemantic):
         return conv.topy(t,retsemantic,'self')
@@ -412,7 +419,7 @@ class TypedMethodDef(TypedDefDef):
         prolog = ''
         type_extra = ''
 
-        if self.overloads[0].func.static:
+        if self.static():
             type_extra = '|METH_STATIC'
         else:
             prolog = self.classdef.method_prolog()
@@ -525,7 +532,7 @@ class TypedPropertyDef:
         if self.get:
             r = tmpl.property_get.render(
                 cname = self.get.classdef.name,
-                prolog = self.get.classdef.method_prolog(),
+                prolog = '' if self.get.static() else self.get.classdef.method_prolog(),
                 name = self.name,
                 checkinit = True,
                 code = self.get.function_call(conv))
@@ -533,42 +540,82 @@ class TypedPropertyDef:
         if self.set:
             r += tmpl.property_set.render(
                 cname = self.set.classdef.name,
-                prolog = self.set.classdef.method_prolog(),
+                prolog = '' if self.set.static() else self.set.classdef.method_prolog('-1'),
                 name = self.name,
                 checkinit = True,
                 code = self.set.function_call(conv))
 
         return r
 
-    def table_entry(self,classdef):
-        funccast = 'reinterpret_cast<{{0}}ter>(&obj_{cname}_{{0}}{name})'.format(
-            cname = classdef.name,
-            name = self.name)
-
-        return '{{const_cast<char*>("{name}"),{getter},{setter},{doc},0}}'.format(
+    def table_entry(self):
+        return tmpl.property_table.render(
             name = self.name,
-            getter = funccast.format("get") if self.get else "0",
-            setter = funccast.format("set") if self.set else "0",
-            doc = 'const_cast<char*>({0})'.format(tmpl.quote_c(self.doc)) if self.doc else "0")
+            cname = self.get.classdef.name,
+            get = bool(self.get),
+            set = bool(self.set),
+            doc = self.doc)
+
 
 class MemberDef:
     doc = None
 
-    def table_entry(self,classdef,classint,conv):
-        m = classint.find(self.cmember)[0]
-        if not isinstance(m,gccxml.CPPField):
-            raise SpecificationError('"{0}" is not a member variable'.format(self.cmember))
 
-        # TODO: offsetof is not relaiable for non-POD types (with g++, it will fail for classes with diamond virtual inheritance). A better solution is needed.
-        # TODO: Don't even allow this when the type has an exposed subclass with multiple-inheritance. Create get/set methods instead.
-        return '{{const_cast<char*>("{name}"),{type},offsetof(obj_{classdefname},base) + offsetof({classname},{mname}),{flags},{doc}}}'.format(
+class TypedMemberDef:
+    def __init__(self,classdef,memdef):
+        self.classdef = classdef
+        self.name = memdef.name
+        self.doc = memdef.doc
+        self.readonly = memdef.readonly
+        self.cmember = classdef.type.find(memdef.cmember)[0]
+        if not isinstance(self.cmember,gccxml.CPPField):
+            raise SpecificationError('"{0}" is not a member variable'.format(memdef.cmember))
+
+    def getter_type(self,conv):
+        return self.cmember.type if conv.member_macro(self.cmember.type) else gccxml.CPPReferenceType(self.cmember.type)
+
+    def output(self,conv):
+        r = ''
+        if self.classdef.has_multi_inherit_subclass() or not conv.member_macro(self.cmember.type):
+            r = tmpl.property_get.render(
+                cname = self.classdef.name,
+                prolog = '' if self.cmember.static else self.classdef.method_prolog(),
+                name = self.name,
+                checkinit = True,
+                code = '        return {0};'.format(
+                    conv.topy(self.getter_type(conv),RET_MANAGED_REF,'self').format(base_prefix(self.cmember))))
+
+            if not self.readonly:
+                r += tmpl.property_set.render(
+                    cname = self.classdef.name,
+                    prolog = '' if self.cmember.static else self.classdef.method_prolog('-1'),
+                    name = self.name,
+                    checkinit = True,
+                    code = '        {0} = {1};\n        return 0;'.format(base_prefix(self.cmember),conv.frompy(self.cmember.type)[0].format('arg')))
+        return r
+
+    def really_a_property(self,conv):
+        return self.classdef.has_multi_inherit_subclass() or not conv.member_macro(self.cmember.type)
+
+    def table_entry(self,conv):
+        mm = conv.member_macro(self.cmember.type)
+        if self.classdef.has_multi_inherit_subclass() or not mm:
+            r = tmpl.property_table.render(
+                name = self.name,
+                cname = self.classdef.name,
+                get = True,
+                set = not self.readonly,
+                doc = self.doc)
+            return True,r
+
+        r = '{{const_cast<char*>("{name}"),{type},offsetof(obj_{classdefname},base) + offsetof({classname},{mname}),{flags},{doc}}}'.format(
             name = self.name,
-            type = conv.member_macro(m.type),
-            classdefname = classdef.name,
-            classname = classint.name,
-            mname = self.cmember,
+            type = mm,
+            classdefname = self.classdef.name,
+            classname = self.classdef.type.typestr(),
+            mname = self.cmember.name,
             flags = 'READONLY' if self.readonly else '0',
             doc = 'const_cast<char*>({0})'.format(tmpl.quote_c(self.doc)) if self.doc else '0')
+        return False,r
 
 
 class GetSetDef:
@@ -731,7 +778,7 @@ class TypedClassDef:
         self.methods = [TypedMethodDef(self,dd) for dd in classdef.methods.data.itervalues()]
 
         self.properties = [TypedPropertyDef(self,pd) for pd in classdef.properties]
-        self.vars = classdef.vars
+        self.vars = [TypedMemberDef(self,mdef) for mdef in classdef.vars]
         self.doc = classdef.doc
 
         self.bases = []
@@ -861,10 +908,11 @@ class TypedClassDef:
     def have_mapping(self):
         return self.have_special('__mapping__len__','__mapping__getitem__','__mapping__setitem__')
 
-    def method_prolog(self):
+    def method_prolog(self,errval = '0'):
         return tmpl.method_prolog.render(
             type = self.type.canon_name,
             name = self.name,
+            errval = errval,
             needcast = self.has_multi_inherit_subclass())
 
     def output(self,out,module):
@@ -906,22 +954,29 @@ class TypedClassDef:
             initdestruct = True
 
 
+        getsettable = []
+        memberstable = []
+        for v in self.vars:
+            print >> out.cpp, v.output(out.conv)
+            getset,entry = v.table_entry(out.conv)
+            (getsettable if getset else memberstable).append(entry)
+
         getsetref = False
-        if self.properties:
+        if self.properties or getsettable:
             for p in self.properties:
                 print >> out.cpp, p.output(out.conv),
 
             print >> out.cpp,  tmpl.getset_table.format(
                 name = self.name,
-                items = ',\n    '.join(p.table_entry(self) for p in self.properties)),
+                items = ',\n    '.join(itertools.chain((p.table_entry() for p in self.properties),getsettable))),
 
             getsetref = True
 
         membersref = False
-        if self.vars:
+        if memberstable:
             print >> out.cpp, tmpl.member_table.format(
                 name = self.name,
-                items = ',\n    '.join(v.table_entry(self,self.type,out.conv) for v in self.vars)),
+                items = ',\n    '.join(memberstable)),
             membersref = True
 
 
@@ -1337,11 +1392,8 @@ class Conversion:
         raise SpecificationError('No conversion from "PyObject*" to "{0}" is registered'.format(t.typestr()))
 
     def member_macro(self,t):
-        try:
-            return self.__pymember[t]
-        except LookupError:
-            # TODO: this should be done automatically
-            raise SpecificationError('A member of type "{0}" cannot be exposed directly. Define a getter and/or setter for this value instead.'.format(t.typestr()))
+        return self.__pymember.get(t)
+
 
     def check_and_cast(self,t):
         cdef = self.cppclasstopy[strip_refptr(t)]
@@ -1471,6 +1523,9 @@ class Conversion:
         return node
 
 
+def methods_that_return(c):
+    return itertools.chain(((m.name,m) for m in c.methods),((p.name,p.get) for p in c.properties if p.get))
+
 
 class ModuleDef:
     def __init__(self):
@@ -1529,16 +1584,27 @@ class ModuleDef:
         for c in classes.itervalues():
             c.findbases(classes)
 
+
         # find all methods and functions that return objects that require special storage
         for c in classes.itervalues():
-            for m in c.methods:
+            for name,m in methods_that_return(c):
                 for ov in m.overloads:
                     if ov.retsemantic == RET_MANAGED_REF and isinstance(ov.func.returns,(gccxml.CPPReferenceType,gccxml.CPPPointerType)):
                         t = strip_cvq(ov.func.returns.type)
                         retcdef = classes.get(t)
                         if not retcdef:
-                            raise SpecificationError('return type of "{0}" is not an exposed type'.format(cm.name))
+                            raise SpecificationError('return type of "{0}" is not an exposed type'.format(name))
                         retcdef.features.managed_ref = True
+
+            for v in c.vars:
+                if v.really_a_property(conv):
+                    gt = v.getter_type(conv)
+                    if isinstance(gt,gccxml.CPPReferenceType):
+                        cdef = classes.get(gt.type)
+                        if not cdef:
+                            raise SpecificationError('Attribute "{0}" does not refer to an exposed type'.format(v.name))
+                        cdef.features.managed_ref = True
+
 
         # Sort classes by heirarchy. Base classes need to be declared before derived classes.
         classes = sorted(classes.values(),key=TypedClassDef.basecount)
@@ -1638,7 +1704,7 @@ class tag_Class(tag):
             self.r.doc = data
         elif name == "property":
             self.r.properties.append(data)
-        elif name == 'member':
+        elif name == 'attr':
             self.r.vars.append(data)
         elif name == 'def':
             add_func(self.r.methods,data)
@@ -1757,7 +1823,7 @@ tagdefs = {
     "module" : tag_Module,
     "property" : tag_Property,
     "doc" : tag_Doc,
-    "member" : tag_Member,
+    "attr" : tag_Member,
     'get' : tag_GetSet,
     'set' : tag_GetSet,
     'def' : tag_Def

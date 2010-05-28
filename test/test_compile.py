@@ -56,7 +56,7 @@ class TestCompile(unittest.TestCase):
             <class name="AClass" type="MyClass">
                 <doc>class doc string</doc>
                 <init/>
-                <member cmember="value"/>
+                <attr cmember="value"/>
                 <def func="greet"/>
             </class>
         </module>
@@ -269,7 +269,7 @@ class TestManagedRef(TestCompile):
             </class>
             <class type="B">
                 <init/>
-                <def func="get_a" return-semantic="managedref"/>
+                <attr cmember="a"/>
                 <def func="get_value"/>
             </class>
         </module>
@@ -280,7 +280,7 @@ class TestManagedRef(TestCompile):
 
         b = tm.B(11)
         self.assertEqual(b.get_value(),22)
-        a = b.get_a()
+        a = b.a
         self.assertEqual(a.value,22)
         a.value = 23
         self.assertEqual(a.value,23)
