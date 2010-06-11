@@ -137,6 +137,13 @@ class CPPFunction(CPPSymbol):
     def __repr__(self):
         return '<CPPFunction: {0}>'.format(self.name) if hasattr(self,'name') else '<CPPFunction>'
 
+class CPPOperatorFunction(CPPFunction):
+    __slots__ = ()
+
+    @property
+    def canon_name(self):
+        return 'operator ' + self.name
+
 class CPPPointerType(CPPType):
     __slots__ = 'type','size'
 
@@ -415,7 +422,7 @@ class tag_MethodType(tag):
     child = function_child
 
 class tag_OperatorFunction(tag_Function):
-    pass
+    OType = CPPOperatorFunction
 
 class tag_Union(tag):
     OType = CPPUnion

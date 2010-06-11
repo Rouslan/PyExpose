@@ -79,7 +79,7 @@ class TestCompile(unittest.TestCase):
 
             spec = espec.getspec('spec.xml')
             spec.name = self.modname() # give the new module a unique name
-            expose.generate_intermediate(spec,'gccxml.interm','.','g++','-I'+pyinc)
+            expose.generate_intermediate(spec,'gccxml.interm','.',None,'g++','-I'+pyinc)
             expose.generate_module(spec,'gccxml.interm','.')
 
             self.comp = distutils.ccompiler.new_compiler()
@@ -291,6 +291,175 @@ class TestManagedRef(TestCompile):
         del b
         gc.collect()
         self.assertEqual(a.value,24)
+
+class TestNumOperators(TestCompile):
+    header_file = '''
+        #include <math.h>
+
+        class Vector {
+        public:
+            Vector() : x(0), y(0), z(0) {}
+            Vector(float _x,float _y,float _z) : x(_x), y(_y), z(_z) {}
+
+            bool operator==(const Vector &b) { return x == b.x && y == b.y && z == b.z; }
+            bool operator!=(const Vector &b) { return !operator==(b); }
+
+            Vector operator+(const Vector &b) const { return Vector(x+b.x,y+b.y,z+b.z); }
+            Vector operator-(const Vector &b) const { return Vector(x-b.x,y-b.y,z-b.z); }
+
+            Vector operator-() const { return Vector(-x,-y,-z); }
+
+            Vector operator*(float c) const { return Vector(x*c,y*c,z*c); }
+            Vector operator/(float c) const { return Vector(x/c,y/c,z/c); }
+
+            Vector &operator+=(const Vector &b) { x += b.x; y += b.y; z += b.z; return *this; }
+            Vector &operator-=(const Vector &b) { x -= b.x; y -= b.y; z -= b.z; return *this; }
+
+            Vector &operator*=(float c) { x *= c; y *= c; z *= c; return *this; }
+            Vector &operator/=(float c) { x /= c; y /= c; z /= c; return *this; }
+
+            Vector operator*(const Vector &b) const {
+                return Vector(y * b.z - z * b.y,z * b.x - x * b.z,x * b.y - y * b.x);
+            }
+            Vector &operator*=(const Vector &b) {
+                float oldX = x;
+                x = y * b.z - z * b.y;
+                float oldY = y;
+                y = z * b.x - oldX * b.z;
+                z = oldX * b.y - oldY * b.x;
+            }
+
+            Vector pow(float n) const { return Vector(::pow(x,n),::pow(y,n),::pow(z,n)); }
+            Vector powmod(float n,float m) const {
+                return Vector(fmod(::pow(x,n),m),fmod(::pow(y,n),m),fmod(::pow(z,n),m));
+            }
+            Vector &ipow(float n) {
+                x = ::pow(x,n);
+                y = ::pow(y,n);
+                z = ::pow(z,n);
+                return *this;
+            }
+            Vector &ipowmod(float n,float m) {
+                x = fmod(::pow(x,n),m);
+                y = fmod(::pow(y,n),m);
+                z = fmod(::pow(z,n),m);
+                return *this;
+            }
+
+            float square() const { return x*x + y*y + z*z; }
+            float absolute() const { return sqrtf(square()); }
+
+            float x,y,z;
+        };
+
+        inline Vector operator*(float c,const Vector& v) { return Vector(c*v.x,c*v.y,c*v.z); }
+        inline Vector operator/(float c,const Vector& v) { return Vector(c/v.x,c/v.y,c/v.z); }
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="Vector">
+                <init/>
+                <attr cmember="x"/>
+                <attr cmember="y"/>
+                <attr cmember="z"/>
+                <def name="__add__" func="operator+"/>
+                <def name="__iadd__" func="operator+="/>
+                <def name="__sub__" func="operator-" arity="1"/>
+                <def name="__isub__" func="operator-="/>
+                <def name="__mul__" func="operator*"/>
+                <def name="__imul__" func="operator*="/>
+                <def name="__rmul__" func="::operator*"/>
+                <def name="__pow__" func="pow"/>
+                <def name="__pow__" func="powmod"/>
+                <def name="__ipow__" func="ipow"/>
+                <def name="__ipow__" func="ipowmod"/>
+                <def name="__abs__" func="absolute"/>
+            </class>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+        va = tm.Vector(1,2,3)
+        self.assertEqual(va.x,1)
+        self.assertEqual(va.y,2)
+        self.assertEqual(va.z,3)
+
+        # __add__
+        vb = va + tm.Vector(5,6,7)
+        self.assertEqual(vb.x,6)
+        self.assertEqual(vb.y,8)
+        self.assertEqual(vb.z,10)
+
+        # __iadd__
+        vb += tm.Vector(-4,1,9)
+        self.assertEqual(vb.x,2)
+        self.assertEqual(vb.y,9)
+        self.assertEqual(vb.z,19)
+
+        # __sub__
+        vb = tm.Vector(8,12,14) - tm.Vector(0,3,14)
+        self.assertEqual(vb.x,8)
+        self.assertEqual(vb.y,9)
+        self.assertEqual(vb.z,0)
+
+        # __isub__
+        vb -= tm.Vector(10,20,30)
+        self.assertEqual(vb.x,-2)
+        self.assertEqual(vb.y,-11)
+        self.assertEqual(vb.z,-30)
+
+        # __mul__
+        vb = tm.Vector(5,4,3) * tm.Vector(3,18,-2)
+        self.assertEqual(vb.x,-62)
+        self.assertEqual(vb.y,19)
+        self.assertEqual(vb.z,78)
+
+        # __mul__ with different type
+        vb = tm.Vector(9,11,15) * 5
+        self.assertEqual(vb.x,45)
+        self.assertEqual(vb.y,55)
+        self.assertEqual(vb.z,75)
+
+        # __rmul__
+        vb = 3 * tm.Vector(6,2,10)
+        self.assertEqual(vb.x,18)
+        self.assertEqual(vb.y,6)
+        self.assertEqual(vb.z,30)
+
+        # __imul__
+        vb *= tm.Vector(19,-20,-7)
+        self.assertEqual(vb.x,558)
+        self.assertEqual(vb.y,696)
+        self.assertEqual(vb.z,-474)
+
+        # __imul__ with different type
+        vb *= 7
+        self.assertEqual(vb.x,3906)
+        self.assertEqual(vb.y,4872)
+        self.assertEqual(vb.z,-3318)
+
+        # __pow__
+        vb = tm.Vector(3,9,2) ** 3
+        self.assertEqual(vb.x,27)
+        self.assertEqual(vb.y,729)
+        self.assertEqual(vb.z,8)
+
+        # __ipow__
+        vb **= 2
+        self.assertEqual(vb.x,729)
+        self.assertEqual(vb.y,531441)
+        self.assertEqual(vb.z,64)
+
+        # __pow__
+        vb = pow(tm.Vector(4,-2,5),4,11)
+        self.assertEqual(vb.x,3)
+        self.assertEqual(vb.y,5)
+        self.assertEqual(vb.z,9)
+
+        # __abs__
+        self.assertAlmostEqual(abs(tm.Vector(-1,3,12)),12.409674,4)
 
 
 

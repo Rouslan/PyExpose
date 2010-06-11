@@ -106,7 +106,7 @@
                         </xsl:call-template>
                     </dt>
                     <dd>
-                        <xsl:value-of select="xsd:annotation/xsd:documentation"/>
+                        <xsl:apply-templates select="xsd:annotation/xsd:documentation"/>
                     </dd>
                 </xsl:for-each>
             </dl>

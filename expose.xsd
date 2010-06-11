@@ -7,19 +7,19 @@
   <xsd:annotation>
     <xsd:documentation>
       Example:
-      <pre>
-      &lt;?xml version=&quot;1.0&quot;?&gt;
-      &lt;module name=&quot;modulename&quot; include=&quot;vector&quot;&gt;
-        &lt;doc&gt;module doc string&lt;/doc&gt;
+      <pre><![CDATA[
+      <?xml version="1.0"?>
+      <module name="modulename" include="vector">
+        <doc>module doc string</doc>
 
-        &lt;class name=&quot;DVector&quot; type=&quot;std::vector&amp;lt;double&amp;gt;&quot;&gt;
-          &lt;doc&gt;class doc string&lt;/doc&gt;
-          &lt;init/&gt;
-          &lt;property name=&quot;size&quot; get=&quot;size&quot; set=&quot;resize&quot;/&gt;
-          &lt;def func=&quot;push_back&quot;/&gt;
-        &lt;/class&gt;
-      &lt;/module&gt;
-      </pre>
+        <class name="DVector" type="std::vector&lt;double&gt;">
+          <doc>class doc string</doc>
+          <init/>
+          <property name="size" get="size" set="resize"/>
+          <def func="push_back"/>
+        </class>
+      </module>
+      ]]></pre>
     </xsd:documentation>
   </xsd:annotation>
 
@@ -35,6 +35,7 @@
       <xsd:enumeration value="default"/>
       <xsd:enumeration value="copy"/>
       <xsd:enumeration value="managedref"/>
+      <xsd:enumeration value="self"/>
     </xsd:restriction>
   </xsd:simpleType>
 
@@ -83,10 +84,11 @@
   <xsd:element name="def">
     <xsd:annotation>
       <xsd:documentation>
-        <p>Specifies a method when inside &lt;class&gt;, specifies a function when
-        inside &lt;module&gt;.</p>
+        <p>Specifies a method when inside &lt;class&gt;, specifies a function
+        when inside &lt;module&gt;.</p>
 
-        <p>Special methods can be defined by using the equivalent Python method name</p>
+        <p>Special methods can be defined by using the equivalent Python method
+        name:</p>
         <table>
           <tr><th>Python</th><th>C++</th></tr>
           <tr><td>__new__</td><td>tp_new</td></tr>
@@ -110,19 +112,33 @@
           <tr><td>next</td><td>tp_iternext</td></tr>
           <tr><td>__contains__</td><td>tp_as_sequence->sq_contains</td></tr>
           <tr><td>__add__</td><td>tp_as_number->nb_add</td></tr>
+          <tr><td>__radd__</td><td>tp_as_number->nb_add (arguments reversed)</td></tr>
           <tr><td>__sub__</td><td>tp_as_number->nb_subtract</td></tr>
+          <tr><td>__rsub__</td><td>tp_as_number->nb_subtract (arguments reversed)</td></tr>
           <tr><td>__mul__</td><td>tp_as_number->nb_multiply</td></tr>
+          <tr><td>__rmul__</td><td>tp_as_number->nb_multiply (arguments reversed)</td></tr>
           <tr><td>__floordiv__</td><td>tp_as_number->nb_floor_divide</td></tr>
+          <tr><td>__rfloordiv__</td><td>tp_as_number->nb_floor_divide (arguments reversed)</td></tr>
           <tr><td>__mod__</td><td>tp_as_number->nb_remainder</td></tr>
+          <tr><td>__rmod__</td><td>tp_as_number->nb_remainder (arguments reversed)</td></tr>
           <tr><td>__divmod__</td><td>tp_as_number->nb_divmod</td></tr>
+          <tr><td>__rdivmod__</td><td>tp_as_number->nb_divmod (arguments reversed)</td></tr>
           <tr><td>__pow__</td><td>tp_as_number->nb_power</td></tr>
+          <tr><td>__rpow__</td><td>tp_as_number->nb_power (arguments reversed)</td></tr>
           <tr><td>__lshift__</td><td>tp_as_number->nb_lshift</td></tr>
+          <tr><td>__rlshift__</td><td>tp_as_number->nb_lshift (arguments reversed)</td></tr>
           <tr><td>__rshift__</td><td>tp_as_number->nb_rshift</td></tr>
+          <tr><td>__rrshift__</td><td>tp_as_number->nb_rshift (arguments reversed)</td></tr>
           <tr><td>__and__</td><td>tp_as_number->nb_and</td></tr>
+          <tr><td>__rand__</td><td>tp_as_number->nb_and (arguments reversed)</td></tr>
           <tr><td>__xor__</td><td>tp_as_number->nb_xor</td></tr>
+          <tr><td>__rxor__</td><td>tp_as_number->nb_xor (arguments reversed)</td></tr>
           <tr><td>__or__</td><td>tp_as_number->nb_or</td></tr>
+          <tr><td>__ror__</td><td>tp_as_number->nb_or (arguments reversed)</td></tr>
           <tr><td>__div__</td><td>tp_as_number->nb_divide</td></tr>
+          <tr><td>__rdiv__</td><td>tp_as_number->nb_divide (arguments reversed)</td></tr>
           <tr><td>__truediv__</td><td>tp_as_number->nb_true_divide</td></tr>
+          <tr><td>__rtruediv__</td><td>tp_as_number->nb_true_divide (arguments reversed)</td></tr>
           <tr><td>__iadd__</td><td>tp_as_number->nb_inplace_add</td></tr>
           <tr><td>__isub__</td><td>tp_as_number->nb_inplace_subtract</td></tr>
           <tr><td>__imul__</td><td>tp_as_number->nb_inplace_multiply</td></tr>
@@ -225,7 +241,26 @@
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="func" type="symbol" use="required"/>
+      <xsd:attribute name="func" type="symbol" use="required">
+        <xsd:annotation>
+          <xsd:documentation>
+            <p>The C++ function/method that implements this.</p>
+
+            <p>When specifying a method, whether the resulting Python method is
+            static is determined by whether the C++ method is static. This can
+            be overridden using the <var>static</var> attribute. A method may
+            also be implemented using a C++ function, in which case the function
+            must accept the class's type as the first argument, unless the
+            <var>static</var> attribute is specified (to prevent mistakes,
+            specifying a function that doesn't accept the class type as its
+            first argument, without specifying <var>static</var>, is considered
+            an error).</p>
+
+            <p>The __rop__ methods will also accept C++ functions that accept
+            the class type as the second argument.</p>
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
 
       <xsd:attribute name="overload" type="arglist">
         <xsd:annotation>
@@ -240,20 +275,44 @@
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="return-semantic" type="retsemantictype" default="default">
+      <xsd:attribute name="return-semantic" type="retsemantictype">
         <xsd:annotation>
           <xsd:documentation>
-            Specifies how a pointer or reference return value is to be handled.
-            If the function returns by value, this attribute is meaningless. The
-            options are "default", "copy" and "managedref". "default" is the
-            same as ommitting this attribute. "copy" means the value will be
-            dereferenced and copied. "managedref" means the returned Python
-            object will keep a reference and a pointer to the class, in order to
-            keep the class alive while the reference exists.
+            <p>Specifies how a pointer or reference return value is to be
+            handled. If the function returns by value, this attribute is
+            meaningless. The options are "default", "copy", "managedref" and
+            "self". "default" is the same as ommitting this attribute. "copy"
+            means the value will be dereferenced and copied. "managedref" means
+            the returned Python object will keep a reference and a pointer to
+            the class, in order to keep the class alive while the reference
+            exists. "self" means ignore the return value and return what would
+            be the "self" argument in Python.</p>
+
+            <p>For __iop__ methods, the default is "self".</p>
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
 
+      <xsd:attribute name="static" type="" default="false">
+        <xsd:annotation>
+          <xsd:documentation>
+            For methods only, specifies whether the method will be static. This
+            is determined automatically when <var>func</var> is a method.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="arity" type="">
+        <xsd:annotation>
+          <xsd:documentation>
+            <p>Filters the overloaded functions/methods specified by
+            <var>func</var> to ones that have this many arguments. This is so
+            operators with different meaning but the same name (e.g. negation
+            and subtraction), can be conveniently selected. Specifying both
+            <var>arity</var> and <var>overload</var> is redundant.</p>
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
     </xsd:complexType>
   </xsd:element>
 
@@ -314,6 +373,8 @@
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
+
+      <xsd:attribute name="readonly" type="" default="false"/>
 
     </xsd:complexType>
   </xsd:element>

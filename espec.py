@@ -5,6 +5,7 @@ import os.path
 import copy
 import sys
 import textwrap
+import functools
 
 from xmlparse import *
 import err
@@ -17,6 +18,7 @@ UNINITIALIZED_ERR_TYPE = "PyExc_RuntimeError"
 
 RET_COPY = 1
 RET_MANAGED_REF = 2
+RET_SELF = 3
 
 GETTER = 1
 SETTER = 2
@@ -124,11 +126,11 @@ class LevelBaseTraverser:
 def real_type(x):
     return real_type(x.type) if isinstance(x,gccxml.CPPTypeDef) else x
 
-def _namespace_find(self,x):
+def _namespace_find(self,x,test):
     parts = x.split('::',1)
     levels = LevelBaseTraverser(self) if isinstance(self,gccxml.CPPClass) else [[self]]
     for l in levels:
-        matches = [real_type(m) for m in itertools.chain.from_iterable(i.members for i in l) if hasattr(m,"canon_name") and m.canon_name == parts[0]]
+        matches = [real_type(m) for m in itertools.chain.from_iterable(i.members for i in l) if hasattr(m,"canon_name") and m.canon_name == parts[0] and test(m)]
 
         if matches:
             if len(parts) == 2:
@@ -141,15 +143,16 @@ def _namespace_find(self,x):
             return matches
     return []
 
-def namespace_find(self,x):
+def namespace_find(self,x,test=None):
+    if test is None: test = lambda x: True
     if x.startswith('::'): # explicit global namespace
         while self.context: self = self.context
-        r = _namespace_find(self,x[2:])
+        r = _namespace_find(self,x[2:],test)
         if r: return r
     else:
         # if the symbol isn't found in this scope, check the outer scope
         while self:
-            r = _namespace_find(self,x)
+            r = _namespace_find(self,x,test)
             if r: return r
             self = self.context
 
@@ -207,9 +210,6 @@ class Tab:
 def mandatory_args(x):
     return len(list(itertools.takewhile(lambda a: a.default is None, x.args)))
 
-def can_accept(x,args):
-    if not (mandatory_args(x) <= args <= len(x.args)):
-        raise SpecificationError('"{0}" must take {1} argument(s)'.format(x.canon_name,args))
 
 def varargs(x):
     return x.args and x.args[-1] is gccxml.cppellipsis
@@ -280,10 +280,12 @@ class Output:
 
 
 class Overload:
-    def __init__(self,func=None,retsemantic=None,args=None):
+    def __init__(self,func=None,retsemantic=None,args=None,static=False,arity=None):
         self.func = func
         self.retsemantic = retsemantic
         self.args = args
+        self.static = static
+        self.arity = arity
 
 class DefDef:
     def __init__(self,name = None,doc = None):
@@ -291,11 +293,45 @@ class DefDef:
         self.doc = doc
         self.overloads = []
 
+class CallCode(object):
+    """C++ code representing a function call with optional predefined argument values."""
+    def __init__(self,code,binds=None):
+        self.code = code
+        self.binds = binds or []
+
+    def output(self,args,ind):
+        args = list(args)
+        for i,val in self.binds:
+            args.insert(i,val)
+        return self.code.format(','.join('\n'+ind+a for a in args))
+
+class BindableArg:
+    def __init__(self,arg,val=None):
+        self.arg = arg
+        self.val = val
 
 class TypedOverload:
     def __init__(self,func,overload):
         self.func = func
         self.retsemantic = overload.retsemantic
+        self.argbinds = [BindableArg(a) for a in func.args]
+        self.explicit_static = overload.static
+
+    def bind(self,index,val):
+        self.argbinds[index].val = val
+
+    @property
+    def args(self):
+        return [a.arg for a in self.argbinds if a.val is None]
+
+    def can_accept(self,args):
+        if not (mandatory_args(self) <= args <= len(self.args)):
+            raise SpecificationError(
+                '"{0}" must take {1} argument(s)'.format(self.func.canon_name,args))
+
+    @property
+    def static(self):
+        return self.explicit_static or isinstance(self.func,gccxml.CPPFunction) or (isinstance(self.func,gccxml.CPPMethod) and self.func.static)
 
 class TypedDefDef(object):
     def __init__(self,scope,defdef):
@@ -304,7 +340,10 @@ class TypedDefDef(object):
         self.overloads = []
 
         for ov in defdef.overloads:
-            cf = scope.find(ov.func)
+            extratest = None
+            if ov.arity is not None:
+                extratest = lambda x: mandatory_args(x) <= ov.arity <= len(x.args)
+            cf = scope.find(ov.func,extratest)
 
             # if the first one is a function, they all should be functions
             if not isinstance(cf[0],(gccxml.CPPFunction,gccxml.CPPMethod)):
@@ -321,12 +360,12 @@ class TypedDefDef(object):
 
     def call_code(self,conv,ov):
         code = self.call_code_base(ov) + '({0})'
-
-        return code + '; Py_RETURN_NONE;' if ov.func.returns == conv.void else \
-            'return {0};'.format(self.topy(conv,ov.func.returns,ov.retsemantic).format(code))
+        return CallCode(code + '; Py_RETURN_NONE;' if ov.func.returns == conv.void else
+            'return {0};'.format(self.topy(conv,ov.func.returns,ov.retsemantic).format(code)),
+            [(i,argbind.val) for i,argbind in enumerate(ov.argbinds) if argbind.val])
 
     def make_argss(self,conv):
-        return [(self.call_code(conv,ov),ov.func.args) for ov in self.overloads]
+        return [(self.call_code(conv,ov),ov.args) for ov in self.overloads]
 
     def check_args_ret(self,conv):
         # this gets overridden by SpecialMethod
@@ -336,22 +375,26 @@ class TypedDefDef(object):
         self.check_args_ret(conv)
         return conv.function_call(self.make_argss(conv),use_kwds = use_kwds)
 
-    def function_call_1arg(self,conv,ind=Tab(2)):
+    def function_call_1arg(self,conv,ind=Tab(2),var='arg'):
         self.check_args_ret(conv)
-        return conv.function_call_1arg(self.make_argss(conv),ind=ind)
+        return conv.function_call_1arg(self.make_argss(conv),ind=ind,var=var)
 
-    def function_call_1arg_fallthrough(self,conv,ind=Tab(2)):
+    def function_call_narg_fallthrough(self,conv,vars,ind=Tab(2)):
         self.check_args_ret(conv)
-        return conv.function_call_1arg_fallthrough(self.make_argss(conv),ind)
+        return conv.function_call_narg_fallthrough(self.make_argss(conv),vars,ind)
+
+    def function_call_1arg_fallthrough(self,conv,ind=Tab(2),var='arg'):
+        self.check_args_ret(conv)
+        return conv.function_call_1arg_fallthrough(self.make_argss(conv),ind,var)
 
     def function_call_0arg(self,conv,ind=Tab(2)):
         self.check_args_ret(conv)
         assert len(self.overloads) == 1
-        return ind.line(self.call_code(conv,self.overloads[0]).format(''))
+        return ind.line(self.call_code(conv,self.overloads[0]).output([],ind))
 
     def _output(self,conv,prolog,type_extra,selfvar,funcnameprefix):
-        arglens = [len(ov.func.args) for ov in self.overloads]
-        maxargs = max(len(ov.func.args) for ov in self.overloads)
+        arglens = [len(ov.args) for ov in self.overloads]
+        maxargs = max(len(ov.args) for ov in self.overloads)
         minargs = min(mandatory_args(ov.func) for ov in self.overloads)
 
         if maxargs == 0:
@@ -359,11 +402,11 @@ class TypedDefDef(object):
             type = 'METH_NOARGS'
             funcargs = ',PyObject *'
             code = self.function_call_0arg(conv)
-        elif maxargs == 1 and minargs == 1 and not self.overloads[0].func.args[0].name:
+        elif maxargs == 1 and minargs == 1 and not self.overloads[0].args[0].name:
             type = 'METH_O'
             funcargs = ',PyObject *arg'
             code = self.function_call_1arg(conv)
-        elif len(self.overloads) == 1 and any(a.name for a in self.overloads[0].func.args): # is there a named argument?
+        elif len(self.overloads) == 1 and any(a.name for a in self.overloads[0].args): # is there a named argument?
             type = 'METH_VARARGS|METH_KEYWORDS'
             funcargs = ',PyObject *args,PyObject *kwds'
             code = self.function_call_var_args(conv,True)
@@ -374,12 +417,13 @@ class TypedDefDef(object):
 
 
         funcbody = tmpl.function.format(
-            funcnameprefix = funcnameprefix,
+            rettype = 'PyObject *',
             prolog = prolog,
-            selfvar = selfvar,
-            name = self.name,
-            args = funcargs,
-            code = code)
+            epilog = '',
+            name = funcnameprefix + self.name,
+            args = selfvar + funcargs,
+            code = code,
+            errval = '0')
 
         tableentry = '{{"{name}",reinterpret_cast<PyCFunction>({funcnameprefix}{name}),{type}{typeextra},{doc}}}'.format(
             funcnameprefix = funcnameprefix,
@@ -402,15 +446,35 @@ def base_prefix(x):
 
 
 class TypedMethodDef(TypedDefDef):
+    selfvar = 'reinterpret_cast<PyObject*>(self)'
+
     def __init__(self,classdef,defdef):
         super(TypedMethodDef,self).__init__(classdef.type,defdef)
         self.classdef = classdef
+
+        for ov in self.overloads:
+            if isinstance(ov.func,gccxml.CPPFunction) and not ov.explicit_static:
+                if len(ov.func.args) == 0 or strip_refptr(ov.func.args[0].type) != self.classdef.type:
+                    self.odd_function(ov)
+                else:
+                    ov.bind(0,'&base' if isinstance(ov.func.args[0].type,gccxml.CPPPointerType) else 'base')
 
     def static(self):
         return all(ov.func.static for ov in self.overloads)
 
     def call_code_base(self,ov):
-        return base_prefix(ov.func)
+        if isinstance(ov.func,gccxml.CPPMethod):
+            return base_prefix(ov.func)
+
+        return super(TypedMethodDef,self).call_code_base(ov)
+
+    def call_code(self,conv,ov):
+        if ov.retsemantic == RET_SELF:
+            return CallCode(self.call_code_base(ov) + '({{0}}); Py_INCREF({0}); return {0};'.format(self.selfvar))
+        return super(TypedMethodDef,self).call_code(conv,ov)
+
+    def odd_function(self,ov):
+        raise SpecificationError('The first parameter of "{0}" should be of type "{1}" or be a reference or pointer to it.'.format(ov.func.name,self.classdef.type.type_str()))
 
     def topy(self,conv,t,retsemantic):
         return conv.topy(t,retsemantic,'self')
@@ -432,79 +496,89 @@ class TypedMethodDef(TypedDefDef):
             'obj_{0}_method_'.format(self.classdef.name))
 
 
+class SpecialMethod(TypedMethodDef):
+    def __init__(self,classdef,defdef,argtype,rettype = SF_RET_OBJ,defretsemantic = None):
+        super(SpecialMethod,self).__init__(classdef,defdef)
+        self.argtype = argtype
+        self.rettype = rettype
+        if defretsemantic:
+            for ov in self.overloads:
+                if not ov.retsemantic:
+                    ov.retsemantic = defretsemantic
 
-def SpecialMethod(argtype,rettype = SF_RET_OBJ):
-    class inner(TypedMethodDef):
-        def check_static(self):
-            if not self.func.static:
-                raise SpecificationError('"{0}" must be static'.format(self.func.canon_name))
+    @staticmethod
+    def check_static(ov):
+        if not ov.func.static:
+            raise SpecificationError('"{0}" must be static'.format(ov.func.canon_name))
 
-        def check_integer_first(self,conv):
-            if not self.func.args[0].type in conv.integers:
-                raise SpecificationError('The first argument to "{0}" must be an integer type'.format(self.func.canon_name))
+    @staticmethod
+    def check_integer_first(conv,ov):
+        if not ov.args[0].type in conv.integers:
+            raise SpecificationError('The first argument to "{0}" must be an integer type'.format(ov.func.canon_name))
 
-        #def check_args_ret(self,conv):
-        #    for ov in self.overloads:
-        #        cfunc = ov.func
-        #
-        #        if argtype <= SF_TWO_ARGS:
-        #            can_accept(cfunc,argtype-1)
-        #        elif argtype == SF_COERCE_ARGS:
-        #            # no conversion is done
-        #            can_accept(cfunc,2)
-        #            t = cptr(cptr(gccxml.CPPBasicType('PyObject')))
-        #            if cfunc.args[0].type != t or cfunc.args[1].type != t:
-        #                raise SpecificationError('"{0}" must accept 2 arguments of PyObject**'.format(self.func.canon_name))
-        #            self.check_static(cfunc)
-        #        elif argtype == SF_SSIZE_ARG:
-        #            can_accept(ov,1)
-        #            self.check_integer_first(self.func,conv)
-        #        elif argtype == SSIZE_OBJ_ARGS:
-        #            can_accept(self,2)
-        #            self.check_integer_first(conv)
-        #        elif argtype == SF_TYPE_KEYWORD_ARGS:
-        #            # no conversion is done for the first arg
-        #            if len(ov.func.args) == 0:
-        #                raise Specification('"{0}" must accept at least one argument'.format(self.func.canon_name))
-        #            if cfunc.args[0].type != cptr(gccxml.CPPBasicType('PyTypeObject')):
-        #                raise Specification('The first argument to "{0}" must be PyTypeObject*'.format(self.func.canon_name))
-        #            self.check_static()
-        #
-        #
-        #        if rettype != SF_RET_OB:
-        #            if not self.func.returns in conv.integers:
-        #                raise SpecificationError('"{0}" must return an integer type'.format(self.func.canon_name))
+    def check_args_ret(self,conv):
+        for ov in self.overloads:
+            if self.argtype <= SF_TWO_ARGS:
+                ov.can_accept(self.argtype - 1)
+            elif self.argtype == SF_COERCE_ARGS:
+                # no conversion is done
+                ov.can_accept(2)
+                t = cptr(cptr(gccxml.CPPBasicType('PyObject')))
+                if ov.args[0].type != t or ov.args[1].type != t:
+                    raise SpecificationError('"{0}" must accept 2 arguments of PyObject**'.format(ov.func.canon_name))
+                self.check_static(ov)
+            elif self.argtype == SF_SSIZE_ARG:
+                ov.can_accept(1)
+                self.check_integer_first(conv,ov)
+            elif self.argtype == SF_SSIZE_OBJ_ARGS:
+                ov.can_accept(2)
+                self.check_integer_first(conv,ov)
+            elif self.argtype == SF_TYPE_KEYWORD_ARGS:
+                # no conversion is done for the first arg
+                if len(ov.args) == 0:
+                    raise Specification('"{0}" must accept at least one argument'.format(ov.func.canon_name))
+                if ov.args[0].type != cptr(gccxml.CPPBasicType('PyTypeObject')):
+                    raise Specification('The first argument to "{0}" must be PyTypeObject*'.format(ov.func.canon_name))
+                self.check_static(ov)
 
-        def call_code(self,conv,ov):
-            code = self.call_code_base(ov) + '({0})'
-            if rettype == SF_RET_INT:
-                return 'return static_cast<int>({0});'.format(code)
-            if rettype == SF_RET_LONG:
-                return 'return static_cast<long>({0});'.format(code)
-            if rettype == SF_RET_SSIZE:
-                return 'return static_cast<Py_ssize_t>({0});'.format(code)
-            if rettype == SF_RET_OBJ:
-                return super(inner,self).call_code(conv,ov)
+            if self.rettype in (SF_RET_INT,SF_RET_LONG,SF_RET_SSIZE):
+                if not ov.func.returns in conv.integers:
+                    raise SpecificationError('"{0}" must return an integer type'.format(ov.func.canon_name))
 
-            return code + '; return 0;'
+    def call_code_cast(self,conv,ov,t):
+        return CallCode('return static_cast<{0}>({1}({{0}}));'.format(t,self.call_code_base(ov)))
 
-        def function_call(self,conv,ind=Tab(2)):
-            """Calls the most appropriate function_call_X function"""
-            if argtype == SF_NO_ARGS:
-                return self.function_call_0arg(conv,ind)
-            if argtype == SF_ONE_ARG:
-                return self.function_call_1arg(conv,ind)
-            if argtype in (SF_TWO_ARGS,SF_SSIZE_ARG,SF_SSIZE_OBJ_ARGS,SF_TYPE_KEYWORD_ARGS):
-                raise Exception("this is not implmented!")
-            if argtype == SF_KEYWORD_ARGS:
-                return self.function_call_var_args(conv,ind)
-            if argtype == SF_COERCE_ARGS:
-                assert len(self.overloads) == 1
-                return self.call_code(conv,self.overloads[0]).format('o1,o2')
+    def call_code(self,conv,ov):
+        if self.rettype == SF_RET_INT:
+            return self.call_code_cast(conv,ov,'int')
 
-            assert False
+        if self.rettype == SF_RET_LONG:
+            return self.call_code_cast(conv,ov,'long')
 
-    return inner
+        if self.rettype == SF_RET_SSIZE:
+            return self.call_code_cast(conv,ov,'Py_ssize_t')
+
+        if self.rettype == SF_RET_VOID:
+            return CallCode(self.call_code_base(ov) + '({0}); return 0;')
+
+        return super(SpecialMethod,self).call_code(conv,ov)
+
+
+class FOpMethod(SpecialMethod):
+    selfvar = 'a'
+
+
+class BinaryROpMethod(SpecialMethod):
+    selfvar = 'b'
+
+    def __init__(self,classdef,defdef):
+        super(BinaryROpMethod,self).__init__(classdef,defdef,SF_ONE_ARG)
+
+    def odd_function(self,ov):
+        if not(len(ov.func.args) >= 2 and strip_refptr(ov.func.args[1].type) == self.classdef.type):
+            raise SpecificationError('The first or second parameter of "{0}" should be of type "{1}" or be a reference or pointer to it.'.format(ov.func.name,self.classdef.type.typestr()))
+
+        ov.bind(1,'&base' if isinstance(ov.func.args[1].type,gccxml.CPPPointerType) else 'base')
 
 
 class InitDef:
@@ -524,8 +598,8 @@ class TypedPropertyDef:
     def __init__(self,classdef,propdef):
         self.name = propdef.name
         self.doc = propdef.doc
-        self.get = SpecialMethod(SF_NO_ARGS,SF_RET_OBJ)(classdef,propdef.get)
-        self.set = SpecialMethod(SF_ONE_ARG,SF_RET_VOID)(classdef,propdef.set)
+        self.get = SpecialMethod(classdef,propdef.get,SF_NO_ARGS,SF_RET_OBJ)
+        self.set = SpecialMethod(classdef,propdef.set,SF_ONE_ARG,SF_RET_VOID)
 
     def output(self,conv):
         r = ''
@@ -535,15 +609,15 @@ class TypedPropertyDef:
                 prolog = '' if self.get.static() else self.get.classdef.method_prolog(),
                 name = self.name,
                 checkinit = True,
-                code = self.get.function_call(conv))
+                code = self.get.function_call_0arg(conv))
 
         if self.set:
             r += tmpl.property_set.render(
                 cname = self.set.classdef.name,
-                prolog = '' if self.set.static() else self.set.classdef.method_prolog('-1'),
+                prolog = '' if self.set.static() else self.set.classdef.method_prolog(),
                 name = self.name,
                 checkinit = True,
-                code = self.set.function_call(conv))
+                code = self.set.function_call_1arg(conv))
 
         return r
 
@@ -587,7 +661,7 @@ class TypedMemberDef:
             if not self.readonly:
                 r += tmpl.property_set.render(
                     cname = self.classdef.name,
-                    prolog = '' if self.cmember.static else self.classdef.method_prolog('-1'),
+                    prolog = '' if self.cmember.static else self.classdef.method_prolog(),
                     name = self.name,
                     checkinit = True,
                     code = '        {0} = {1};\n        return 0;'.format(base_prefix(self.cmember),conv.frompy(self.cmember.type)[0].format('arg')))
@@ -683,6 +757,37 @@ class ClassDef:
         self.doc = None
 
 
+def SplitDefDef23Code(defdef,conv,vars,ind=Tab(2)):
+    a = copy.copy(defdef)
+    b = copy.copy(defdef)
+    a.argtype = SF_ONE_ARG
+    b.argtype = SF_TWO_ARGS
+    ovs = a.overloads
+    a.overloads = []
+    b.overloads = []
+    for ov in ovs:
+        inserted = False
+        if mandatory_args(ov) <= 1 <= len(ov.args):
+            inserted = True
+            a.overloads.append(ov)
+        if mandatory_args(ov) <= 2 <= len(ov.args):
+            inserted = True
+            b.overloads.append(ov)
+
+        if not inserted:
+            raise SpecificationError('"{0}" must take 1 or 2 arguments'.format(ov.func.canon_name))
+
+    if not a.overloads: a = None
+    if not b.overloads: b = None
+    r = ind.line('if({0} == Py_None) {{'.format(vars[1]))
+    if a.overloads: r += a.function_call_1arg_fallthrough(conv,ind+1,var=vars[0])
+    r += ind.line('} else {')
+    if b.overloads: r += b.function_call_narg_fallthrough(conv,vars,ind+1)
+    r += ind.line('}')
+
+    return r
+
+
 class TypedClassDef:
     def __init__(self,scope,classdef):
         self.name = classdef.name
@@ -699,78 +804,109 @@ class TypedClassDef:
         if '__init__' in classdef.methods.data:
             raise SpecificationError('__init__ cannot be defined using <def>. Use <init>.')
 
+        BinaryIOpMethod = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,defretsemantic=RET_SELF)
+        TernaryIOpMethod = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,defretsemantic=RET_SELF)
+        BinaryFOpMethod = functools.partial(FOpMethod,argtype=SF_ONE_ARG)
+        TernaryFOpMethod = functools.partial(FOpMethod,argtype=SF_TWO_ARGS)
+        NoArgs = functools.partial(SpecialMethod,argtype=SF_NO_ARGS)
+        OneArg = functools.partial(SpecialMethod,argtype=SF_ONE_ARG)
+        TwoArgs = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS)
+        KeywordArgs = functools.partial(SpecialMethod,argtype=SF_KEYWORD_ARGS)
+        NoArgsInt = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_INT)
+        OneArgInt = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,rettype=SF_RET_INT)
+        NoArgsLong = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_LONG)
+        TwoArgsInt = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,rettype=SF_RET_INT)
+        CoerceArgsInt = functools.partial(SpecialMethod,argtype=SF_COERCE_ARGS,rettype=SF_RET_INT)
+        SSizeArg = functools.partial(SpecialMethod,argtype=SF_SSIZE_ARG)
+        NoArgsSSize = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_SSIZE)
+        SSizeObjArgs = functools.partial(SpecialMethod,argtype=SF_SSIZE_OBJ_ARGS)
+
         self.special_methods = {}
         for key,mtype in (
-            ('__new__',          SpecialMethod(SF_KEYWORD_ARGS)), # tp_new
-            ('__repr__',         SpecialMethod(SF_NO_ARGS)), # tp_repr
-            ('__str__',          SpecialMethod(SF_NO_ARGS)), # tp_str
-            ('__lt__',           SpecialMethod(SF_ONE_ARG)), # tp_richcompare
-            ('__le__',           SpecialMethod(SF_ONE_ARG)), # tp_richcompare
-            ('__eq__',           SpecialMethod(SF_ONE_ARG)), # tp_richcompare
-            ('__ne__',           SpecialMethod(SF_ONE_ARG)), # tp_richcompare
-            ('__gt__',           SpecialMethod(SF_ONE_ARG)), # tp_richcompare
-            ('__ge__',           SpecialMethod(SF_ONE_ARG)), # tp_richcompare
-            ('__cmp__',          SpecialMethod(SF_ONE_ARG,SF_RET_INT)), # tp_compare
-            ('__hash__',         SpecialMethod(SF_NO_ARGS,SF_RET_LONG)), # tp_hash
-            ('__nonzero__',      SpecialMethod(SF_NO_ARGS,SF_RET_INT)), # tp_as_number.nb_nonzero
-            ('__getattr__',      SpecialMethod(SF_ONE_ARG)), # tp_getattro
-            ('__setattr__',      SpecialMethod(SF_TWO_ARGS)), # tp_setattro
-            ('__get__',          SpecialMethod(SF_TWO_ARGS)), # tp_descr_get
-            ('__set__',          SpecialMethod(SF_TWO_ARGS,SF_RET_INT)), # tp_descr_set
-            ('__call__',         SpecialMethod(SF_KEYWORD_ARGS)), # tp_call
-            ('__iter__',         SpecialMethod(SF_NO_ARGS)), # tp_iter
-            ('next',             SpecialMethod(SF_NO_ARGS)), # tp_iternext
-            ('__contains__',     SpecialMethod(SF_ONE_ARG,SF_RET_INT)), # tp_as_sequence.sq_contains(NULL)
-            ('__add__',          SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_add
-            ('__sub__',          SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_subtract
-            ('__mul__',          SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_multiply
-            ('__floordiv__',     SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_floor_divide
-            ('__mod__',          SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_remainder
-            ('__divmod__',       SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_divmod
-            ('__pow__',          SpecialMethod(SF_TWO_ARGS)), # tp_as_number.nb_power
-            ('__lshift__',       SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_lshift
-            ('__rshift__',       SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_rshift
-            ('__and__',          SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_and
-            ('__xor__',          SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_xor
-            ('__or__',           SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_or
-            ('__div__',          SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_divide
-            ('__truediv__',      SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_true_divide
-            ('__iadd__',         SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_add
-            ('__isub__',         SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_subtract
-            ('__imul__',         SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_multiply
-            ('__idiv__',         SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_divide
-            ('__itruediv__',     SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_true_divide
-            ('__ifloordiv__',    SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_floor_divide
-            ('__imod__',         SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_remainder
-            ('__ipow__',         SpecialMethod(SF_TWO_ARGS)), # tp_as_number.nb_inplace_power
-            ('__ilshift__',      SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_lshift
-            ('__irshift__',      SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_rshift
-            ('__iand__',         SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_and
-            ('__ixor__',         SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_xor
-            ('__ior__',          SpecialMethod(SF_ONE_ARG)), # tp_as_number.nb_inplace_or
-            ('__neg__',          SpecialMethod(SF_NO_ARGS)), # tp_as_number.nb_negative
-            ('__pos__',          SpecialMethod(SF_NO_ARGS)), # tp_as_number.nb_positive
-            ('__abs__',          SpecialMethod(SF_NO_ARGS)), # tp_as_number.nb_absolute
-            ('__invert__',       SpecialMethod(SF_NO_ARGS)), # tp_as_number.nb_invert
-            ('__int__',          SpecialMethod(SF_NO_ARGS)), # tp_as_number.nb_int
-            ('__long__',         SpecialMethod(SF_NO_ARGS)), # tp_as_number.nb_long
-            ('__float__',        SpecialMethod(SF_NO_ARGS)), # tp_as_number.nb_float
-            ('__oct__',          SpecialMethod(SF_NO_ARGS)), # tp_as_number.nb_oct
-            ('__hex__',          SpecialMethod(SF_NO_ARGS)), # tp_as_number.nb_hex
-            ('__index__',        SpecialMethod(SF_NO_ARGS)), # tp_as_number.nb_index
-            ('__coerce__',       SpecialMethod(SF_COERCE_ARGS,SF_RET_INT)), # tp_as_number.nb_coerce
+            ('__new__',          KeywordArgs), # tp_new
+            ('__repr__',         NoArgs), # tp_repr
+            ('__str__',          NoArgs), # tp_str
+            ('__lt__',           OneArg), # tp_richcompare
+            ('__le__',           OneArg), # tp_richcompare
+            ('__eq__',           OneArg), # tp_richcompare
+            ('__ne__',           OneArg), # tp_richcompare
+            ('__gt__',           OneArg), # tp_richcompare
+            ('__ge__',           OneArg), # tp_richcompare
+            ('__cmp__',          OneArgInt), # tp_compare
+            ('__hash__',         NoArgsLong), # tp_hash
+            ('__nonzero__',      NoArgsInt), # tp_as_number.nb_nonzero
+            ('__getattr__',      OneArg), # tp_getattro
+            ('__setattr__',      TwoArgs), # tp_setattro
+            ('__get__',          TwoArgs), # tp_descr_get
+            ('__set__',          TwoArgsInt), # tp_descr_set
+            ('__call__',         KeywordArgs), # tp_call
+            ('__iter__',         NoArgs), # tp_iter
+            ('next',             NoArgs), # tp_iternext
+            ('__contains__',     OneArgInt), # tp_as_sequence.sq_contains(NULL)
+            ('__add__',          BinaryFOpMethod), # tp_as_number.nb_add
+            ('__radd__',         BinaryROpMethod),
+            ('__sub__',          BinaryFOpMethod), # tp_as_number.nb_subtract
+            ('__rsub__',         BinaryROpMethod),
+            ('__mul__',          BinaryFOpMethod), # tp_as_number.nb_multiply
+            ('__rmul__',         BinaryROpMethod),
+            ('__floordiv__',     BinaryFOpMethod), # tp_as_number.nb_floor_divide
+            ('__rfloordiv__',    BinaryROpMethod),
+            ('__mod__',          BinaryFOpMethod), # tp_as_number.nb_remainder
+            ('__rmod__',         BinaryROpMethod),
+            ('__divmod__',       BinaryFOpMethod), # tp_as_number.nb_divmod
+            ('__rdivmod__',      BinaryROpMethod),
+            ('__pow__',          TernaryFOpMethod), # tp_as_number.nb_power
+            ('__rpow__',         BinaryROpMethod),
+            ('__lshift__',       BinaryFOpMethod), # tp_as_number.nb_lshift
+            ('__rlshift__',      BinaryROpMethod),
+            ('__rshift__',       BinaryFOpMethod), # tp_as_number.nb_rshift
+            ('__rrshift__',      BinaryROpMethod),
+            ('__and__',          BinaryFOpMethod), # tp_as_number.nb_and
+            ('__rand__',         BinaryROpMethod),
+            ('__xor__',          BinaryFOpMethod), # tp_as_number.nb_xor
+            ('__rxor__',         BinaryROpMethod),
+            ('__or__',           BinaryFOpMethod), # tp_as_number.nb_or
+            ('__ror__',          BinaryROpMethod),
+            ('__div__',          BinaryFOpMethod), # tp_as_number.nb_divide
+            ('__rdiv__',         BinaryROpMethod),
+            ('__truediv__',      BinaryFOpMethod), # tp_as_number.nb_true_divide
+            ('__rtruediv__',     BinaryROpMethod),
+            ('__iadd__',         BinaryIOpMethod), # tp_as_number.nb_inplace_add
+            ('__isub__',         BinaryIOpMethod), # tp_as_number.nb_inplace_subtract
+            ('__imul__',         BinaryIOpMethod), # tp_as_number.nb_inplace_multiply
+            ('__idiv__',         BinaryIOpMethod), # tp_as_number.nb_inplace_divide
+            ('__itruediv__',     BinaryIOpMethod), # tp_as_number.nb_inplace_true_divide
+            ('__ifloordiv__',    BinaryIOpMethod), # tp_as_number.nb_inplace_floor_divide
+            ('__imod__',         BinaryIOpMethod), # tp_as_number.nb_inplace_remainder
+            ('__ipow__',         TernaryIOpMethod), # tp_as_number.nb_inplace_power
+            ('__ilshift__',      BinaryIOpMethod), # tp_as_number.nb_inplace_lshift
+            ('__irshift__',      BinaryIOpMethod), # tp_as_number.nb_inplace_rshift
+            ('__iand__',         BinaryIOpMethod), # tp_as_number.nb_inplace_and
+            ('__ixor__',         BinaryIOpMethod), # tp_as_number.nb_inplace_xor
+            ('__ior__',          BinaryIOpMethod), # tp_as_number.nb_inplace_or
+            ('__neg__',          NoArgs), # tp_as_number.nb_negative
+            ('__pos__',          NoArgs), # tp_as_number.nb_positive
+            ('__abs__',          NoArgs), # tp_as_number.nb_absolute
+            ('__invert__',       NoArgs), # tp_as_number.nb_invert
+            ('__int__',          NoArgs), # tp_as_number.nb_int
+            ('__long__',         NoArgs), # tp_as_number.nb_long
+            ('__float__',        NoArgs), # tp_as_number.nb_float
+            ('__oct__',          NoArgs), # tp_as_number.nb_oct
+            ('__hex__',          NoArgs), # tp_as_number.nb_hex
+            ('__index__',        NoArgs), # tp_as_number.nb_index
+            ('__coerce__',       CoerceArgsInt), # tp_as_number.nb_coerce
 
             # made-up names for special functions that don't have a distinct equivalent in Python
-            ('__concat__',       SpecialMethod(SF_ONE_ARG)), # tp_as_sequence.sq_concat
-            ('__iconcat__',      SpecialMethod(SF_ONE_ARG)), # tp_as_sequence.sq_inplace_concat
-            ('__repeat__',       SpecialMethod(SF_SSIZE_ARG)), # tp_as_sequence.sq_repeat
-            ('__irepeat__',      SpecialMethod(SF_SSIZE_ARG)), # tp_as_sequence.sq_inplace_repeat
-            ('__mapping__len__',   SpecialMethod(SF_NO_ARGS,SF_RET_SSIZE)), # tp_as_mapping.mp_length(NULL)
-            ('__sequence__len__',  SpecialMethod(SF_NO_ARGS,SF_RET_SSIZE)), # tp_as_sequence.sq_length
-            ('__mapping__getitem__', SpecialMethod(SF_ONE_ARG)), # tp_as_mapping.mp_subscript(NULL)
-            ('__sequence__getitem__', SpecialMethod(SF_SSIZE_ARG)), # tp_as_sequence.sq_item(NULL)
-            ('__mapping__setitem__', SpecialMethod(SF_TWO_ARGS)), # tp_as_mapping.mp_ass_subscript(NULL)
-            ('__sequence__setitem__', SpecialMethod(SF_SSIZE_OBJ_ARGS)) # tp_as_sequence.sq_ass_item(NULL)
+            ('__concat__',       OneArg), # tp_as_sequence.sq_concat
+            ('__iconcat__',      OneArg), # tp_as_sequence.sq_inplace_concat
+            ('__repeat__',       SSizeArg), # tp_as_sequence.sq_repeat
+            ('__irepeat__',      SSizeArg), # tp_as_sequence.sq_inplace_repeat
+            ('__mapping__len__',   NoArgsSSize), # tp_as_mapping.mp_length(NULL)
+            ('__sequence__len__',  NoArgsSSize), # tp_as_sequence.sq_length
+            ('__mapping__getitem__', OneArg), # tp_as_mapping.mp_subscript(NULL)
+            ('__sequence__getitem__', SSizeArg), # tp_as_sequence.sq_item(NULL)
+            ('__mapping__setitem__', TwoArgs), # tp_as_mapping.mp_ass_subscript(NULL)
+            ('__sequence__setitem__', SSizeObjArgs) # tp_as_sequence.sq_ass_item(NULL)
         ):
             m = classdef.methods.data.pop(key,None)
             if m: self.special_methods[key] = mtype(self,m)
@@ -818,7 +954,7 @@ class TypedClassDef:
         return tmpl.cast_base.render(
             type = self.type.typestr(),
             name = self.name,
-            canholdref = self.features.managed_ref)
+            features = self.features)
 
     def get_base_func(self):
         if self.has_multi_inherit_subclass():
@@ -890,15 +1026,107 @@ class TypedClassDef:
 
         return True
 
-    def have_number(self):
-        return self.have_special('__nonzero__','__add__','__sub__','__mul__',
-            '__floordiv__','__mod__','__divmod__','__pow__','__lshift__',
-            '__rshift__','__and__','__xor__','__or__','__div__','__truediv__',
-            '__iadd__','__isub__','__imul__','__idiv__','__itruediv__',
-            '__ifloordiv__','__imod__','__ipow__','__ilshift__','__irshift__',
-            '__iand__','__ixor__','__ior__','__neg__','__pos__','__abs__',
-            '__invert__','__int__','__long__','__float__','__oct__','__hex__',
-            '__index__','__coerce__')
+    def number(self,out):
+        havenum = False
+
+        for fn in ('__neg__','__pos__','__abs__','__invert__','__int__',
+                   '__long__','__float__','__oct__','__hex__','__index__'):
+            f = self.special_methods.get(fn)
+            if f:
+                havenum = True
+                print >> out.cpp, tmpl.function.format(
+                    rettype = 'PyObject *',
+                    name = 'obj_{0}_nb_{1}'.format(self.name,fn),
+                    args = 'obj_{0} *self'.format(self.name),
+                    prolog = self.method_prolog(),
+                    epilog = '',
+                    code = f.function_call_0arg(out.conv),
+                    errval = '0')
+
+        for fn in ('__iadd__','__isub__','__imul__','__idiv__','__itruediv__',
+                '__ifloordiv__','__imod__','__ilshift__','__irshift__',
+                '__iand__','__ixor__','__ior__'):
+            f = self.special_methods.get(fn)
+            if f:
+                havenum = True
+                print >> out.cpp, tmpl.function.format(
+                    rettype = 'PyObject *',
+                    name = 'obj_{0}_nb_{1}'.format(self.name,fn),
+                    args = 'obj_{0} *self,PyObject *arg'.format(self.name),
+                    prolog = self.method_prolog(),
+                    epilog = tmpl.ret_notimplemented,
+                    code = f.function_call_1arg_fallthrough(out.conv),
+                    errval = '0')
+
+        for fn in ('add__','sub__','mul__','floordiv__','mod__',
+                'divmod__','lshift__','rshift__','and__','xor__',
+                'or__','div__','truediv__'):
+            f = self.special_methods.get('__'+fn)
+            fr = self.special_methods.get('__r'+fn)
+            if f or fr:
+                havenum = True
+                code = ''
+                rcode = ''
+                if f:
+                    code = self.method_prolog('a',Tab(3)) + f.function_call_1arg_fallthrough(out.conv,ind=Tab(3),var='b')
+                if fr:
+                    rcode = self.method_prolog('b',Tab(3)) + fr.function_call_1arg_fallthrough(out.conv,ind=Tab(3),var='a')
+
+                print >> out.cpp, tmpl.number_op.format(
+                    cname = self.name,
+                    op = '__'+fn,
+                    args = 'PyObject *a,PyObject *b',
+                    code = code,
+                    rcode = rcode)
+
+        f = self.special_methods.get('__nonzero__')
+        if f:
+            havenum = True
+            print >> out.cpp, tmpl.function.format(
+                rettype = 'int',
+                name = 'obj_{0}_nb___nonzero__'.format(self.name),
+                args = 'obj_{0} *self'.format(self.name),
+                prolog = self.method_prolog(),
+                epilog = '',
+                code = f.function_call_0arg(out.conv),
+                errval = '0')
+
+        f = self.special_methods.get('__ipow__')
+        if f:
+            havenum = True
+            print >> out.cpp, tmpl.function.format(
+                rettype = 'PyObject *',
+                name = 'obj_{0}_nb___ipow__'.format(self.name),
+                args = 'obj_{0} *self,PyObject *arg1,PyObject *arg2'.format(self.name),
+                prolog = self.method_prolog(),
+                epilog = tmpl.ret_notimplemented,
+                code = SplitDefDef23Code(f,out.conv,['arg1','arg2']),
+                errval = '0')
+
+        f = self.special_methods.get('__pow__')
+        fr = self.special_methods.get('__rpow__')
+        if f or fr:
+            havenum = True
+            code =''
+            rcode = ''
+            if f:
+                code = self.method_prolog('a',Tab(3)) + SplitDefDef23Code(f,out.conv,vars=['b','c'],ind=Tab(3))
+            if fr:
+                rcode = self.method_prolog('b',Tab(3)) + fr.function_call_1arg_fallthrough(out.conv,ind=Tab(3),var='a')
+
+            print >> out.cpp, tmpl.number_op.format(
+                cname = self.name,
+                op = '__pow__',
+                args = 'PyObject *a,PyObject *b,PyObject *c',
+                code = code,
+                rcode = rcode)
+
+        if havenum:
+            print >> out.cpp, tmpl.number_methods.render(
+                name = self.name,
+                specialmethods = self.special_methods)
+
+        return havenum
 
     def have_sequence(self):
         return self.have_special('__sequence__len__','__sequence__getitem__',
@@ -908,12 +1136,11 @@ class TypedClassDef:
     def have_mapping(self):
         return self.have_special('__mapping__len__','__mapping__getitem__','__mapping__setitem__')
 
-    def method_prolog(self,errval = '0'):
-        return tmpl.method_prolog.render(
-            type = self.type.canon_name,
-            name = self.name,
-            errval = errval,
-            needcast = self.has_multi_inherit_subclass())
+    def method_prolog(self,var='reinterpret_cast<PyObject*>(self)',ind=Tab(1)):
+        return '{0}{1} &base = {2};\n'.format(
+            ind,
+            self.type.canon_name,
+            ('get_base_{0}({1},false)' if self.has_multi_inherit_subclass() else 'cast_base_{0}({1})').format(self.name,var))
 
     def output(self,out,module):
         has_mi_subclass = self.has_multi_inherit_subclass()
@@ -941,6 +1168,7 @@ class TypedClassDef:
                     for m in self.type.members if isinstance(m,gccxml.CPPConstructor) and not varargs(m))),
 
         richcompare = self.rich_compare(out)
+        number = self.number(out)
 
         destructref = False
         initdestruct = False
@@ -994,7 +1222,7 @@ class TypedClassDef:
 
 
 
-        func = 'new(addr) {0}({{0}}); return 0;'.format(self.type.canon_name)
+        func = CallCode('new(addr) {0}({{0}}); return 0;'.format(self.type.canon_name))
         if self.constructor:
             if self.constructor.overloads[0].args is None:
                 # no overload specified means use all constructors
@@ -1022,16 +1250,10 @@ class TypedClassDef:
             membersref = membersref,
             methodsref = methodsref,
             richcompare = richcompare,
+            number = number,
             bases = bases),
 
 
-class cppcode:
-    def __init__(self,val,prep = ''):
-        self.val = val
-        self.prep = prep
-
-    def __str__(self):
-        return self.prep + self.val
 
 def base_count(x):
     """Return the number of direct and indirect base classes of x."""
@@ -1166,9 +1388,8 @@ class ArgBranchNode:
         func,args = self.call
 
         r = ind.line(
-            func.format('\n    {0}{1}'.format(ind,
-                ',\n{0}    '.format(ind).join(
-                    (c or conv.frompy(a.type)[0]).format(get_arg(i)) for i,a,c in zip(itertools.count(),args,argconv)))))
+            func.output(((c or conv.frompy(a.type)[0]).format(get_arg(i)) for
+                i,a,c in zip(itertools.count(),args,argconv)),ind+1))
 
         return r
 
@@ -1420,7 +1641,7 @@ class Conversion:
 
         prep += indent.line('ga.finished();')
 
-        return cppcode(','.join('_{0}'.format(i) for i in range(len(args))), prep)
+        return ['_{0}'.format(i) for i in range(len(args))], prep
 
     def function_call(self,calls,errval = '0',use_kwds = True):
         """Generate code to call one function from a list of overloads.
@@ -1448,8 +1669,8 @@ class Conversion:
         assert calls
 
         if len(calls) == 1:
-            code = self.arg_parser(calls[0][1],use_kwds)
-            return code.prep + Tab(2).line(calls[0][0].format(code.val))
+            args,prep = self.arg_parser(calls[0][1],use_kwds)
+            return prep + Tab(2).line(calls[0][0].output(args,Tab(2)))
 
         # turn default values into overloads
         ovlds = []
@@ -1469,18 +1690,24 @@ class Conversion:
             args = 'args',
             errval = errval)
 
-    def function_call_1arg_fallthrough(self,calls,ind=Tab(2)):
+    def function_call_narg_fallthrough(self,calls,vars,ind=Tab(2)):
         assert calls
-        return self.generate_arg_tree(calls).basic_and_objects_code(self,[],0,ind,(lambda x: 'arg'),True)
+        return self.generate_arg_tree(calls).basic_and_objects_code(
+            self,[],len(vars)-1,ind,lambda x: vars[x],True)
 
-    def function_call_1arg(self,calls,errval='0',ind=Tab(2)):
+    def function_call_1arg_fallthrough(self,calls,ind=Tab(2),var='arg'):
+        assert calls
+        return self.generate_arg_tree(calls).basic_and_objects_code(
+            self,[],0,ind,(lambda x: var),True)
+
+    def function_call_1arg(self,calls,errval='0',ind=Tab(2),var='arg'):
         if len(calls) == 1:
-            return ind + calls[0][0].format(self.frompy(calls[0][1][0].type)[0].format('arg'))
+            return ind + calls[0][0].output([self.frompy(calls[0][1][0].type)[0].format(var)],ind)
 
         return tmpl.overload_func_call.render(
-            inner = self.function_call_1arg_fallthrough(calls,ind),
+            inner = self.function_call_1arg_fallthrough(calls,ind,var),
             nokwdscheck = False,
-            args = 'arg',
+            args = var,
             errval = errval,
             endlabel = False)
 
@@ -1578,7 +1805,7 @@ class ModuleDef:
             classes[c.type] = c
 
             # these assume the class has copy constructors
-            conv.add_conv(c.type,'new obj_{0}({{0}})'.format(c.name),(True,'get_base_{0}({{0}})'.format(c.name)))
+            conv.add_conv(c.type,'reinterpret_cast<PyObject*>(new obj_{0}({{0}}))'.format(c.name),(True,'get_base_{0}({{0}})'.format(c.name)))
             conv.cppclasstopy[c.type] = c
 
         for c in classes.itervalues():
@@ -1766,23 +1993,30 @@ class tag_Property(tag):
             if self.r.set: join_func(self.r.set,data)
             else: self.r.set = data
 
+def parse_bool(args,prop):
+    val = args.get(prop,False)
+    if val is False: return False
+    try:
+        return {'true':True,'false':False}[val.lower()]
+    except LookupError:
+        raise ParseError('The value of "{0}" must be either "true" or "false"'.format(prop))
+
 class tag_Member(tag):
     def __init__(self,args):
         self.r = MemberDef()
         self.r.cmember = args['cmember']
         self.r.name = get_valid_py_ident(args.get('name'),self.r.cmember)
-        self.r.readonly = args.get('readonly',False)
-        if self.r.readonly is not False:
-            try:
-                self.r.readonly = {'true':True,'false':False}[self.r.readonly.lower()]
-            except LookupError:
-                raise ParseError('The value of "readonly" must be either "true" or "false"')
+        self.r.readonly = parse_bool(args,'readonly')
 
 
 def get_ret_semantic(args):
-    rs = args.get("return-semantic")
+    rs = args.get('return-semantic')
     if rs is not None:
-        mapping = {"copy" : RET_COPY, "managedref" : RET_MANAGED_REF, "default" : None}
+        mapping = {
+            'copy' : RET_COPY,
+            'managedref' : RET_MANAGED_REF,
+            'self' : RET_SELF,
+            'default' : None}
         try:
             rs = mapping[rs]
         except LookupError:
@@ -1793,28 +2027,41 @@ class tag_GetSet(tag):
     def __init__(self,args):
         self.r = DefDef()
         self.r.overloads.append(Overload(
-            tag_Def.operator_parse(args["func"]),
+            tag_Def.operator_parse(args['func']),
             get_ret_semantic(args),
-            args.get("overload")))
+            args.get('overload')))
 
 class tag_Def(tag):
     def __init__(self,args):
         func = args['func']
-        self.r = DefDef(get_valid_py_ident(args.get("name"),func))
+        self.r = DefDef(get_valid_py_ident(args.get('name'),func))
+        arity = args.get('arity')
+        if arity:
+            def badval():
+                raise ParseError('"arity" must be a positive integer')
+
+            try:
+                arity = int(arity)
+            except ValueError:
+                badval()
+            if arity < 0:
+                badval()
         self.r.overloads.append(Overload(
             tag_Def.operator_parse(func),
             get_ret_semantic(args),
-            args.get("overload")))
+            args.get('overload'),
+            parse_bool(args,'static'),
+            arity))
 
 
-    op_parse_re = re.compile('operator\b')
+    op_parse_re = re.compile(r'.*\boperator\b')
 
     @staticmethod
     def operator_parse(x):
         """Normalize operator function names"""
         m = tag_Def.op_parse_re.match(x)
         if m:
-            return 'operator ' + ''.join(x[m.end():].split())
+            return m.group(0) + ' ' + ''.join(x[m.end():].split())
         return x
 
 tagdefs = {

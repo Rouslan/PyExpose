@@ -23,13 +23,7 @@ env.filters['quote'] = quote_c
 
 
 property_get = env.from_string('''
-PyObject *obj_<% cname %>_get<% name %>(obj_<% cname %> *self,void *closure) {
-== if checkinit
-    if(!self->mode) {
-        PyErr_SetString(PyExc_RuntimeError,not_init_msg);
-        return 0;
-    }
-== endif
+PyObject *obj_<% cname %>_get<% name %>(obj_<% cname %> *self,void *) {
 <% prolog %>
     try {
 <% code %>
@@ -38,7 +32,7 @@ PyObject *obj_<% cname %>_get<% name %>(obj_<% cname %> *self,void *closure) {
 ''')
 
 property_set = env.from_string('''
-int obj_<% cname %>_set<% name %>(obj_<% cname %> *self,PyObject *arg,void *closure) {
+int obj_<% cname %>_set<% name %>(obj_<% cname %> *self,PyObject *arg,void *) {
     if(!arg) {
         PyErr_SetString(PyExc_TypeError,no_delete_msg);
         return -1;
@@ -95,16 +89,6 @@ PyMethodDef obj_{name}_methods[] = {{
     {{0}}
 }};
 '''
-
-method_prolog = env.from_string('''
-    if(!self->mode) {
-        PyErr_SetString(PyExc_RuntimeError,not_init_msg);
-        return <% errval %>;
-    }
-    <% type %> &base = <@ if needcast
-        @>get_base_<% name %>(reinterpret_cast<PyObject*>(self),false)<@ else
-        @>cast_base_<% name %>(reinterpret_cast<PyObject*>(self))<@ endif @>;
-''')
 
 classdef = env.from_string('''
 extern PyTypeObject <% '*' if dynamic %>obj_<% name %>Type;
@@ -219,9 +203,11 @@ inline PyTypeObject *create_obj_<% name %>Type() {
     if(UNLIKELY(!type)) return 0;
 
     type->tp_basicsize = <% objsize() %>;
+    type->tp_flags |= Py_TPFLAGS_CHECKTYPES;
     type->tp_dictoffset = 0;
     type->tp_weaklistoffset = 0;
 <@ if destructref @>    type->tp_dealloc = reinterpret_cast<destructor>(&obj_<% name %>_dealloc);<@ endif @>
+<@ if number @>    type->tp_as_number = &obj_<% name %>_number_methods;<@ endif @>
 <@ if doc @>    type->tp_doc = <% doc|quote %>;<@ endif @>
 <@ if methodsref @>    type->tp_methods = obj_<% name %>_methods;<@ endif @>
 <@ if membersref @>    type->tp_members = obj_<% name %>_members;<@ endif @>
@@ -244,7 +230,7 @@ PyTypeObject obj_<% name %>Type = {
     0,                         /* tp_setattr */
     0,                         /* tp_compare */
     0,                         /* tp_repr */
-    0,                         /* tp_as_number */
+    <@ if number @>&obj_<% name %>_number_methods<@ else @>0<@ endif @>, /* tp_as_number */
     0,                         /* tp_as_sequence */
     0,                         /* tp_as_mapping */
     0,                         /* tp_hash */
@@ -253,7 +239,7 @@ PyTypeObject obj_<% name %>Type = {
     0,                         /* tp_getattro */
     0,                         /* tp_setattro */
     0,                         /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE, /* tp_flags */
+    Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE|Py_TPFLAGS_CHECKTYPES, /* tp_flags */
     <@ if doc @><% doc|quote %><@ else @>0<@ endif @>, /* tp_doc */
     0,                         /* tp_traverse */
     0,                         /* tp_clear */
@@ -661,11 +647,17 @@ extern "C" SHARED(void) init<% module %>(void) {
 
 cast_base = env.from_string('''
 <% type %> &cast_base_<% name %>(PyObject *o) {
-== if canholdref
-    if(reinterpret_cast<obj__Common*>(o)->mode == MANAGEDREF)
+    switch(reinterpret_cast<obj__Common*>(o)->mode) {
+== if features.managed_ref
+    case MANAGEDREF:
         return reinterpret_cast<ref_<% name %>*>(o)->base;
 == endif
-    return reinterpret_cast<obj_<% name %>*>(o)->base;
+    case CONTAINS:
+        return reinterpret_cast<obj_<% name %>*>(o)->base;
+    default:
+        PyErr_SetString(PyExc_RuntimeError,not_init_msg);
+        throw py_error_set();
+    }
 }
 ''')
 
@@ -770,13 +762,29 @@ typecheck_else = '''
 '''
 
 function = '''
-PyObject *{funcnameprefix}{name}({selfvar}{args}) {{
+{rettype} {name}({args}) {{
 {prolog}
     try {{
 {code}
-    }} EXCEPT_HANDLERS(0)
+    }} EXCEPT_HANDLERS({errval})
+{epilog}
 }}
 '''
+
+number_op = '''
+PyObject *obj_{cname}_nb_{op}({args}) {{
+    try {{
+        if(PyObject_IsInstance(a,reinterpret_cast<PyObject*>(get_obj_{cname}Type()))) {{
+{code}
+        }} else {{
+{rcode}
+        }}
+    }} EXCEPT_HANDLERS(0)
+    Py_INCREF(Py_NotImplemented);
+    return Py_NotImplemented;
+}}
+'''
+
 
 richcompare_start = '''
 PyObject *obj_{name}_richcompare(obj_{name} *self,PyObject *arg,int op) {{
@@ -797,4 +805,55 @@ richcompare_end = '''
     } EXCEPT_HANDLERS(0)
     return 0;
 }
+'''
+
+number_methods = env.from_string('''
+<@ macro exact(fname) @><@ if fname in specialmethods @>&obj_<% name %>_nb_<% fname %><@ else @>0<@ endif @><@ endmacro @>
+<@ macro cast(fname,type) @><@ if fname in specialmethods @>reinterpret_cast<<% type %>>(&obj_<% name %>_nb_<% fname %>)<@ else @>0<@ endif @><@ endmacro @>
+PyNumberMethods obj_<% name %>_number_methods = {
+    <% exact('__add__') %>,
+    <% exact('__sub__') %>,
+    <% exact('__mul__') %>,
+    <% exact('__div__') %>,
+    <% exact('__mod__') %>,
+    <% exact('__divmod__') %>,
+    <% exact('__pow__') %>,
+    <% cast('__neg__','unaryfunc') %>,
+    <% cast('__pos__','unaryfunc') %>,
+    <% cast('__abs__','unaryfunc') %>,
+    <% cast('__nonzero__','inquiry') %>,
+    <% cast('__invert__','unaryfunc') %>,
+    <% exact('__lshift__') %>,
+    <% exact('__rshift__') %>,
+    <% exact('__and__') %>,
+    <% exact('__xor__') %>,
+    <% exact('__or__') %>,
+    <% exact('__coerce__') %>,
+    <% cast('__int__','unaryfunc') %>,
+    <% cast('__long__','unaryfunc') %>,
+    <% cast('__float__','unaryfunc') %>,
+    <% cast('__oct__','unaryfunc') %>,
+    <% cast('__hex__','unaryfunc') %>,
+    <% cast('__iadd__','binaryfunc') %>,
+    <% cast('__isub__','binaryfunc') %>,
+    <% cast('__imul__','binaryfunc') %>,
+    <% cast('__idiv__','binaryfunc') %>,
+    <% cast('__imod__','binaryfunc') %>,
+    <% cast('__ipow__','ternaryfunc') %>,
+    <% cast('__ilshift__','binaryfunc') %>,
+    <% cast('__irshift__','binaryfunc') %>,
+    <% cast('__iand__','binaryfunc') %>,
+    <% cast('__ixor__','binaryfunc') %>,
+    <% cast('__ior__','binaryfunc') %>,
+    <% exact('__floordiv__') %>,
+    <% exact('__truediv__') %>,
+    <% cast('__ifloordiv__','binaryfunc') %>,
+    <% cast('__itruediv__','binaryfunc') %>,
+    <% cast('__index__','unaryfunc') %>,
+};
+''')
+
+ret_notimplemented = '''
+    Py_INCREF(Py_NotImplemented);
+    return Py_NotImplemented;
 '''
