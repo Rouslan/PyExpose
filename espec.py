@@ -29,8 +29,6 @@ SF_ONE_ARG = 2 # (PyObject *self, PyObject *o)
 SF_TWO_ARGS = 3  # (PyObject *self, PyObject *o1, PyObject *o2)
 SF_KEYWORD_ARGS = 4 # (PyObject *self, PyObject *args, PyObject *kwds)
 SF_COERCE_ARGS = 5 # (PyObject **p1, PyObject **p2)
-SF_SSIZE_ARG = 6 # (PyObject *self, Py_ssize_t i)
-SF_SSIZE_OBJ_ARGS = 7 # (PyObject *self, Py_ssize_t i, PyObject *o)
 SF_TYPE_KEYWORD_ARGS = 8 # (PyTypeObject *subtype, PyObject *args, PyObject *kwds)
 
 SF_RET_OBJ = 0
@@ -38,6 +36,7 @@ SF_RET_INT = 1
 SF_RET_LONG = 2
 SF_RET_SSIZE = 3
 SF_RET_VOID = 4
+SF_RET_INT_BOOL = 5
 
 
 TYPE_FLOAT = 1
@@ -318,7 +317,7 @@ class TypedOverload:
         self.explicit_static = overload.static
 
     def bind(self,index,val):
-        self.argbinds[index].val = val
+        [a for a in self.argbinds if a.val is None][index].val = val
 
     @property
     def args(self):
@@ -327,7 +326,9 @@ class TypedOverload:
     def can_accept(self,args):
         if not (mandatory_args(self) <= args <= len(self.args)):
             raise SpecificationError(
-                '"{0}" must take {1} argument(s)'.format(self.func.canon_name,args))
+                '"{0}" must take {1} argument(s)'.format(
+                    self.func.canon_name,
+                    args + sum(1 for a in self.argbinds if a.val is not None)))
 
     @property
     def static(self):
@@ -511,11 +512,6 @@ class SpecialMethod(TypedMethodDef):
         if not ov.func.static:
             raise SpecificationError('"{0}" must be static'.format(ov.func.canon_name))
 
-    @staticmethod
-    def check_integer_first(conv,ov):
-        if not ov.args[0].type in conv.integers:
-            raise SpecificationError('The first argument to "{0}" must be an integer type'.format(ov.func.canon_name))
-
     def check_args_ret(self,conv):
         for ov in self.overloads:
             if self.argtype <= SF_TWO_ARGS:
@@ -527,12 +523,6 @@ class SpecialMethod(TypedMethodDef):
                 if ov.args[0].type != t or ov.args[1].type != t:
                     raise SpecificationError('"{0}" must accept 2 arguments of PyObject**'.format(ov.func.canon_name))
                 self.check_static(ov)
-            elif self.argtype == SF_SSIZE_ARG:
-                ov.can_accept(1)
-                self.check_integer_first(conv,ov)
-            elif self.argtype == SF_SSIZE_OBJ_ARGS:
-                ov.can_accept(2)
-                self.check_integer_first(conv,ov)
             elif self.argtype == SF_TYPE_KEYWORD_ARGS:
                 # no conversion is done for the first arg
                 if len(ov.args) == 0:
@@ -544,6 +534,9 @@ class SpecialMethod(TypedMethodDef):
             if self.rettype in (SF_RET_INT,SF_RET_LONG,SF_RET_SSIZE):
                 if not ov.func.returns in conv.integers:
                     raise SpecificationError('"{0}" must return an integer type'.format(ov.func.canon_name))
+            elif self.rettype == SF_RET_INT_BOOL:
+                if not (ov.func.returns in conv.integers or ov.func.returns == conv.bool):
+                    raise SpecificationError('"{0}" must return an integer or bool type'.format(ov.func.canon_name))
 
     def call_code_cast(self,conv,ov,t):
         return CallCode('return static_cast<{0}>({1}({{0}}));'.format(t,self.call_code_base(ov)))
@@ -757,7 +750,7 @@ class ClassDef:
         self.doc = None
 
 
-def SplitDefDef23Code(defdef,conv,vars,ind=Tab(2)):
+def splitdefdef23code(defdef,conv,vars,ind=Tab(2)):
     a = copy.copy(defdef)
     b = copy.copy(defdef)
     a.argtype = SF_ONE_ARG
@@ -788,6 +781,14 @@ def SplitDefDef23Code(defdef,conv,vars,ind=Tab(2)):
     return r
 
 
+def bindpyssize(conv,f,arg):
+    for ov in f.overloads:
+        try:
+            ov.bind(0,conv.from_py_ssize_t[ov.args[0].type].format(arg))
+        except KeyError:
+            raise SpecificationError('"{0}" must accept an integer type as its first argument'.format(ov.func.name))
+
+
 class TypedClassDef:
     def __init__(self,scope,classdef):
         self.name = classdef.name
@@ -813,13 +814,18 @@ class TypedClassDef:
         TwoArgs = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS)
         KeywordArgs = functools.partial(SpecialMethod,argtype=SF_KEYWORD_ARGS)
         NoArgsInt = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_INT)
+        NoArgsIntBool = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_INT_BOOL)
         OneArgInt = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,rettype=SF_RET_INT)
+        OneArgIntBool = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,rettype=SF_RET_INT_BOOL)
         NoArgsLong = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_LONG)
         TwoArgsInt = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,rettype=SF_RET_INT)
         CoerceArgsInt = functools.partial(SpecialMethod,argtype=SF_COERCE_ARGS,rettype=SF_RET_INT)
-        SSizeArg = functools.partial(SpecialMethod,argtype=SF_SSIZE_ARG)
         NoArgsSSize = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_SSIZE)
-        SSizeObjArgs = functools.partial(SpecialMethod,argtype=SF_SSIZE_OBJ_ARGS)
+
+        # TypedOverload.bind will be used to cover the Py_ssize argument
+        SSizeArg = NoArgs
+        SSizeObjArgs = OneArg
+        SSizeIOpMethod = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,defretsemantic=RET_SELF)
 
         self.special_methods = {}
         for key,mtype in (
@@ -834,7 +840,7 @@ class TypedClassDef:
             ('__ge__',           OneArg), # tp_richcompare
             ('__cmp__',          OneArgInt), # tp_compare
             ('__hash__',         NoArgsLong), # tp_hash
-            ('__nonzero__',      NoArgsInt), # tp_as_number.nb_nonzero
+            ('__nonzero__',      NoArgsIntBool), # tp_as_number.nb_nonzero
             ('__getattr__',      OneArg), # tp_getattro
             ('__setattr__',      TwoArgs), # tp_setattro
             ('__get__',          TwoArgs), # tp_descr_get
@@ -842,7 +848,7 @@ class TypedClassDef:
             ('__call__',         KeywordArgs), # tp_call
             ('__iter__',         NoArgs), # tp_iter
             ('next',             NoArgs), # tp_iternext
-            ('__contains__',     OneArgInt), # tp_as_sequence.sq_contains(NULL)
+            ('__contains__',     OneArgIntBool), # tp_as_sequence.sq_contains
             ('__add__',          BinaryFOpMethod), # tp_as_number.nb_add
             ('__radd__',         BinaryROpMethod),
             ('__sub__',          BinaryFOpMethod), # tp_as_number.nb_subtract
@@ -898,15 +904,15 @@ class TypedClassDef:
 
             # made-up names for special functions that don't have a distinct equivalent in Python
             ('__concat__',       OneArg), # tp_as_sequence.sq_concat
-            ('__iconcat__',      OneArg), # tp_as_sequence.sq_inplace_concat
+            ('__iconcat__',      BinaryIOpMethod), # tp_as_sequence.sq_inplace_concat
             ('__repeat__',       SSizeArg), # tp_as_sequence.sq_repeat
-            ('__irepeat__',      SSizeArg), # tp_as_sequence.sq_inplace_repeat
-            ('__mapping__len__',   NoArgsSSize), # tp_as_mapping.mp_length(NULL)
+            ('__irepeat__',      SSizeIOpMethod), # tp_as_sequence.sq_inplace_repeat
+            ('__mapping__len__',   NoArgsSSize), # tp_as_mapping.mp_length
             ('__sequence__len__',  NoArgsSSize), # tp_as_sequence.sq_length
-            ('__mapping__getitem__', OneArg), # tp_as_mapping.mp_subscript(NULL)
-            ('__sequence__getitem__', SSizeArg), # tp_as_sequence.sq_item(NULL)
-            ('__mapping__setitem__', TwoArgs), # tp_as_mapping.mp_ass_subscript(NULL)
-            ('__sequence__setitem__', SSizeObjArgs) # tp_as_sequence.sq_ass_item(NULL)
+            ('__mapping__getitem__', OneArg), # tp_as_mapping.mp_subscript
+            ('__sequence__getitem__', SSizeArg), # tp_as_sequence.sq_item
+            ('__mapping__setitem__', TwoArgs), # tp_as_mapping.mp_ass_subscript
+            ('__sequence__setitem__', SSizeObjArgs) # tp_as_sequence.sq_ass_item
         ):
             m = classdef.methods.data.pop(key,None)
             if m: self.special_methods[key] = mtype(self,m)
@@ -920,10 +926,6 @@ class TypedClassDef:
         self.bases = []
         self.derived = []
         self.features = ObjFeatures()
-
-        #for m in self.methods:
-        #    if any(ov.func.static != m.overloads[0].func.static for ov in m.overloads):
-        #        raise SpecificationError('The function overloads must be either be all static or all non-static',method=m.name)
 
     def basecount(self):
         return sum(1 + b.basecount() for b in self.bases)
@@ -1100,7 +1102,7 @@ class TypedClassDef:
                 args = 'obj_{0} *self,PyObject *arg1,PyObject *arg2'.format(self.name),
                 prolog = self.method_prolog(),
                 epilog = tmpl.ret_notimplemented,
-                code = SplitDefDef23Code(f,out.conv,['arg1','arg2']),
+                code = splitdefdef23code(f,out.conv,['arg1','arg2']),
                 errval = '0')
 
         f = self.special_methods.get('__pow__')
@@ -1110,7 +1112,7 @@ class TypedClassDef:
             code =''
             rcode = ''
             if f:
-                code = self.method_prolog('a',Tab(3)) + SplitDefDef23Code(f,out.conv,vars=['b','c'],ind=Tab(3))
+                code = self.method_prolog('a',Tab(3)) + splitdefdef23code(f,out.conv,vars=['b','c'],ind=Tab(3))
             if fr:
                 rcode = self.method_prolog('b',Tab(3)) + fr.function_call_1arg_fallthrough(out.conv,ind=Tab(3),var='a')
 
@@ -1128,13 +1130,142 @@ class TypedClassDef:
 
         return havenum
 
-    def have_sequence(self):
+    def sequence(self,out):
         return self.have_special('__sequence__len__','__sequence__getitem__',
             '__sequence__setitem__','__contains__','__concat__','__iconcat__',
             '__repeat__','__irepeat__')
 
-    def have_mapping(self):
-        return self.have_special('__mapping__len__','__mapping__getitem__','__mapping__setitem__')
+        have = False
+
+        f = self.special_methods.get('__sequence_len__')
+        if f:
+            have = True
+            print >> out.cpp, tmpl.function.format(
+                rettype = 'Py_ssize_t',
+                name = 'obj_{0}_sq_length'.format(self.name),
+                args = 'obj_{0} *self'.format(self.name),
+                prolog = self.method_prolog(),
+                epilog = '',
+                code = f.function_call_0arg(out.conv),
+                errval = '-1')
+
+        for n in ('__concat__','__iconcat__'):
+            f = self.special_methods.get(n)
+            if f:
+                have = True
+                print >> out.cpp, tmpl.function.format(
+                    rettype = 'PyObject *',
+                    name = 'obj_{0}_sq_{1}'.format(self.name,n),
+                    args = 'obj_{0} *self,PyObject *arg'.format(self.name),
+                    prolog = self.method_prolog(),
+                    epilog = '',
+                    code = f.function_call_1arg(out.conv),
+                    errval = '0')
+
+        for n in ('__repeat__','__irepeat__'):
+            f = self.special_methods.get(n)
+            if f:
+                have = True
+                bindpyssize(out.conv,f,'count')
+                print >> out.cpp, tmpl.function.format(
+                    rettype = 'PyObject *',
+                    name = 'obj_{0}_sq_{1}'.format(self.name,n),
+                    args = 'obj_{0} *self,Py_ssize_t *count'.format(self.name),
+                    prolog = self.method_prolog(),
+                    epilog = '',
+                    code = f.function_call_0arg(out.conv),
+                    errval = '0')
+
+        f = self.special_methods.get('__sequence_getitem__')
+        if f:
+            have = True
+            bindpyssize(out.conv,f,'index')
+            print >> out.cpp, tmpl.function.format(
+                rettype = 'PyObject *',
+                name = 'obj_{0}_sq_item'.format(self.name),
+                args = 'obj_{0} *self,Py_ssize_t *index'.format(self.name),
+                prolog = self.method_prolog(),
+                epilog = '',
+                code = f.function_call_0arg(out.conv),
+                errval = '0')
+
+        f = self.special_methods.get('__sequence_setitem__')
+        if f:
+            have = True
+            bindpyssize(out.conv,f,'index')
+            print >> out.cpp, tmpl.function.format(
+                rettype = 'int',
+                name = 'obj_{0}_sq_ass_item'.format(self.name),
+                args = 'obj_{0} *self,Py_ssize_t *index,PyObject *arg'.format(self.name),
+                prolog = self.method_prolog(),
+                epilog = '',
+                code = f.function_call_1arg(out.conv),
+                errval = '-1')
+
+        f = self.special_methods.get('__contains__')
+        if f:
+            have = True
+            print >> out.cpp, tmpl.function.format(
+                rettype = 'int',
+                name = 'obj_{0}_sq_contains'.format(self.name),
+                args = 'obj_{0} *self,PyObject *arg'.format(self.name),
+                prolog = self.method_prolog(),
+                epilog = '',
+                code = f.function_call_1arg(out.conv),
+                errval = '-1')
+
+        if have:
+            print >> out.cpp, tmpl.sequence_methods.render(
+                name = self.name,
+                specialmethods = self.special_methods)
+
+        return have
+
+    def mapping(self,out):
+        have = False
+
+        f = self.special_methods.get('__mapping_len__')
+        if f:
+            have = True
+            print >> out.cpp, tmpl.function.format(
+                rettype = 'Py_ssize_t',
+                name = 'obj_{0}_mp_length'.format(self.name),
+                args = 'obj_{0} *self'.format(self.name),
+                prolog = self.method_prolog(),
+                epilog = '',
+                code = f.function_call_0arg(out.conv),
+                errval = '-1')
+
+        f = self.special_methods.get('__mapping_getitem__')
+        if f:
+            have = True
+            print >> out.cpp, tmpl.function.format(
+                rettype = 'PyObject *',
+                name = 'obj_{0}_mp_subscript'.format(self.name),
+                args = 'obj_{0} *self,PyObject *arg'.format(self.name),
+                prolog = self.method_prolog(),
+                epilog = '',
+                code = f.function_call_1arg(out.conv),
+                errval = '0')
+
+        f = self.special_methods.get('__mapping_setitem__')
+        if f:
+            have = True
+            print >> out.cpp, tmpl.function.format(
+                rettype = 'int',
+                name = 'obj_{0}_mp_ass_subscript'.format(self.name),
+                args = 'obj_{0} *self,PyObject *key,PyObject *val'.format(self.name),
+                prolog = self.method_prolog(),
+                epilog = '',
+                code = f.function_call_narg(out.conv,['key','val']),
+                errval = '-1')
+
+        if have:
+            print >> out.cpp, tmpl.mapping_methods.render(
+                name = self.name,
+                specialmethods = self.special_methods)
+
+        return have
 
     def method_prolog(self,var='reinterpret_cast<PyObject*>(self)',ind=Tab(1)):
         return '{0}{1} &base = {2};\n'.format(
@@ -1169,6 +1300,8 @@ class TypedClassDef:
 
         richcompare = self.rich_compare(out)
         number = self.number(out)
+        mapping = self.mapping(out)
+        sequence = self.sequence(out)
 
         destructref = False
         initdestruct = False
@@ -1251,6 +1384,8 @@ class TypedClassDef:
             methodsref = methodsref,
             richcompare = richcompare,
             number = number,
+            mapping = mapping,
+            sequence = sequence,
             bases = bases),
 
 
@@ -1456,7 +1591,7 @@ class Conversion:
     def __init__(self,tns):
         # get the types specified by the typedefs
         for x in ("bool","sint","uint","sshort","ushort","slong","ulong",
-                  "float","double","long_double","size_t","py_size_t","schar",
+                  "float","double","long_double","size_t","py_ssize_t","schar",
                   "uchar","char","wchar_t","py_unicode","void","stdstring",
                   "stdwstring"):
             setattr(self,x,tns.find("type_"+x)[0])
@@ -1490,7 +1625,6 @@ class Conversion:
             self.float : fd,
             self.double : fd,
             self.long_double : 'PyFloat_FromDouble(static_cast<double>({0}))',
-            self.size_t : 'PyLong_FromSize_t({0})',
             self.pyobject : '{0}',
             self.stdstring : 'StringToPy({0})',
             self.cstring : 'PyString_FromString({0})'
@@ -1525,6 +1659,18 @@ class Conversion:
             self.cstring : (False,'PyString_AsString({0})')
         }
 
+        self.from_py_ssize_t = {
+            self.schar : 'py_ssize_t_to_schar({0})',
+            self.uchar : 'py_ssize_t_to_uchar({0})',
+            self.char : 'py_ssize_t_to_char({0})',
+            self.sshort : 'py_ssize_t_to_sshort({0})',
+            self.ushort : 'py_ssize_t_to_ushort({0})',
+            self.sint : 'py_ssize_t_to_ssint({0})',
+            self.uint : 'py_ssize_t_to_uint({0})',
+            self.slong : '{0}',
+            self.ulong : 'py_ssize_t_to_ulong({0})'
+        }
+
         ts = 'T_STRING'
         self.__pymember = {
             self.sshort : 'T_SHORT',
@@ -1542,6 +1688,10 @@ class Conversion:
             gccxml.CPPBasicType('Py_ssize_t') : 'T_PYSSIZET'
         }
 
+        self.integers = set((self.sint,self.uint,self.sshort,self.ushort,
+            self.slong,self.ulong,self.size_t,self.py_ssize_t,self.schar,
+            self.uchar,self.char))
+
         if self.slonglong:
             self.__topy[self.slonglong] = 'PyLong_FromLongLong({0})'
             self.__topy[self.ulonglong] = 'PyLong_FromUnsignedLongLong({0})'
@@ -1552,14 +1702,18 @@ class Conversion:
             self.__frompy[self.slonglong] = (False,'PyToLongLong({0})')
             self.__frompy[self.ulonglong] = (False,'PyToULongLong({0})')
 
+            self.from_py_ssize_t[self.slonglong] = '{0}'
+
+            # to_ulong is used since 'Py_ssize_t' isn't going to be larger than 'long' anyway
+            self.from_py_ssize_t[self.ulonglong] = 'py_ssize_t_to_ulong({0})'
+
             self.__pymember[self.slonglong] = 'T_LONGLONG'
             self.__pymember[self.ulonglong] = 'T_ULONGLONG'
 
-        self.cppclasstopy = {}
+            self.integers.add(self.slonglong)
+            self.integers.add(self.ulonglong)
 
-        self.integers = set((self.sint,self.uint,self.sshort,self.ushort,
-            self.slong,self.ulong,self.size_t,self.py_size_t,self.schar,
-            self.uchar,self.char))
+        self.cppclasstopy = {}
 
     def __topy_pointee(self,x):
         return self.__topy.get(strip_cvq(x.type))
@@ -1625,7 +1779,7 @@ class Conversion:
     def arg_parser(self,args,use_kwds = True,indent = Tab(2)):
         # even if we are not taking any arguments, get_arg::finish should still be called (to report an error if arguments were received)
 
-        prep = '{0}get_arg ga(args,{1});\n'.format(indent,'kwds' if use_kwds else '0')
+        prep = indent.line('get_arg ga(args,{1});'.format(indent,'kwds' if use_kwds else '0'))
 
         if any(a.default for a in args):
             prep += indent.line('PyObject *temp;')
@@ -1637,7 +1791,7 @@ class Conversion:
             if a.default:
                 prep += '{0}temp = ga({1},false);\n{0}{2} = temp ? {3} : {4};\n'.format(indent,name,var,frompy.format('temp'),a.defult)
             else:
-                prep += '{0}{1} = {2};\n'.format(indent,var,frompy.format('ga({0},true)'.format(name)))
+                prep += indent.line('{1} = {2};'.format(indent,var,frompy.format('ga({0},true)'.format(name))))
 
         prep += indent.line('ga.finished();')
 

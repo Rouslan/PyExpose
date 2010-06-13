@@ -208,6 +208,8 @@ inline PyTypeObject *create_obj_<% name %>Type() {
     type->tp_weaklistoffset = 0;
 <@ if destructref @>    type->tp_dealloc = reinterpret_cast<destructor>(&obj_<% name %>_dealloc);<@ endif @>
 <@ if number @>    type->tp_as_number = &obj_<% name %>_number_methods;<@ endif @>
+<@ if sequence @>    type->tp_as_sequence = &obj_<% name %>_sequence_methods;<@ endif @>
+<@ if mapping @>    type->tp_as_mapping = &obj_<% name %>_mapping_methods;<@ endif @>
 <@ if doc @>    type->tp_doc = <% doc|quote %>;<@ endif @>
 <@ if methodsref @>    type->tp_methods = obj_<% name %>_methods;<@ endif @>
 <@ if membersref @>    type->tp_members = obj_<% name %>_members;<@ endif @>
@@ -231,8 +233,8 @@ PyTypeObject obj_<% name %>Type = {
     0,                         /* tp_compare */
     0,                         /* tp_repr */
     <@ if number @>&obj_<% name %>_number_methods<@ else @>0<@ endif @>, /* tp_as_number */
-    0,                         /* tp_as_sequence */
-    0,                         /* tp_as_mapping */
+    <@ if sequence @>obj_<% name %>_sequence_methods<@ else @>0<@ endif @>, /* tp_as_sequence */
+    <@ if mapping @>obj_<% name %>_mapping_methods<@ else @>0<@ endif @>, /* tp_as_mapping */
     0,                         /* tp_hash */
     0,                         /* tp_call */
     0,                         /* tp_str */
@@ -293,7 +295,7 @@ typedef Py_UNICODE type_py_unicode;
 typedef std::string type_stdstring;
 typedef std::wstring type_stdwstring;
 typedef void type_void;
-typedef Py_ssize_t type_py_size_t;
+typedef Py_ssize_t type_py_ssize_t;
 
 '''
 
@@ -379,14 +381,17 @@ long PyToLong(PyObject *po) {{
     return r;
 }}
 
-long PyToXInt(PyObject *po,long max,long min) {{
-    long r = PyToLong(po);
-    if(UNLIKELY(r > max || r < min)) {{
-        if(min == 0 && r < 0) PyErr_SetString(PyExc_TypeError,"value cannot be negative");
+long narrow(long x,long max,long min) {{
+    if(UNLIKELY(x > max || x < min)) {{
+        if(min == 0 && x < 0) PyErr_SetString(PyExc_TypeError,"value cannot be negative");
         else PyErr_SetString(PyExc_OverflowError,"value is out of range");
         throw py_error_set();
     }}
-    return r;
+    return x;
+}}
+
+long PyToXInt(PyObject *po,long max,long min) {{
+    return narrow(PyToLong(po),max,min);
 }}
 
 short PyToShort(PyObject *po) {{
@@ -452,6 +457,45 @@ PyObject *bool_to_py(bool x) {{
     Py_INCREF(r);
     return r;
 }}
+
+unsigned char py_ssize_t_to_uchar(Py_ssize_t x) {{
+    return static_cast<unsigned char>(narrow(x,UCHAR_MAX,0));
+}}
+
+signed char py_ssize_t_to_schar(Py_ssize_t x) {{
+    return static_cast<signed char>(narrow(x,SCHAR_MAX,SCHAR_MIN));
+}}
+
+#if CHAR_MIN == 0
+    #define py_ssize_t_to_char(x) py_ssize_t_to_uchar(x)
+#else
+    #define py_ssize_t_to_char(x) py_ssize_t_to_schar(x)
+#endif
+
+unsigned short py_ssize_t_to_ushort(Py_ssize_t x) {{
+    return static_cast<unsigned short>(narrow(x,USHRT_MAX,0));
+}}
+
+short py_ssize_t_to_sshort(Py_ssize_t x) {{
+    return static_cast<short>(narrow(x,SHRT_MAX,SHRT_MIN));
+}}
+
+unsigned int py_ssize_t_to_uint(Py_ssize_t x) {{
+    return static_cast<unsigned int>(narrow(x,UINT_MAX,0));
+}}
+
+#if (PY_SIZE_MAX>>1) > INT_MAX
+    int py_ssize_t_to_sint(Py_ssize_t x) {{
+        return static_cast<int>(narrow(x,INT_MAX,INT_MIN));
+    }}
+#else
+    #define py_ssize_t_to_sint(x) x
+#endif
+
+unsigned long py_ssize_t_to_ulong(Py_ssize_t x) {{
+    return static_cast<unsigned long>(narrow(x,ULONG_MAX,0));
+}}
+
 
 void NoSuchOverload(PyObject *args) {{
     const char *const format = "no overload takes (%s)";
@@ -857,3 +901,24 @@ ret_notimplemented = '''
     Py_INCREF(Py_NotImplemented);
     return Py_NotImplemented;
 '''
+
+mapping_methods = env.from_string('''
+PyMappingMethods obj_<% name %>_mapping_methods = {
+    <@ if '__mapping_length__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>_mp_length)<@ else @>0<@ endif @>,
+    <@ if '__mapping__getitem__' in specialmethods @>reinterpret_cast<binaryfunc>(&obj_<% name %>_mp_subscript)<@ else @>0<@ endif @>,
+    <@ if '__mapping__setitem__' in specialmethods @>reinterpret_cast<objobjargproc>(&obj_<% name %>_mp_ass_subscript)<@ else @>0<@ endif @>
+};
+''')
+
+sequence_methods = env.from_string('''
+PySequenceMethods obj_<% name %>_sequence_methods = {
+    <@ if '__sequence_length__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>_sq_length)<@ else @>0<@ endif @>,
+    <@ if '__concat__' in specialmethods @>reinterpret_cast<binaryfunc>(&obj_<% name %>_sq_concat)<@ else @>0<@ endif @>,
+    <@ if '__repeat__' in specialmethods @>reinterpret_cast<ssizeargfunc>(&obj_<% name %>_sq_repeat)<@ else @>0<@ endif @>,
+    <@ if '__sequence__getitem__' in specialmethods @>reinterpret_cast<ssizeargfunc>(&obj_<% name %>_sq_item)<@ else @>0<@ endif @>,
+    <@ if '__sequence__setitem__' in specialmethods @>reinterpret_cast<ssizeobjargproc>(&obj_<% name %>_sq_ass_item)<@ else @>0<@ endif @>,
+    <@ if '__contains__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>_sq_contains)<@ else @>0<@ endif @>,
+    <@ if '__iconcat__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>_sq_inplace_concat)<@ else @>0<@ endif @>,
+    <@ if '__irepeat__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>_sq_inplace_repeat)<@ else @>0<@ endif @>
+};
+''')
