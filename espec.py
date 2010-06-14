@@ -35,8 +35,8 @@ SF_RET_OBJ = 0
 SF_RET_INT = 1
 SF_RET_LONG = 2
 SF_RET_SSIZE = 3
-SF_RET_VOID = 4
-SF_RET_INT_BOOL = 5
+SF_RET_INT_VOID = 4 # the return type is int, -1 for an exception and 0 otherwise
+SF_RET_INT_BOOL = 5 # the return type is int, 1 for True, 0 for False, -1 for an exception
 
 
 TYPE_FLOAT = 1
@@ -372,21 +372,25 @@ class TypedDefDef(object):
         # this gets overridden by SpecialMethod
         pass
 
-    def function_call_var_args(self,conv,use_kwds):
+    def function_call_var_args(self,conv,use_kwds,errval='0'):
         self.check_args_ret(conv)
-        return conv.function_call(self.make_argss(conv),use_kwds = use_kwds)
+        return conv.function_call(self.make_argss(conv),errval,use_kwds)
 
-    def function_call_1arg(self,conv,ind=Tab(2),var='arg'):
+    def function_call_1arg(self,conv,ind=Tab(2),var='arg',errval='0'):
         self.check_args_ret(conv)
-        return conv.function_call_1arg(self.make_argss(conv),ind=ind,var=var)
+        return conv.function_call_narg(self.make_argss(conv),[var],errval,ind)
 
     def function_call_narg_fallthrough(self,conv,vars,ind=Tab(2)):
         self.check_args_ret(conv)
         return conv.function_call_narg_fallthrough(self.make_argss(conv),vars,ind)
 
+    def function_call_narg(self,conv,vars,ind=Tab(2),errval='0'):
+        self.check_args_ret(conv)
+        return conv.function_call_narg(self.make_argss(conv),vars,errval,ind)
+
     def function_call_1arg_fallthrough(self,conv,ind=Tab(2),var='arg'):
         self.check_args_ret(conv)
-        return conv.function_call_1arg_fallthrough(self.make_argss(conv),ind,var)
+        return conv.function_call_narg_fallthrough(self.make_argss(conv),[var],ind)
 
     def function_call_0arg(self,conv,ind=Tab(2)):
         self.check_args_ret(conv)
@@ -542,7 +546,7 @@ class SpecialMethod(TypedMethodDef):
         return CallCode('return static_cast<{0}>({1}({{0}}));'.format(t,self.call_code_base(ov)))
 
     def call_code(self,conv,ov):
-        if self.rettype == SF_RET_INT:
+        if self.rettype == SF_RET_INT or self.rettype == SF_RET_INT_BOOL:
             return self.call_code_cast(conv,ov,'int')
 
         if self.rettype == SF_RET_LONG:
@@ -551,10 +555,49 @@ class SpecialMethod(TypedMethodDef):
         if self.rettype == SF_RET_SSIZE:
             return self.call_code_cast(conv,ov,'Py_ssize_t')
 
-        if self.rettype == SF_RET_VOID:
+        if self.rettype == SF_RET_INT_VOID:
             return CallCode(self.call_code_base(ov) + '({0}); return 0;')
 
+        assert self.rettype == SF_RET_OBJ
         return super(SpecialMethod,self).call_code(conv,ov)
+
+    def output(self,conv,ind=Tab(2)):
+        errval = '-1'
+        if self.rettype in (SF_RET_INT,SF_RET_INT_VOID,SF_RET_INT_BOOL):
+            ret = 'int'
+        elif self.rettype == SF_RET_LONG:
+            ret = 'long'
+        elif self.rettype == SF_RET_SSIZE:
+            ret = 'Py_ssize_t'
+        else:
+            assert self.rettype == SF_RET_OBJ
+            ret = 'PyObject *'
+            errval = '0'
+
+        if self.argtype == SF_NO_ARGS:
+            argextra = ''
+            code = self.function_call_0arg(conv,ind)
+        elif self.argtype == SF_ONE_ARG:
+            argextra = ',PyObject *arg'
+            code = self.function_call_1arg(conv,ind,errval=errval)
+        elif self.argtype == SF_TWO_ARGS:
+            argextra = ',PyObject *arg1,PyObject *arg2'
+            code = self.function_call_narg(conv,['arg1','arg2'],ind,errval)
+        elif self.argtype == SF_KEYWORD_ARGS:
+            argextra = ',PyObject *args,PyObject *kwds'
+            code = self.function_call_var_args(conv,True,errval)
+        else:
+            # nothing else implemented
+            assert False
+
+        return tmpl.function.format(
+            rettype = ret,
+            name = 'obj_{0}_{1}'.format(self.classdef.name,self.name),
+            args = 'obj_{0} *self{1}'.format(self.classdef.name,argextra),
+            prolog = self.classdef.method_prolog(),
+            epilog = '',
+            code = code,
+            errval = errval)
 
 
 class FOpMethod(SpecialMethod):
@@ -592,7 +635,7 @@ class TypedPropertyDef:
         self.name = propdef.name
         self.doc = propdef.doc
         self.get = SpecialMethod(classdef,propdef.get,SF_NO_ARGS,SF_RET_OBJ)
-        self.set = SpecialMethod(classdef,propdef.set,SF_ONE_ARG,SF_RET_VOID)
+        self.set = SpecialMethod(classdef,propdef.set,SF_ONE_ARG,SF_RET_INT_VOID)
 
     def output(self,conv):
         r = ''
@@ -999,11 +1042,15 @@ class TypedClassDef:
 
         return node
 
-    def have_special(self,*keys):
-        return any(self.special_methods.get(k) for k in keys)
+    def output_special(self,name,out):
+        f = self.special_methods.get(name)
+        if not f: return False
+        print >> out.cpp, f.output(out.conv)
+        return True
 
     def rich_compare(self,out):
-        if not self.have_special('__lt__','__le__','__eq__','__ne__','__gt__','__ge__'):
+        if not any(self.special_methods.get(f) for f in
+                   ('__lt__','__le__','__eq__','__ne__','__gt__','__ge__')):
             return False
 
         print >> out.cpp, tmpl.richcompare_start.format(
@@ -1032,18 +1079,10 @@ class TypedClassDef:
         havenum = False
 
         for fn in ('__neg__','__pos__','__abs__','__invert__','__int__',
-                   '__long__','__float__','__oct__','__hex__','__index__'):
-            f = self.special_methods.get(fn)
-            if f:
-                havenum = True
-                print >> out.cpp, tmpl.function.format(
-                    rettype = 'PyObject *',
-                    name = 'obj_{0}_nb_{1}'.format(self.name,fn),
-                    args = 'obj_{0} *self'.format(self.name),
-                    prolog = self.method_prolog(),
-                    epilog = '',
-                    code = f.function_call_0arg(out.conv),
-                    errval = '0')
+                   '__long__','__float__','__oct__','__hex__','__index__',
+                   '__nonzero__'):
+            if self.output_special(fn,out): havenum = True
+
 
         for fn in ('__iadd__','__isub__','__imul__','__idiv__','__itruediv__',
                 '__ifloordiv__','__imod__','__ilshift__','__irshift__',
@@ -1053,7 +1092,7 @@ class TypedClassDef:
                 havenum = True
                 print >> out.cpp, tmpl.function.format(
                     rettype = 'PyObject *',
-                    name = 'obj_{0}_nb_{1}'.format(self.name,fn),
+                    name = 'obj_{0}_{1}'.format(self.name,fn),
                     args = 'obj_{0} *self,PyObject *arg'.format(self.name),
                     prolog = self.method_prolog(),
                     epilog = tmpl.ret_notimplemented,
@@ -1081,24 +1120,12 @@ class TypedClassDef:
                     code = code,
                     rcode = rcode)
 
-        f = self.special_methods.get('__nonzero__')
-        if f:
-            havenum = True
-            print >> out.cpp, tmpl.function.format(
-                rettype = 'int',
-                name = 'obj_{0}_nb___nonzero__'.format(self.name),
-                args = 'obj_{0} *self'.format(self.name),
-                prolog = self.method_prolog(),
-                epilog = '',
-                code = f.function_call_0arg(out.conv),
-                errval = '0')
-
         f = self.special_methods.get('__ipow__')
         if f:
             havenum = True
             print >> out.cpp, tmpl.function.format(
                 rettype = 'PyObject *',
-                name = 'obj_{0}_nb___ipow__'.format(self.name),
+                name = 'obj_{0}___ipow__'.format(self.name),
                 args = 'obj_{0} *self,PyObject *arg1,PyObject *arg2'.format(self.name),
                 prolog = self.method_prolog(),
                 epilog = tmpl.ret_notimplemented,
@@ -1131,36 +1158,11 @@ class TypedClassDef:
         return havenum
 
     def sequence(self,out):
-        return self.have_special('__sequence__len__','__sequence__getitem__',
-            '__sequence__setitem__','__contains__','__concat__','__iconcat__',
-            '__repeat__','__irepeat__')
-
         have = False
 
-        f = self.special_methods.get('__sequence_len__')
-        if f:
-            have = True
-            print >> out.cpp, tmpl.function.format(
-                rettype = 'Py_ssize_t',
-                name = 'obj_{0}_sq_length'.format(self.name),
-                args = 'obj_{0} *self'.format(self.name),
-                prolog = self.method_prolog(),
-                epilog = '',
-                code = f.function_call_0arg(out.conv),
-                errval = '-1')
-
-        for n in ('__concat__','__iconcat__'):
+        for n in ('__sequence_len__','__concat__','__iconcat__','__contains__'):
+            if self.output_special(n,out): have = True
             f = self.special_methods.get(n)
-            if f:
-                have = True
-                print >> out.cpp, tmpl.function.format(
-                    rettype = 'PyObject *',
-                    name = 'obj_{0}_sq_{1}'.format(self.name,n),
-                    args = 'obj_{0} *self,PyObject *arg'.format(self.name),
-                    prolog = self.method_prolog(),
-                    epilog = '',
-                    code = f.function_call_1arg(out.conv),
-                    errval = '0')
 
         for n in ('__repeat__','__irepeat__'):
             f = self.special_methods.get(n)
@@ -1169,7 +1171,7 @@ class TypedClassDef:
                 bindpyssize(out.conv,f,'count')
                 print >> out.cpp, tmpl.function.format(
                     rettype = 'PyObject *',
-                    name = 'obj_{0}_sq_{1}'.format(self.name,n),
+                    name = 'obj_{0}_{1}'.format(self.name,n),
                     args = 'obj_{0} *self,Py_ssize_t *count'.format(self.name),
                     prolog = self.method_prolog(),
                     epilog = '',
@@ -1182,7 +1184,7 @@ class TypedClassDef:
             bindpyssize(out.conv,f,'index')
             print >> out.cpp, tmpl.function.format(
                 rettype = 'PyObject *',
-                name = 'obj_{0}_sq_item'.format(self.name),
+                name = 'obj_{0}___sequence_getitem__'.format(self.name),
                 args = 'obj_{0} *self,Py_ssize_t *index'.format(self.name),
                 prolog = self.method_prolog(),
                 epilog = '',
@@ -1195,20 +1197,8 @@ class TypedClassDef:
             bindpyssize(out.conv,f,'index')
             print >> out.cpp, tmpl.function.format(
                 rettype = 'int',
-                name = 'obj_{0}_sq_ass_item'.format(self.name),
+                name = 'obj_{0}___sequence_setitem__'.format(self.name),
                 args = 'obj_{0} *self,Py_ssize_t *index,PyObject *arg'.format(self.name),
-                prolog = self.method_prolog(),
-                epilog = '',
-                code = f.function_call_1arg(out.conv),
-                errval = '-1')
-
-        f = self.special_methods.get('__contains__')
-        if f:
-            have = True
-            print >> out.cpp, tmpl.function.format(
-                rettype = 'int',
-                name = 'obj_{0}_sq_contains'.format(self.name),
-                args = 'obj_{0} *self,PyObject *arg'.format(self.name),
                 prolog = self.method_prolog(),
                 epilog = '',
                 code = f.function_call_1arg(out.conv),
@@ -1224,41 +1214,8 @@ class TypedClassDef:
     def mapping(self,out):
         have = False
 
-        f = self.special_methods.get('__mapping_len__')
-        if f:
-            have = True
-            print >> out.cpp, tmpl.function.format(
-                rettype = 'Py_ssize_t',
-                name = 'obj_{0}_mp_length'.format(self.name),
-                args = 'obj_{0} *self'.format(self.name),
-                prolog = self.method_prolog(),
-                epilog = '',
-                code = f.function_call_0arg(out.conv),
-                errval = '-1')
-
-        f = self.special_methods.get('__mapping_getitem__')
-        if f:
-            have = True
-            print >> out.cpp, tmpl.function.format(
-                rettype = 'PyObject *',
-                name = 'obj_{0}_mp_subscript'.format(self.name),
-                args = 'obj_{0} *self,PyObject *arg'.format(self.name),
-                prolog = self.method_prolog(),
-                epilog = '',
-                code = f.function_call_1arg(out.conv),
-                errval = '0')
-
-        f = self.special_methods.get('__mapping_setitem__')
-        if f:
-            have = True
-            print >> out.cpp, tmpl.function.format(
-                rettype = 'int',
-                name = 'obj_{0}_mp_ass_subscript'.format(self.name),
-                args = 'obj_{0} *self,PyObject *key,PyObject *val'.format(self.name),
-                prolog = self.method_prolog(),
-                epilog = '',
-                code = f.function_call_narg(out.conv,['key','val']),
-                errval = '-1')
+        for fn in ('__mapping_len__','__mapping_getitem__','__mapping_setitem__'):
+            if self.output_special(fn,out): have = True
 
         if have:
             print >> out.cpp, tmpl.mapping_methods.render(
@@ -1353,6 +1310,8 @@ class TypedClassDef:
 
             methodsref = True
 
+        for fn in ('__cmp__','__repr__','__hash__','__call__','__str__','__getattr__','__setattr__','__iter__','next'):
+            self.output_special(fn,out)
 
 
         func = CallCode('new(addr) {0}({{0}}); return 0;'.format(self.type.canon_name))
@@ -1386,7 +1345,8 @@ class TypedClassDef:
             number = number,
             mapping = mapping,
             sequence = sequence,
-            bases = bases),
+            bases = bases,
+            specialmethods = self.special_methods),
 
 
 
@@ -1849,19 +1809,16 @@ class Conversion:
         return self.generate_arg_tree(calls).basic_and_objects_code(
             self,[],len(vars)-1,ind,lambda x: vars[x],True)
 
-    def function_call_1arg_fallthrough(self,calls,ind=Tab(2),var='arg'):
-        assert calls
-        return self.generate_arg_tree(calls).basic_and_objects_code(
-            self,[],0,ind,(lambda x: var),True)
-
-    def function_call_1arg(self,calls,errval='0',ind=Tab(2),var='arg'):
+    def function_call_narg(self,calls,vars,errval='0',ind=Tab(2)):
         if len(calls) == 1:
-            return ind + calls[0][0].output([self.frompy(calls[0][1][0].type)[0].format(var)],ind)
+            return ind + calls[0][0].output(
+                [self.frompy(a.type)[0].format(v) for a,v in zip(calls[0][1],vars)],
+                ind)
 
         return tmpl.overload_func_call.render(
-            inner = self.function_call_1arg_fallthrough(calls,ind,var),
+            inner = self.function_call_narg_fallthrough(calls,vars,ind),
             nokwdscheck = False,
-            args = var,
+            args = ','.join(vars),
             errval = errval,
             endlabel = False)
 

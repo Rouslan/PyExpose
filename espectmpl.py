@@ -207,14 +207,23 @@ inline PyTypeObject *create_obj_<% name %>Type() {
     type->tp_dictoffset = 0;
     type->tp_weaklistoffset = 0;
 <@ if destructref @>    type->tp_dealloc = reinterpret_cast<destructor>(&obj_<% name %>_dealloc);<@ endif @>
+<@ if '__cmp__' in specialmethods @>    type->tp_compare = reinterpret_cast<cmpfunc>(&obj_<% name %>___cmp__);<@ endif @>
+<@ if '__repr__' in specialmethods @>    type->tp_repr = reinterpret_cast<reprfunc>(&obj_<% name %>___repr__);<@ endif @>
 <@ if number @>    type->tp_as_number = &obj_<% name %>_number_methods;<@ endif @>
 <@ if sequence @>    type->tp_as_sequence = &obj_<% name %>_sequence_methods;<@ endif @>
 <@ if mapping @>    type->tp_as_mapping = &obj_<% name %>_mapping_methods;<@ endif @>
+<@ if '__hash__' in specialmethods @>    type->tp_hash = reinterpret_cast<hashfunc>(&obj_<% name %>___hash__);<@ endif @>
+<@ if '__call__' in specialmethods @>    type->tp_call = reinterpret_cast<ternaryfunc>(&obj_<% name %>___call__);<@ endif @>
+<@ if '__str__' in specialmethods @>    type->tp_str = reinterpret_cast<reprfunc>(&obj_<% name %>___str__);<@ endif @>
+<@ if '__getattr__' in specialmethods @>    type->tp_getattro = reinterpret_cast<getattrofunc>(&obj_<% name %>___getattr__);<@ endif @>
+<@ if '__setattr__' in specialmethods @>    type->tp_setattro = reinterpret_cast<setattrofunc>(&obj_<% name %>___setattr__);<@ endif @>
 <@ if doc @>    type->tp_doc = <% doc|quote %>;<@ endif @>
 <@ if methodsref @>    type->tp_methods = obj_<% name %>_methods;<@ endif @>
 <@ if membersref @>    type->tp_members = obj_<% name %>_members;<@ endif @>
 <@ if getsetref @>    type->tp_getset = obj_<% name %>_getset;<@ endif @>
 <@ if richcompare @>    type->tp_richcompare = reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare);<@ endif @>
+<@ if '__iter__' in specialmethods @>    type->tp_iter = reinterpret_cast<getiterfunc>(&obj_<% name %>___iter__);<@ endif @>
+<@ if 'next' in specialmethods @>    type->tp_iter = reinterpret_cast<iternextfunc>(&obj_<% name %>_next);<@ endif @>
     type->tp_init = reinterpret_cast<initproc>(&obj_<% name %>_init);
 
     return type;
@@ -230,16 +239,16 @@ PyTypeObject obj_<% name %>Type = {
     0,                         /* tp_print */
     0,                         /* tp_getattr */
     0,                         /* tp_setattr */
-    0,                         /* tp_compare */
-    0,                         /* tp_repr */
+    <@ if '__cmp__' in specialmethods @>reinterpret_cast<cmpfunc>(&obj_<% name %>___cmp__)<@ else @>0<@ endif @>, /* tp_compare */
+    <@ if '__repr__' in specialmethods @>reinterpret_cast<reprfunc>(&obj_<% name %>___repr__)<@ else @>0<@ endif @>, /* tp_repr */
     <@ if number @>&obj_<% name %>_number_methods<@ else @>0<@ endif @>, /* tp_as_number */
     <@ if sequence @>obj_<% name %>_sequence_methods<@ else @>0<@ endif @>, /* tp_as_sequence */
     <@ if mapping @>obj_<% name %>_mapping_methods<@ else @>0<@ endif @>, /* tp_as_mapping */
-    0,                         /* tp_hash */
-    0,                         /* tp_call */
-    0,                         /* tp_str */
-    0,                         /* tp_getattro */
-    0,                         /* tp_setattro */
+    <@ if '__hash__' in specialmethods @>reinterpret_cast<hashfunc>(&obj_<% name %>___hash__)<@ else @>0<@ endif @>, /* tp_hash */
+    <@ if '__call__' in specialmethods @>reinterpret_cast<ternaryfunc>(&obj_<% name %>___call__)<@ else @>0<@ endif @>, /* tp_call */
+    <@ if '__str__' in specialmethods @>reinterpret_cast<reprfunc>(&obj_<% name %>___str__)<@ else @>0<@ endif @>, /* tp_str */
+    <@ if '__getattr__' in specialmethods @>reinterpret_cast<getattrofunc>(&obj_<% name %>___getattr__)<@ else @>0<@ endif @>, /* tp_getattro */
+    <@ if '__setattr__' in specialmethods @>reinterpret_cast<setattrofunc>(&obj_<% name %>___setattr__)<@ else @>0<@ endif @>, /* tp_setattro */
     0,                         /* tp_as_buffer */
     Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE|Py_TPFLAGS_CHECKTYPES, /* tp_flags */
     <@ if doc @><% doc|quote %><@ else @>0<@ endif @>, /* tp_doc */
@@ -247,8 +256,8 @@ PyTypeObject obj_<% name %>Type = {
     0,                         /* tp_clear */
     <@ if richcompare @>reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare)<@ else @>0<@ endif @>, /* tp_richcompare */
     0,                         /* tp_weaklistoffset */
-    0,                         /* tp_iter */
-    0,                         /* tp_iternext */
+    <@ if '__iter__' in specialmethods @>reinterpret_cast<getiterfunc>(&obj_<% name %>___iter__)<@ else @>0<@ endif @>, /* tp_iter */
+    <@ if 'next' in specialmethods @>reinterpret_cast<iternextfunc>(&obj_<% name %>_next)<@ else @>0<@ endif @>, /* tp_iternext */
     <@ if methodsref @>obj_<% name %>_methods<@ else @>0<@ endif @>, /* tp_methods */
     <@ if membersref @>obj_<% name %>_members<@ else @>0<@ endif @>, /* tp_members */
     <@ if getsetref @>obj_<% name %>_getset<@ else @>0<@ endif @>, /* tp_getset */
@@ -816,7 +825,7 @@ function = '''
 '''
 
 number_op = '''
-PyObject *obj_{cname}_nb_{op}({args}) {{
+PyObject *obj_{cname}_{op}({args}) {{
     try {{
         if(PyObject_IsInstance(a,reinterpret_cast<PyObject*>(get_obj_{cname}Type()))) {{
 {code}
@@ -852,8 +861,8 @@ richcompare_end = '''
 '''
 
 number_methods = env.from_string('''
-<@ macro exact(fname) @><@ if fname in specialmethods @>&obj_<% name %>_nb_<% fname %><@ else @>0<@ endif @><@ endmacro @>
-<@ macro cast(fname,type) @><@ if fname in specialmethods @>reinterpret_cast<<% type %>>(&obj_<% name %>_nb_<% fname %>)<@ else @>0<@ endif @><@ endmacro @>
+<@ macro exact(fname) @><@ if fname in specialmethods @>&obj_<% name %>_<% fname %><@ else @>0<@ endif @><@ endmacro @>
+<@ macro cast(fname,type) @><@ if fname in specialmethods @>reinterpret_cast<<% type %>>(&obj_<% name %>_<% fname %>)<@ else @>0<@ endif @><@ endmacro @>
 PyNumberMethods obj_<% name %>_number_methods = {
     <% exact('__add__') %>,
     <% exact('__sub__') %>,
@@ -904,21 +913,21 @@ ret_notimplemented = '''
 
 mapping_methods = env.from_string('''
 PyMappingMethods obj_<% name %>_mapping_methods = {
-    <@ if '__mapping_length__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>_mp_length)<@ else @>0<@ endif @>,
-    <@ if '__mapping__getitem__' in specialmethods @>reinterpret_cast<binaryfunc>(&obj_<% name %>_mp_subscript)<@ else @>0<@ endif @>,
-    <@ if '__mapping__setitem__' in specialmethods @>reinterpret_cast<objobjargproc>(&obj_<% name %>_mp_ass_subscript)<@ else @>0<@ endif @>
+    <@ if '__mapping_length__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___mapping_length__)<@ else @>0<@ endif @>,
+    <@ if '__mapping__getitem__' in specialmethods @>reinterpret_cast<binaryfunc>(&obj_<% name %>___mapping__getitem__)<@ else @>0<@ endif @>,
+    <@ if '__mapping__setitem__' in specialmethods @>reinterpret_cast<objobjargproc>(&obj_<% name %>___mapping__setitem__)<@ else @>0<@ endif @>
 };
 ''')
 
 sequence_methods = env.from_string('''
 PySequenceMethods obj_<% name %>_sequence_methods = {
-    <@ if '__sequence_length__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>_sq_length)<@ else @>0<@ endif @>,
-    <@ if '__concat__' in specialmethods @>reinterpret_cast<binaryfunc>(&obj_<% name %>_sq_concat)<@ else @>0<@ endif @>,
-    <@ if '__repeat__' in specialmethods @>reinterpret_cast<ssizeargfunc>(&obj_<% name %>_sq_repeat)<@ else @>0<@ endif @>,
-    <@ if '__sequence__getitem__' in specialmethods @>reinterpret_cast<ssizeargfunc>(&obj_<% name %>_sq_item)<@ else @>0<@ endif @>,
-    <@ if '__sequence__setitem__' in specialmethods @>reinterpret_cast<ssizeobjargproc>(&obj_<% name %>_sq_ass_item)<@ else @>0<@ endif @>,
-    <@ if '__contains__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>_sq_contains)<@ else @>0<@ endif @>,
-    <@ if '__iconcat__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>_sq_inplace_concat)<@ else @>0<@ endif @>,
-    <@ if '__irepeat__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>_sq_inplace_repeat)<@ else @>0<@ endif @>
+    <@ if '__sequence_length__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___sequence_length__)<@ else @>0<@ endif @>,
+    <@ if '__concat__' in specialmethods @>reinterpret_cast<binaryfunc>(&obj_<% name %>___concat__)<@ else @>0<@ endif @>,
+    <@ if '__repeat__' in specialmethods @>reinterpret_cast<ssizeargfunc>(&obj_<% name %>___repeat__)<@ else @>0<@ endif @>,
+    <@ if '__sequence__getitem__' in specialmethods @>reinterpret_cast<ssizeargfunc>(&obj_<% name %>___sequence__getitem__)<@ else @>0<@ endif @>,
+    <@ if '__sequence__setitem__' in specialmethods @>reinterpret_cast<ssizeobjargproc>(&obj_<% name %>___sequence__setitem__)<@ else @>0<@ endif @>,
+    <@ if '__contains__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___contains__)<@ else @>0<@ endif @>,
+    <@ if '__iconcat__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___iconcat__)<@ else @>0<@ endif @>,
+    <@ if '__irepeat__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___irepeat__)<@ else @>0<@ endif @>
 };
 ''')
