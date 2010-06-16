@@ -25,6 +25,9 @@ class ArgList(list):
     def __str__(self):
         return ','.join(map(str,self))
 
+    def __repr__(self):
+        return 'ArgList(({0}))'.format(','.join(map(repr,self)))
+
 
 
 class CPPSymbol(object):
@@ -34,10 +37,11 @@ class CPPSymbol(object):
     def canon_name(self):
         return self.name
 
+    @property
     def full_name(self):
         n = []
         if self.context:
-            n.append(self.context.full_name())
+            n.append(self.context.full_name)
         n.append(self.canon_name)
 
         return '::'.join(filter(None,n))
@@ -70,9 +74,10 @@ class CPPBasicType(CPPType,CPPSymbol):
 
     def __init__(self,name = None):
         self.name = name
+        self.context = None
 
     def _typestr(self,deriv):
-        return '{0} {1}'.format(self.name,deriv) if deriv else self.name
+        return '{0} {1}'.format(self.full_name,deriv) if deriv else self.full_name
 
 class CPPClass(CPPBasicType):
     __slots__ = 'bases','members','size'
@@ -95,6 +100,12 @@ class CPPArgument(object):
 
     def __str__(self):
         return self.type.typestr()
+
+    def __repr__(self):
+        s = self.type.typestr() if hasattr(self.type,'typestr') else str(self.type)
+        if self.name: s += ' ' + self.name
+        if self.default: s += '=' + self.default
+        return '<{0}>'.format(s)
 
 class CPPBase(object):
     __slots__ = 'type','access'
@@ -175,17 +186,13 @@ class CPPField(CPPSymbol):
     link = link_item('type')
 
 class CPPConstructor(CPPSymbol):
-    __slots__ = 'access','args','artificial','context'
+    __slots__ = 'name','access','args','artificial','context'
 
     def __init__(self):
         self.args = ArgList()
 
     def link(self,items):
         for a in self.args: a.link(items)
-
-    @property
-    def canon_name(self):
-        return self.context.name
 
 class CPPMethod(CPPSymbol):
     __slots__ = 'name','returns','access','const','virtual','pure_virtual','static','args','context'
@@ -268,14 +275,14 @@ class CPPUnion(CPPBasicType):
         pass
 
 class CPPDestructor(CPPSymbol):
-    __slots__ = 'access','virtual','context'
+    __slots__ = 'name','access','virtual','context'
 
     def link(self,items):
         pass
 
     @property
     def canon_name(self):
-        return '~' + self.context.name
+        return '~' + self.name
 
 class CPPOffsetType(CPPType):
     __slots__ = 'basetype','type','size'
@@ -398,7 +405,7 @@ class tag_Method(tag):
 
 class tag_Constructor(tag):
     OType = CPPConstructor
-    __init__ = common_init([("access",parse_access),'context'] + bool_keys('artificial'))
+    __init__ = common_init([('name',None,None),("access",parse_access),'context'] + bool_keys('artificial'))
     child = function_child
 
 class tag_OperatorMethod(tag_Method):
@@ -430,7 +437,7 @@ class tag_Union(tag):
 
 class tag_Destructor(tag):
     OType = CPPDestructor
-    __init__ = common_init([("access",parse_access),'context'] + bool_keys("virtual"))
+    __init__ = common_init(['name',("access",parse_access),'context'] + bool_keys("virtual"))
 
 class tag_OffsetType(tag):
     OType = CPPOffsetType
@@ -503,7 +510,7 @@ def getinterface(path):
         item.link(items)
         if hasattr(item,'context'):
             if item.context is None:
-                rootnamespace = item
+                if isinstance(item,CPPNamespace): rootnamespace = item
             else:
                 c = items[item.context]
                 c.members.append(item)

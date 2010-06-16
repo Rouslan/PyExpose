@@ -79,14 +79,26 @@ def getDestructor(self):
     return None
 gccxml.CPPClass.getDestructor = getDestructor
 
-def same_args(a,b):
-    return len(a) == len(b) and all(str(ai) == str(bi) for ai,bi in zip(a,b))
+
+def compatible_args(f,given):
+    """Return a copy of f with the subset of arguments from 'needed', specified
+    by 'given' or None if the arguments don't match."""
+    if len(given) > len(f.args) or any(a.type != b.type for a,b in zip(given,f.args)): return None
+    if len(f.args) > len(given):
+        if not f.args[len(given)].default: return None
+        newargs = f.args[0:len(given)]
+        rf = copy.copy(f)
+        rf.args = newargs
+        return rf
+    return f
+
 
 def getConstructor(self,ovrld = None):
     constructors = [c for c in self.members if isinstance(c,gccxml.CPPConstructor) and c.access == gccxml.ACCESS_PUBLIC]
     if ovrld:
         for c in constructors:
-            if same_args(ovrld,c.args): return c
+            rc = compatible_args(c,ovrld)
+            if rc: return rc
         msg = 'For class "{0}", there is no public constructor with the arguments specified by "overload"'.format(self.name)
         if constructors:
             msg += '\nThe available constructors are:' + ''.join('\n({0})'.format(','.join(map(str,c.args))) for c in constructors)
@@ -137,7 +149,7 @@ def _namespace_find(self,x,test):
                     raise SpecificationError('"{0}" is not a namespace, struct or class'.format(parts[0]))
 
                 assert len(matches) == 1
-                return _namespace_find(matches[0],parts[1])
+                return _namespace_find(matches[0],parts[1],test)
 
             return matches
     return []
@@ -351,7 +363,18 @@ class TypedDefDef(object):
                 raise SpecificationError('"{0}" is not a function or method'.format(cf[0]))
             assert all(isinstance(f,(gccxml.CPPFunction,gccxml.CPPMethod)) for f in cf)
 
-            self.overloads.extend(TypedOverload(f,ov) for f in cf if (not ov.args) or same_args(ov.args,f.args))
+            if not ov.args:
+                self.overloads.extend(TypedOverload(f,ov) for f in cf)
+            else:
+                for f in cf:
+                    newf = compatible_args(f,ov.args)
+                    if newf:
+                        self.overloads.append(TypedOverload(newf,ov))
+                        break
+                else:
+                    raise SpecificationError(
+                        'No overload matches the given arguments. The options are:' +
+                        ''.join('\n({0})'.format(','.join(map(str,f.args))) for f in cf))
 
     def call_code_base(self,ov):
         return ov.func.canon_name
@@ -445,7 +468,7 @@ class TypedDefDef(object):
 
 def base_prefix(x):
     if x.static:
-        return x.full_name()
+        return x.full_name
 
     return 'base.' + x.canon_name
 
@@ -785,12 +808,18 @@ class MethodDict(object):
 
 
 class ClassDef:
-    def __init__(self):
+    def __init__(self,name,type):
+        self.name = name
+        self.type = type
         self.constructor = None
         self.methods = MethodDict()
         self.properties = []
         self.vars = []
         self.doc = None
+
+    @property
+    def template(self):
+        return '<' in self.type
 
 
 def splitdefdef23code(defdef,conv,vars,ind=Tab(2)):
@@ -835,7 +864,7 @@ def bindpyssize(conv,f,arg):
 class TypedClassDef:
     def __init__(self,scope,classdef):
         self.name = classdef.name
-        self.type = scope.find(classdef.type)[0]
+        self.type = classdef.type
         if not isinstance(self.type,gccxml.CPPClass):
             raise SpecificationError('"{0}" is not a struct/class type'.format(classdef.type))
 
@@ -1227,7 +1256,7 @@ class TypedClassDef:
     def method_prolog(self,var='reinterpret_cast<PyObject*>(self)',ind=Tab(1)):
         return '{0}{1} &base = {2};\n'.format(
             ind,
-            self.type.canon_name,
+            self.type.full_name,
             ('get_base_{0}({1},false)' if self.has_multi_inherit_subclass() else 'cast_base_{0}({1})').format(self.name,var))
 
     def output(self,out,module):
@@ -1246,7 +1275,7 @@ class TypedClassDef:
 
         print >> out.h, tmpl.classdef.render(
             name = self.name,
-            type = self.type.canon_name,
+            type = self.type.full_name,
             checkinit = True,
             dynamic = self.dynamic,
             canholdref = self.features.managed_ref,
@@ -1261,15 +1290,15 @@ class TypedClassDef:
         sequence = self.sequence(out)
 
         destructref = False
-        initdestruct = False
+        destructor = None
         d = self.type.getDestructor()
         if d:
+            destructor = d.canon_name
+            destructref = True
             print >> out.cpp, tmpl.destruct.render(
                 name = self.name,
-                type = self.type.canon_name,
-                canholdref = self.features.managed_ref),
-            destructref = True
-            initdestruct = True
+                destructor = destructor,
+                features = self.features),
 
 
         getsettable = []
@@ -1314,7 +1343,7 @@ class TypedClassDef:
             self.output_special(fn,out)
 
 
-        func = CallCode('new(addr) {0}({{0}}); return 0;'.format(self.type.canon_name))
+        func = CallCode('new(addr) {0}({{0}}); return 0;'.format(self.type.full_name))
         if self.constructor:
             if self.constructor.overloads[0].args is None:
                 # no overload specified means use all constructors
@@ -1322,7 +1351,7 @@ class TypedClassDef:
                 assert len(self.constructor.overloads) == 1
                 cons = [(func,con.args) for con in self.type.members if isinstance(con,gccxml.CPPConstructor)]
             else:
-                cons = [(func,self.type.getConstructor(ov.args).args) for args in self.constructor.overloads]
+                cons = [(func,self.type.getConstructor(ov.args).args) for ov in self.constructor.overloads]
         else:
             cons = [(func,self.type.getConstructor().args)]
 
@@ -1331,9 +1360,9 @@ class TypedClassDef:
         print >> out.cpp, tmpl.classtypedef.render(
             dynamic = self.dynamic,
             name = self.name,
-            type = self.type.canon_name,
+            type = self.type.full_name,
             features = self.features,
-            initdestruct = initdestruct,
+            destructor = destructor,
             initcode = cons,
             module = module,
             destructref = destructref,
@@ -1645,7 +1674,7 @@ class Conversion:
             self.pyobject : 'T_OBJECT_EX',
             self.cstring : ts,
             self.cmutstring : ts,
-            gccxml.CPPBasicType('Py_ssize_t') : 'T_PYSSIZET'
+            self.py_ssize_t : 'T_PYSSIZET'
         }
 
         self.integers = set((self.sint,self.uint,self.sshort,self.ushort,
@@ -1731,7 +1760,12 @@ class Conversion:
 
 
     def check_and_cast(self,t):
-        cdef = self.cppclasstopy[strip_refptr(t)]
+        st = strip_refptr(t)
+        try:
+            cdef = self.cppclasstopy[st]
+        except KeyError:
+            raise SpecificationError('No conversion from "PyObject*" to "{0}" is registered'.format(st))
+
         check ='PyObject_TypeCheck({{0}},get_obj_{0}Type())'.format(cdef.name)
         cast = '{0}reinterpret_cast<obj_{1}*>({{0}})->base'.format('&' if isinstance(t,gccxml.CPPPointerType) else '',cdef.name)
         return check,cast
@@ -1792,11 +1826,11 @@ class Conversion:
             newargs = []
             for a in args:
                 if a.default:
-                    ovlds.append((f,newargs))
+                    ovlds.append((f,newargs[:]))
                     a = copy.copy(a)
                     a.default = None
                 newargs.append(a)
-            ovlds.append((f,args))
+            ovlds.append((f,newargs))
 
         return tmpl.overload_func_call.render(
             inner = self.generate_arg_tree(ovlds).get_code(self),
@@ -1872,20 +1906,36 @@ class ModuleDef:
         self.doc = ''
 
     def print_gccxml_input(self,out):
-        # In addition to the include files, declare certain typedefs so they can be matched against types used elsewhere
+        # In addition to the include files, declare certain typedefs so they can
+        # be matched against types used elsewhere
         print >> out, tmpl.gccxmlinput_start.format(self._formatted_includes(),TEST_NS)
 
-        # declare a bunch of dummy functions with the arguments we want gccxml to parse for us
+        # declare a bunch of dummy functions with the arguments we want gccxml
+        # to parse for us
         for i,x in enumerate(self._funcs_with_overload()):
             print >> out, 'void dummy_func_{0}({1});\n'.format(i,x.args)
 
+        for i,c in enumerate(self.classes):
+            # create a typedef so we don't have to worry about default arguments
+            # and arguments specified by typedef in templates
+            print >> out, 'typedef {0} class_type_{1};\n'.format(c.type,i)
+
         print >> out, '}\n'
+
+        for c in self.classes:
+            # instantiate templates
+            if c.template:
+                print >> out, 'template class {0};\n'.format(c.type)
 
     def _collect_overload_arg_lists(self,tns):
         for i,x in enumerate(self._funcs_with_overload()):
             f = tns.find('dummy_func_{0}'.format(i))[0]
             assert isinstance(f,gccxml.CPPFunction)
             x.args = f.args
+
+        for i,c in enumerate(self.classes):
+            t = tns.find('class_type_{0}'.format(i))[0]
+            c.type = t
 
     def _formatted_includes(self):
         return "\n".join('#include "{0}"'.format(i) for i in self.includes)
@@ -1947,6 +1997,9 @@ class ModuleDef:
         # Sort classes by heirarchy. Base classes need to be declared before derived classes.
         classes = sorted(classes.values(),key=TypedClassDef.basecount)
 
+        # TODO: These functions result in the same machine code as long as the
+        # types have the same alignment. They can probably be replace by a
+        # single function.
         for c in classes:
             print >> out.cpp, c.cast_base_func()
 
@@ -2030,9 +2083,8 @@ def stripsplit(x):
 
 class tag_Class(tag):
     def __init__(self,args):
-        self.r = ClassDef()
-        self.r.type = args["type"]
-        self.r.name = get_valid_py_ident(args.get("name"),self.r.type)
+        t = args['type']
+        self.r = ClassDef(get_valid_py_ident(args.get("name"),t),t)
 
     def child(self,name,data):
         if name == 'init':

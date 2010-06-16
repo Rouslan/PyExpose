@@ -54,13 +54,13 @@ destruct = env.from_string('''
 void obj_<% name %>_dealloc(obj_<% name %> *self) {
     switch(self->mode) {
 
-== if canholdref
+== if features.managed_ref
     case MANAGEDREF:
         reinterpret_cast<ref_<% name %>*>(self)->~ref_<% name %>();
         break;
 == endif
     case CONTAINS:
-        self->base.~<% type %>();
+        self->base.<% destructor %>();
         break;
     default: // suppress warnings
         break;
@@ -147,19 +147,21 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
 
     <% type %> *addr = &self->base;
 
-== if features.managed_ref or initdestruct
+== if features.managed_ref or destructor
     /* before we can call the constructor, the destructor needs to be called if
        we already have an initialized object */
     switch(self->mode) {
 ==     if features.managed_ref
     case MANAGEDREF:
-        reinterpret_cast<ref_<% name %>*>(self)->base.~<% type %>();
+==         if destructor
+        reinterpret_cast<ref_<% name %>*>(self)->base.<% destructor %>();
+==         endif
         addr = &reinterpret_cast<ref_<% name %>*>(self)->base;
         break;
 ==     endif
-==     if initdestruct
+==     if destructor
     case CONTAINS:
-        self->base.~<% type %>();
+        self->base.<% destructor %>();
         break;
 ==     endif
     default:

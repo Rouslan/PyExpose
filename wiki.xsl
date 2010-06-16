@@ -43,10 +43,12 @@
         <xsl:param name="type"/>
         <xsl:choose>
             <xsl:when test="$type='symbol'">"&lt;C++ symbol&gt;"</xsl:when>
-            <xsl:when test="$type='arglist'">"&lt;Argument List&gt;"</xsl:when>
-            <xsl:when test="$type='retsemantictype'">"&lt;Return Semantic&gt;"</xsl:when>
-            <xsl:when test="$type='ident'">"&lt;Python Identifier&gt;"</xsl:when>
-            <xsl:when test="$type='includelist'">"&lt;Include List&gt;"</xsl:when>
+            <xsl:when test="$type='arglist'">"&lt;argument list&gt;"</xsl:when>
+            <xsl:when test="$type='retsemantictype'">"&lt;return semantic&gt;"</xsl:when>
+            <xsl:when test="$type='ident'">"&lt;Python identifier&gt;"</xsl:when>
+            <xsl:when test="$type='includelist'">"&lt;include list&gt;"</xsl:when>
+            <xsl:when test="$type='xsd:boolean'">"&lt;true/false&gt;"</xsl:when>
+            <xsl:when test="$type='xsd:nonNegativeInteger'">"&lt;non-negative integer&gt;"</xsl:when>
         </xsl:choose>
     </xsl:template>
 

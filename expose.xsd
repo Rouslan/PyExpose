@@ -14,7 +14,8 @@
 
         <class name="DVector" type="std::vector&lt;double&gt;">
           <doc>class doc string</doc>
-          <init/>
+          <init overload=""/>
+          <init overload="size_t,const double&amp;"/>
           <property name="size" get="size" set="resize"/>
           <def func="push_back"/>
         </class>
@@ -293,16 +294,16 @@
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="static" type="" default="false">
+      <xsd:attribute name="static" type="xsd:boolean" default="false">
         <xsd:annotation>
           <xsd:documentation>
-            For methods only, specifies whether the method will be static. This
-            is determined automatically when <var>func</var> is a method.
+            <p>For methods only, specifies whether the method will be static. This
+            is determined automatically when <var>func</var> is a method.</p>
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="arity" type="">
+      <xsd:attribute name="arity" type="xsd:nonNegativeInteger">
         <xsd:annotation>
           <xsd:documentation>
             <p>Filters the overloaded functions/methods specified by
@@ -374,7 +375,7 @@
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="readonly" type="" default="false"/>
+      <xsd:attribute name="readonly" type="xsd:boolean" default="false"/>
 
     </xsd:complexType>
   </xsd:element>
@@ -403,9 +404,16 @@
       <xsd:attribute name="type" type="symbol" use="required">
         <xsd:annotation>
           <xsd:documentation>
-            The C++ class to expose to python. The class may be an instantiation
-            of a template, but cannot be the template itself (e.g. you can use
-            std::vector&lt;int&gt;, but not std::vector).
+            <p>The C++ class to expose to python. The class may be an
+            instantiation of a template, but cannot be the template itself (e.g.
+            you can use std::vector&lt;int&gt;, but not std::vector).</p>
+
+            <p>Note that if you specify an instantiation of a template using a
+            typedef but the instantiation is not used anywhere else, PyExpose
+            might not find it. The solution is to either specify the template
+            instantiation directly, or add
+            '<code>template class MyClass&lt;args&gt;;</code>'
+            to the code PyExpose looks at.</p>
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>

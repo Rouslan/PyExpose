@@ -134,6 +134,36 @@ class TestCompile(unittest.TestCase):
         self.assertRaises(RuntimeError,tm.AClass,3)
 
 
+class TestExample(TestCompile):
+    """The example from the documentation.
+
+    This of all things should work.
+
+    """
+    header_file = ''
+    spec_file = '''<?xml version="1.0"?>
+        <module name="modulename" include="vector">
+            <doc>module doc string</doc>
+
+            <class name="DVector" type="std::vector&lt;double&gt;">
+                <doc>class doc string</doc>
+                <init overload=""/>
+                <init overload="size_t,const double&amp;"/>
+                <property name="size" get="size" set="resize"/>
+                <def func="push_back"/>
+            </class>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+
+        v = tm.DVector()
+        self.assertEqual(v.size,0)
+        v.push_back(3)
+        self.assertEqual(v.size,1)
+
+
 class TestInheritance(TestCompile):
     header_file = '''
         class BaseA {
@@ -196,12 +226,9 @@ class TestInheritance(TestCompile):
     def runTest(self):
         tm = self.compile()
 
-        try:
-            der = tm.Derived()
-            self.assertEqual(der.value_times(5),15)
-            self.assertAlmostEqual(der.value_div(5),0.8)
-        except Exception as e:
-            self.fail(str(e))
+        der = tm.Derived()
+        self.assertEqual(der.value_times(5),15)
+        self.assertAlmostEqual(der.value_div(5),0.8)
 
         self.assertRaises(TypeError,tm.BaseC.__init__,der)
 
