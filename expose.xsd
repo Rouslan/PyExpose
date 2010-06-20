@@ -18,6 +18,8 @@
           <init overload="size_t,const double&amp;"/>
           <property name="size" get="size" set="resize"/>
           <def func="push_back"/>
+          <def name="__sequence__getitem__" func="at" return-semantic="copy"/>
+          <def name="__sequence__setitem__" assign-to="at"/>
         </class>
       </module>
       ]]></pre>
@@ -225,6 +227,9 @@
           <tr><td>|=</td><td>__ior__</td></tr>
           <tr><td>~</td><td>__invert__</td></tr>
         </table>
+
+        <p>One of <var>func</var> or <var>assign-to</var> needs to be defined,
+        but not both.</p>
       </xsd:documentation>
     </xsd:annotation>
     <xsd:complexType>
@@ -242,7 +247,7 @@
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="func" type="symbol" use="required">
+      <xsd:attribute name="func" type="symbol">
         <xsd:annotation>
           <xsd:documentation>
             <p>The C++ function/method that implements this.</p>
@@ -259,6 +264,14 @@
 
             <p>The __rop__ methods will also accept C++ functions that accept
             the class type as the second argument.</p>
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="assign-to" type="symbol">
+        <xsd:annotation>
+          <xsd:documentation>
+            Like func, except the return value is assigned to.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>

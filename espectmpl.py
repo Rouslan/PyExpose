@@ -244,8 +244,8 @@ PyTypeObject obj_<% name %>Type = {
     <@ if '__cmp__' in specialmethods @>reinterpret_cast<cmpfunc>(&obj_<% name %>___cmp__)<@ else @>0<@ endif @>, /* tp_compare */
     <@ if '__repr__' in specialmethods @>reinterpret_cast<reprfunc>(&obj_<% name %>___repr__)<@ else @>0<@ endif @>, /* tp_repr */
     <@ if number @>&obj_<% name %>_number_methods<@ else @>0<@ endif @>, /* tp_as_number */
-    <@ if sequence @>obj_<% name %>_sequence_methods<@ else @>0<@ endif @>, /* tp_as_sequence */
-    <@ if mapping @>obj_<% name %>_mapping_methods<@ else @>0<@ endif @>, /* tp_as_mapping */
+    <@ if sequence @>&obj_<% name %>_sequence_methods<@ else @>0<@ endif @>, /* tp_as_sequence */
+    <@ if mapping @>&obj_<% name %>_mapping_methods<@ else @>0<@ endif @>, /* tp_as_mapping */
     <@ if '__hash__' in specialmethods @>reinterpret_cast<hashfunc>(&obj_<% name %>___hash__)<@ else @>0<@ endif @>, /* tp_hash */
     <@ if '__call__' in specialmethods @>reinterpret_cast<ternaryfunc>(&obj_<% name %>___call__)<@ else @>0<@ endif @>, /* tp_call */
     <@ if '__str__' in specialmethods @>reinterpret_cast<reprfunc>(&obj_<% name %>___str__)<@ else @>0<@ endif @>, /* tp_str */
@@ -491,20 +491,24 @@ short py_ssize_t_to_sshort(Py_ssize_t x) {{
     return static_cast<short>(narrow(x,SHRT_MAX,SHRT_MIN));
 }}
 
-unsigned int py_ssize_t_to_uint(Py_ssize_t x) {{
-    return static_cast<unsigned int>(narrow(x,UINT_MAX,0));
-}}
-
 #if (PY_SIZE_MAX>>1) > INT_MAX
+    unsigned int py_ssize_t_to_uint(Py_ssize_t x) {{
+        return static_cast<unsigned int>(narrow(x,UINT_MAX,0));
+    }}
+
     int py_ssize_t_to_sint(Py_ssize_t x) {{
         return static_cast<int>(narrow(x,INT_MAX,INT_MIN));
     }}
 #else
     #define py_ssize_t_to_sint(x) x
+
+    unsigned int py_ssize_t_to_uint(Py_ssize_t x) {{
+        return static_cast<unsigned int>(narrow(x,INT_MAX,0));
+    }}
 #endif
 
 unsigned long py_ssize_t_to_ulong(Py_ssize_t x) {{
-    return static_cast<unsigned long>(narrow(x,ULONG_MAX,0));
+    return static_cast<unsigned long>(narrow(x,LONG_MAX,0));
 }}
 
 
@@ -927,7 +931,9 @@ PySequenceMethods obj_<% name %>_sequence_methods = {
     <@ if '__concat__' in specialmethods @>reinterpret_cast<binaryfunc>(&obj_<% name %>___concat__)<@ else @>0<@ endif @>,
     <@ if '__repeat__' in specialmethods @>reinterpret_cast<ssizeargfunc>(&obj_<% name %>___repeat__)<@ else @>0<@ endif @>,
     <@ if '__sequence__getitem__' in specialmethods @>reinterpret_cast<ssizeargfunc>(&obj_<% name %>___sequence__getitem__)<@ else @>0<@ endif @>,
+    0,
     <@ if '__sequence__setitem__' in specialmethods @>reinterpret_cast<ssizeobjargproc>(&obj_<% name %>___sequence__setitem__)<@ else @>0<@ endif @>,
+    0,
     <@ if '__contains__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___contains__)<@ else @>0<@ endif @>,
     <@ if '__iconcat__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___iconcat__)<@ else @>0<@ endif @>,
     <@ if '__irepeat__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___irepeat__)<@ else @>0<@ endif @>

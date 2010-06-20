@@ -151,6 +151,8 @@ class TestExample(TestCompile):
                 <init overload="size_t,const double&amp;"/>
                 <property name="size" get="size" set="resize"/>
                 <def func="push_back"/>
+                <def name="__sequence__getitem__" func="at" return-semantic="copy"/>
+                <def name="__sequence__setitem__" assign-to="at"/>
             </class>
         </module>
     '''
@@ -162,6 +164,7 @@ class TestExample(TestCompile):
         self.assertEqual(v.size,0)
         v.push_back(3)
         self.assertEqual(v.size,1)
+        self.assertEqual(v[0],3)
 
 
 class TestInheritance(TestCompile):

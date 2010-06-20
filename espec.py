@@ -291,12 +291,13 @@ class Output:
 
 
 class Overload:
-    def __init__(self,func=None,retsemantic=None,args=None,static=False,arity=None):
+    def __init__(self,func=None,retsemantic=None,args=None,static=False,arity=None,assign=False):
         self.func = func
         self.retsemantic = retsemantic
         self.args = args
         self.static = static
         self.arity = arity
+        self.assign = assign
 
 class DefDef:
     def __init__(self,name = None,doc = None):
@@ -306,20 +307,28 @@ class DefDef:
 
 class CallCode(object):
     """C++ code representing a function call with optional predefined argument values."""
-    def __init__(self,code,binds=None):
+    def __init__(self,code,binds=None,divided=False):
         self.code = code
         self.binds = binds or []
+        self.divided = divided
 
     def output(self,args,ind):
         args = list(args)
         for i,val in self.binds:
             args.insert(i,val)
-        return self.code.format(','.join('\n'+ind+a for a in args))
+
+        joinargs = lambda _args: ','.join('\n'+ind+a for a in _args)
+        if self.divided:
+            return self.code.format(joinargs(args[0:-1]),args[-1])
+        return self.code.format(joinargs(args))
 
 class BindableArg:
     def __init__(self,arg,val=None):
         self.arg = arg
         self.val = val
+
+def is_const(x):
+    return isinstance(x,gccxml.CPPCvQualifiedType) and x.const
 
 class TypedOverload:
     def __init__(self,func,overload):
@@ -327,6 +336,28 @@ class TypedOverload:
         self.retsemantic = overload.retsemantic
         self.argbinds = [BindableArg(a) for a in func.args]
         self.explicit_static = overload.static
+        self._returns = None
+
+        self.assign = overload.assign
+        if overload.assign:
+            ret = func.returns
+            if not isinstance(ret,(gccxml.CPPReferenceType,gccxml.CPPPointerType)):
+                raise SpecificationError('"{0}" must return a reference or pointer type to be assigned to'.format(func.canon_name))
+
+            if is_const(ret.type):
+                raise SpecificationError('The return value of "{0}" cannot be assigned to because it is const'.format(func.canon_name))
+
+            self.argbinds.append(BindableArg(gccxml.CPPArgument(ret.type)))
+
+            self._returns = gccxml.CPPReferenceType(ret.type)
+            if hasattr(ret,'find'):
+                try:
+                    ops = ret.find('operator =')
+                except SpecificationError:
+                    # if operator= is not found, no action is required
+                    pass
+                else:
+                    self._returns = ops[0].returns
 
     def bind(self,index,val):
         [a for a in self.argbinds if a.val is None][index].val = val
@@ -334,6 +365,10 @@ class TypedOverload:
     @property
     def args(self):
         return [a.arg for a in self.argbinds if a.val is None]
+
+    @property
+    def returns(self):
+        return self._returns or self.func.returns
 
     def can_accept(self,args):
         if not (mandatory_args(self) <= args <= len(self.args)):
@@ -345,6 +380,8 @@ class TypedOverload:
     @property
     def static(self):
         return self.explicit_static or isinstance(self.func,gccxml.CPPFunction) or (isinstance(self.func,gccxml.CPPMethod) and self.func.static)
+
+
 
 class TypedDefDef(object):
     def __init__(self,scope,defdef):
@@ -362,6 +399,11 @@ class TypedDefDef(object):
             if not isinstance(cf[0],(gccxml.CPPFunction,gccxml.CPPMethod)):
                 raise SpecificationError('"{0}" is not a function or method'.format(cf[0]))
             assert all(isinstance(f,(gccxml.CPPFunction,gccxml.CPPMethod)) for f in cf)
+
+            # if there is more than one result, remove the const methods
+            if len(cf) > 1:
+                newcf = [f for f in cf if not (hasattr(f,'const') and f.const)]
+                if newcf: cf = newcf
 
             if not ov.args:
                 self.overloads.extend(TypedOverload(f,ov) for f in cf)
@@ -382,11 +424,25 @@ class TypedDefDef(object):
     def topy(self,conv,t,retsemantic):
         return conv.topy(t,retsemantic)
 
-    def call_code(self,conv,ov):
+    def call_code_mid(self,conv,ov):
         code = self.call_code_base(ov) + '({0})'
-        return CallCode(code + '; Py_RETURN_NONE;' if ov.func.returns == conv.void else
-            'return {0};'.format(self.topy(conv,ov.func.returns,ov.retsemantic).format(code)),
-            [(i,argbind.val) for i,argbind in enumerate(ov.argbinds) if argbind.val])
+        if ov.assign:
+            if isinstance(ov.func.returns,gccxml.CPPReferenceType):
+                code += ' = {1}'
+            else:
+                assert isinstance(ov.func.returns,gccxml.CPPPointerType)
+                code = '*({0}) = {{1}}'.format(code)
+
+        return CallCode(
+            code,
+            [(i,argbind.val) for i,argbind in enumerate(ov.argbinds) if argbind.val],
+            ov.assign)
+
+    def call_code(self,conv,ov):
+        cc = self.call_code_mid(conv,ov)
+        cc.code = (cc.code + '; Py_RETURN_NONE;' if ov.returns == conv.void else
+            'return {0};'.format(self.topy(conv,ov.returns,ov.retsemantic).format(cc.code)))
+        return cc
 
     def make_argss(self,conv):
         return [(self.call_code(conv,ov),ov.args) for ov in self.overloads]
@@ -498,7 +554,9 @@ class TypedMethodDef(TypedDefDef):
 
     def call_code(self,conv,ov):
         if ov.retsemantic == RET_SELF:
-            return CallCode(self.call_code_base(ov) + '({{0}}); Py_INCREF({0}); return {0};'.format(self.selfvar))
+            cc = self.call_code_mid(conv,ov)
+            cc.code += '; Py_INCREF({0}); return {0};'.format(self.selfvar)
+            return cc
         return super(TypedMethodDef,self).call_code(conv,ov)
 
     def odd_function(self,ov):
@@ -559,14 +617,19 @@ class SpecialMethod(TypedMethodDef):
                 self.check_static(ov)
 
             if self.rettype in (SF_RET_INT,SF_RET_LONG,SF_RET_SSIZE):
-                if not ov.func.returns in conv.integers:
+                if not ov.returns in conv.integers:
+                    if ov.assign:
+                        raise SpecificationError('The expression "({0}() = x)" must yield an integer type'.format(ov.func.canon_name))
                     raise SpecificationError('"{0}" must return an integer type'.format(ov.func.canon_name))
             elif self.rettype == SF_RET_INT_BOOL:
-                if not (ov.func.returns in conv.integers or ov.func.returns == conv.bool):
+                if not (ov.returns in conv.integers or ov.returns == conv.bool):
+                    if ov.assign:
+                        raise SpecificationError('The expression "({0}() = x)" must yield an integer or bool type'.format(ov.func.canon_name))
                     raise SpecificationError('"{0}" must return an integer or bool type'.format(ov.func.canon_name))
 
     def call_code_cast(self,conv,ov,t):
-        return CallCode('return static_cast<{0}>({1}({{0}}));'.format(t,self.call_code_base(ov)))
+        cc = self.call_code_mid(conv,ov)
+        cc.code = 'return static_cast<{0}>({1});'.format(t,cc.code)
 
     def call_code(self,conv,ov):
         if self.rettype == SF_RET_INT or self.rettype == SF_RET_INT_BOOL:
@@ -579,7 +642,9 @@ class SpecialMethod(TypedMethodDef):
             return self.call_code_cast(conv,ov,'Py_ssize_t')
 
         if self.rettype == SF_RET_INT_VOID:
-            return CallCode(self.call_code_base(ov) + '({0}); return 0;')
+            cc = self.call_code_mid(conv,ov)
+            cc.code += '; return 0;'
+            return cc
 
         assert self.rettype == SF_RET_OBJ
         return super(SpecialMethod,self).call_code(conv,ov)
@@ -894,9 +959,11 @@ class TypedClassDef:
         CoerceArgsInt = functools.partial(SpecialMethod,argtype=SF_COERCE_ARGS,rettype=SF_RET_INT)
         NoArgsSSize = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_SSIZE)
 
+        TwoArgsVoid = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,rettype=SF_RET_INT_VOID)
+
         # TypedOverload.bind will be used to cover the Py_ssize argument
         SSizeArg = NoArgs
-        SSizeObjArgs = OneArg
+        SSizeObjArgsVoid = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,rettype=SF_RET_INT_VOID)
         SSizeIOpMethod = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,defretsemantic=RET_SELF)
 
         self.special_methods = {}
@@ -983,8 +1050,8 @@ class TypedClassDef:
             ('__sequence__len__',  NoArgsSSize), # tp_as_sequence.sq_length
             ('__mapping__getitem__', OneArg), # tp_as_mapping.mp_subscript
             ('__sequence__getitem__', SSizeArg), # tp_as_sequence.sq_item
-            ('__mapping__setitem__', TwoArgs), # tp_as_mapping.mp_ass_subscript
-            ('__sequence__setitem__', SSizeObjArgs) # tp_as_sequence.sq_ass_item
+            ('__mapping__setitem__', TwoArgsVoid), # tp_as_mapping.mp_ass_subscript
+            ('__sequence__setitem__', SSizeObjArgsVoid) # tp_as_sequence.sq_ass_item
         ):
             m = classdef.methods.data.pop(key,None)
             if m: self.special_methods[key] = mtype(self,m)
@@ -1189,7 +1256,7 @@ class TypedClassDef:
     def sequence(self,out):
         have = False
 
-        for n in ('__sequence_len__','__concat__','__iconcat__','__contains__'):
+        for n in ('__sequence__len__','__concat__','__iconcat__','__contains__'):
             if self.output_special(n,out): have = True
             f = self.special_methods.get(n)
 
@@ -1201,33 +1268,33 @@ class TypedClassDef:
                 print >> out.cpp, tmpl.function.format(
                     rettype = 'PyObject *',
                     name = 'obj_{0}_{1}'.format(self.name,n),
-                    args = 'obj_{0} *self,Py_ssize_t *count'.format(self.name),
+                    args = 'obj_{0} *self,Py_ssize_t count'.format(self.name),
                     prolog = self.method_prolog(),
                     epilog = '',
                     code = f.function_call_0arg(out.conv),
                     errval = '0')
 
-        f = self.special_methods.get('__sequence_getitem__')
+        f = self.special_methods.get('__sequence__getitem__')
         if f:
             have = True
             bindpyssize(out.conv,f,'index')
             print >> out.cpp, tmpl.function.format(
                 rettype = 'PyObject *',
-                name = 'obj_{0}___sequence_getitem__'.format(self.name),
-                args = 'obj_{0} *self,Py_ssize_t *index'.format(self.name),
+                name = 'obj_{0}___sequence__getitem__'.format(self.name),
+                args = 'obj_{0} *self,Py_ssize_t index'.format(self.name),
                 prolog = self.method_prolog(),
                 epilog = '',
                 code = f.function_call_0arg(out.conv),
                 errval = '0')
 
-        f = self.special_methods.get('__sequence_setitem__')
+        f = self.special_methods.get('__sequence__setitem__')
         if f:
             have = True
             bindpyssize(out.conv,f,'index')
             print >> out.cpp, tmpl.function.format(
                 rettype = 'int',
-                name = 'obj_{0}___sequence_setitem__'.format(self.name),
-                args = 'obj_{0} *self,Py_ssize_t *index,PyObject *arg'.format(self.name),
+                name = 'obj_{0}___sequence__setitem__'.format(self.name),
+                args = 'obj_{0} *self,Py_ssize_t index,PyObject *arg'.format(self.name),
                 prolog = self.method_prolog(),
                 epilog = '',
                 code = f.function_call_1arg(out.conv),
@@ -1243,7 +1310,7 @@ class TypedClassDef:
     def mapping(self,out):
         have = False
 
-        for fn in ('__mapping_len__','__mapping_getitem__','__mapping_setitem__'):
+        for fn in ('__mapping__len__','__mapping__getitem__','__mapping__setitem__'):
             if self.output_special(fn,out): have = True
 
         if have:
@@ -2054,7 +2121,7 @@ def get_valid_py_ident(x,backup):
     if x:
         m = re.match(r'[a-zA-Z_]\w*',x)
         if not (m and m.end() == len(x)):
-            raise SpecificationError('"{0}" is not a valid Python indentifier')
+            raise SpecificationError('"{0}" is not a valid Python identifier')
         if x in pykeywords:
             raise SpecificationError('"{0}" is a reserved identifier')
         return x
@@ -2196,7 +2263,16 @@ class tag_GetSet(tag):
 
 class tag_Def(tag):
     def __init__(self,args):
-        func = args['func']
+        assign = False
+        func = args.get('func')
+        if func is None:
+            func = args.get('assign-to')
+            if func is None:
+                raise ParseError('One of "func" or "assign-to" is required')
+            assign = True
+        else:
+            if 'assign-to' in args:
+                raise ParseError('"func" and "assign-to" cannot be used together')
         self.r = DefDef(get_valid_py_ident(args.get('name'),func))
         arity = args.get('arity')
         if arity:
@@ -2214,7 +2290,8 @@ class tag_Def(tag):
             get_ret_semantic(args),
             args.get('overload'),
             parse_bool(args,'static'),
-            arity))
+            arity,
+            assign))
 
 
     op_parse_re = re.compile(r'.*\boperator\b')

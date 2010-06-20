@@ -22,6 +22,9 @@ class ArgProxy(object):
         except KeyError:
             raise ParseError('Required attribute "{0}" is missing'.format(key))
 
+    def __contains__(self,key):
+        return key in self.args
+
 class tag(object):
     r = None
     def __init__(self,args):

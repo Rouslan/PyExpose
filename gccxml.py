@@ -96,6 +96,11 @@ class CPPClass(CPPBasicType):
 class CPPArgument(object):
     __slots__ = 'name','type','default'
 
+    def __init__(self,type,name=None,default=None):
+        self.type = type
+        self.name = name
+        self.default = default
+
     link = link_item("type")
 
     def __str__(self):
@@ -359,10 +364,10 @@ class tag_Class(tag):
 
 class tag_Argument(tag):
     def __init__(self,args):
-        self.r = CPPArgument()
-        self.r.name = args.get("name")
-        self.r.type = args["type"]
-        self.r.default = args.get("default")
+        self.r = CPPArgument(
+            args["type"],
+            args.get("name"),
+            args.get("default"))
 
 class tag_Base(tag):
     def __init__(self,args):
