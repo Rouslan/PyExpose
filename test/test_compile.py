@@ -357,6 +357,7 @@ class TestNumOperators(TestCompile):
                 float oldY = y;
                 y = z * b.x - oldX * b.z;
                 z = oldX * b.y - oldY * b.x;
+                return *this;
             }
 
             Vector pow(float n) const { return Vector(::pow(x,n),::pow(y,n),::pow(z,n)); }
@@ -491,6 +492,73 @@ class TestNumOperators(TestCompile):
         # __abs__
         self.assertAlmostEqual(abs(tm.Vector(-1,3,12)),12.409674,4)
 
+
+class TestConstructorDestructor(TestCompile):
+    header_file = '''
+        int thingcount = 0;
+
+        struct A {
+            A() { ++thingcount; }
+            ~A() { --thingcount; }
+        };
+
+        struct B {
+            B() { ++thingcount; }
+            ~B() { --thingcount; }
+        };
+
+        int count() { return thingcount; }
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="A" new-initializes="false"/>
+            <class type="B" new-initializes="true"/>
+            <def func="count"/>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+        self.assertEqual(tm.count(),0)
+        a = tm.A()
+        self.assertEqual(tm.count(),1)
+        b = tm.B()
+        self.assertEqual(tm.count(),2)
+        del a
+        del b
+        gc.collect()
+        self.assertEqual(tm.count(),0)
+
+
+        # create subclasses that don't call the base class' __init__ method
+
+        class A2(tm.A):
+            def __init__(self):
+                pass
+
+        class B2(tm.B):
+            def __init__(self):
+                pass
+
+
+        a = A2()
+        self.assertEqual(tm.count(),0)
+        b = B2()
+        self.assertEqual(tm.count(),1)
+        super(A2,a).__init__()
+        self.assertEqual(tm.count(),2)
+        super(B2,b).__init__()
+        self.assertEqual(tm.count(),2)
+        del a
+        del b
+        gc.collect()
+        self.assertEqual(tm.count(),0)
+        a = A2()
+        self.assertEqual(tm.count(),0)
+        del a
+        gc.collect()
+        self.assertEqual(tm.count(),0)
 
 
 if __name__ == '__main__':

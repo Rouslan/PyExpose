@@ -226,6 +226,14 @@ def varargs(x):
     return x.args and x.args[-1] is gccxml.cppellipsis
 
 
+def has_trivial_destructor(x):
+    if not isinstance(x,gccxml.CPPClass): return True
+    d = x.getDestructor()
+    return (d is None or d.artificial) and \
+        all(has_trivial_destructor(m) for m in x.members) and \
+        all(has_trivial_destructor(b.type) for b in x.bases)
+
+
 class ObjFeatures:
     """Specifies the way a class may be stored.
 
@@ -502,11 +510,10 @@ class TypedDefDef(object):
 
         funcbody = tmpl.function.format(
             rettype = 'PyObject *',
-            prolog = prolog,
             epilog = '',
             name = funcnameprefix + self.name,
             args = selfvar + funcargs,
-            code = code,
+            code = prolog + code,
             errval = '0')
 
         tableentry = '{{"{name}",reinterpret_cast<PyCFunction>({funcnameprefix}{name}),{type}{typeextra},{doc}}}'.format(
@@ -682,9 +689,8 @@ class SpecialMethod(TypedMethodDef):
             rettype = ret,
             name = 'obj_{0}_{1}'.format(self.classdef.name,self.name),
             args = 'obj_{0} *self{1}'.format(self.classdef.name,argextra),
-            prolog = self.classdef.method_prolog(),
             epilog = '',
-            code = code,
+            code = self.classdef.method_prolog() + code,
             errval = errval)
 
 
@@ -728,20 +734,22 @@ class TypedPropertyDef:
     def output(self,conv):
         r = ''
         if self.get:
+            code = self.get.function_call_0arg(conv)
+            if not self.get.static(): code = self.get.classdef.method_prolog() + code
             r = tmpl.property_get.render(
                 cname = self.get.classdef.name,
-                prolog = '' if self.get.static() else self.get.classdef.method_prolog(),
                 name = self.name,
                 checkinit = True,
-                code = self.get.function_call_0arg(conv))
+                code = code)
 
         if self.set:
+            code = self.set.function_call_1arg(conv)
+            if not self.set.static(): code = self.set.classdef.method_prolog() + code
             r += tmpl.property_set.render(
                 cname = self.set.classdef.name,
-                prolog = '' if self.set.static() else self.set.classdef.method_prolog(),
                 name = self.name,
                 checkinit = True,
-                code = self.set.function_call_1arg(conv))
+                code = code)
 
         return r
 
@@ -774,21 +782,23 @@ class TypedMemberDef:
     def output(self,conv):
         r = ''
         if self.classdef.has_multi_inherit_subclass() or not conv.member_macro(self.cmember.type):
+            code = '        return {0};'.format(
+                conv.topy(self.getter_type(conv),RET_MANAGED_REF,'self').format(base_prefix(self.cmember)))
+            if not self.cmember.static: code = self.classdef.method_prolog() + code
             r = tmpl.property_get.render(
                 cname = self.classdef.name,
-                prolog = '' if self.cmember.static else self.classdef.method_prolog(),
                 name = self.name,
                 checkinit = True,
-                code = '        return {0};'.format(
-                    conv.topy(self.getter_type(conv),RET_MANAGED_REF,'self').format(base_prefix(self.cmember))))
+                code = code)
 
             if not self.readonly:
+                code = '        {0} = {1};\n        return 0;'.format(base_prefix(self.cmember),conv.frompy(self.cmember.type)[0].format('arg'))
+                if not self.cmember.static: code = self.classdef.method_prolog() + code
                 r += tmpl.property_set.render(
                     cname = self.classdef.name,
-                    prolog = '' if self.cmember.static else self.classdef.method_prolog(),
                     name = self.name,
                     checkinit = True,
-                    code = '        {0} = {1};\n        return 0;'.format(base_prefix(self.cmember),conv.frompy(self.cmember.type)[0].format('arg')))
+                    code = code)
         return r
 
     def really_a_property(self,conv):
@@ -873,9 +883,10 @@ class MethodDict(object):
 
 
 class ClassDef:
-    def __init__(self,name,type):
+    def __init__(self,name,type,new_initializes=False):
         self.name = name
         self.type = type
+        self.new_initializes = new_initializes
         self.constructor = None
         self.methods = MethodDict()
         self.properties = []
@@ -930,8 +941,11 @@ class TypedClassDef:
     def __init__(self,scope,classdef):
         self.name = classdef.name
         self.type = classdef.type
+        self.new_initializes = classdef.new_initializes
+        self.no_destruct = has_trivial_destructor(self.type)
+
         if not isinstance(self.type,gccxml.CPPClass):
-            raise SpecificationError('"{0}" is not a struct/class type'.format(classdef.type))
+            raise SpecificationError('"{0}" is not a class or struct'.format(classdef.type))
 
         self.constructor = classdef.constructor
 
@@ -1095,7 +1109,8 @@ class TypedClassDef:
         return tmpl.cast_base.render(
             type = self.type.typestr(),
             name = self.name,
-            features = self.features)
+            features = self.features,
+            new_init = self.new_initializes)
 
     def get_base_func(self):
         if self.has_multi_inherit_subclass():
@@ -1190,9 +1205,8 @@ class TypedClassDef:
                     rettype = 'PyObject *',
                     name = 'obj_{0}_{1}'.format(self.name,fn),
                     args = 'obj_{0} *self,PyObject *arg'.format(self.name),
-                    prolog = self.method_prolog(),
                     epilog = tmpl.ret_notimplemented,
-                    code = f.function_call_1arg_fallthrough(out.conv),
+                    code = self.method_prolog() + f.function_call_1arg_fallthrough(out.conv),
                     errval = '0')
 
         for fn in ('add__','sub__','mul__','floordiv__','mod__',
@@ -1223,9 +1237,8 @@ class TypedClassDef:
                 rettype = 'PyObject *',
                 name = 'obj_{0}___ipow__'.format(self.name),
                 args = 'obj_{0} *self,PyObject *arg1,PyObject *arg2'.format(self.name),
-                prolog = self.method_prolog(),
                 epilog = tmpl.ret_notimplemented,
-                code = splitdefdef23code(f,out.conv,['arg1','arg2']),
+                code = self.method_prolog() + splitdefdef23code(f,out.conv,['arg1','arg2']),
                 errval = '0')
 
         f = self.special_methods.get('__pow__')
@@ -1269,9 +1282,8 @@ class TypedClassDef:
                     rettype = 'PyObject *',
                     name = 'obj_{0}_{1}'.format(self.name,n),
                     args = 'obj_{0} *self,Py_ssize_t count'.format(self.name),
-                    prolog = self.method_prolog(),
                     epilog = '',
-                    code = f.function_call_0arg(out.conv),
+                    code = self.method_prolog() + f.function_call_0arg(out.conv),
                     errval = '0')
 
         f = self.special_methods.get('__sequence__getitem__')
@@ -1282,9 +1294,8 @@ class TypedClassDef:
                 rettype = 'PyObject *',
                 name = 'obj_{0}___sequence__getitem__'.format(self.name),
                 args = 'obj_{0} *self,Py_ssize_t index'.format(self.name),
-                prolog = self.method_prolog(),
                 epilog = '',
-                code = f.function_call_0arg(out.conv),
+                code = self.method_prolog() + f.function_call_0arg(out.conv),
                 errval = '0')
 
         f = self.special_methods.get('__sequence__setitem__')
@@ -1295,9 +1306,8 @@ class TypedClassDef:
                 rettype = 'int',
                 name = 'obj_{0}___sequence__setitem__'.format(self.name),
                 args = 'obj_{0} *self,Py_ssize_t index,PyObject *arg'.format(self.name),
-                prolog = self.method_prolog(),
                 epilog = '',
-                code = f.function_call_1arg(out.conv),
+                code = self.method_prolog() + f.function_call_1arg(out.conv),
                 errval = '-1')
 
         if have:
@@ -1320,7 +1330,7 @@ class TypedClassDef:
 
         return have
 
-    def method_prolog(self,var='reinterpret_cast<PyObject*>(self)',ind=Tab(1)):
+    def method_prolog(self,var='reinterpret_cast<PyObject*>(self)',ind=Tab(2)):
         return '{0}{1} &base = {2};\n'.format(
             ind,
             self.type.full_name,
@@ -1343,7 +1353,7 @@ class TypedClassDef:
         print >> out.h, tmpl.classdef.render(
             name = self.name,
             type = self.type.full_name,
-            checkinit = True,
+            new_init = self.new_initializes,
             dynamic = self.dynamic,
             canholdref = self.features.managed_ref,
             constructors = ({
@@ -1359,13 +1369,14 @@ class TypedClassDef:
         destructref = False
         destructor = None
         d = self.type.getDestructor()
-        if d:
+        if (not self.no_destruct) and d:
             destructor = d.canon_name
             destructref = True
             print >> out.cpp, tmpl.destruct.render(
                 name = self.name,
                 destructor = destructor,
-                features = self.features),
+                features = self.features,
+                new_init = self.new_initializes),
 
 
         getsettable = []
@@ -1429,6 +1440,7 @@ class TypedClassDef:
             name = self.name,
             type = self.type.full_name,
             features = self.features,
+            new_init = self.new_initializes,
             destructor = destructor,
             initcode = cons,
             module = module,
@@ -1442,6 +1454,7 @@ class TypedClassDef:
             mapping = mapping,
             sequence = sequence,
             bases = bases,
+            derived = [d.name for d in self.derived],
             specialmethods = self.special_methods),
 
 
@@ -2089,6 +2102,7 @@ class ModuleDef:
             classes = ({
                 'name' : c.name,
                 'dynamic' : c.dynamic,
+                'new_init' : c.new_initializes,
                 'base' : c.static_from_dynamic and c.bases[0].name}
                     for c in classes)
         )
@@ -2151,7 +2165,7 @@ def stripsplit(x):
 class tag_Class(tag):
     def __init__(self,args):
         t = args['type']
-        self.r = ClassDef(get_valid_py_ident(args.get("name"),t),t)
+        self.r = ClassDef(get_valid_py_ident(args.get("name"),t),t,parse_bool(args,'new-initializes'))
 
     def child(self,name,data):
         if name == 'init':

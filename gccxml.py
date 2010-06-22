@@ -280,7 +280,7 @@ class CPPUnion(CPPBasicType):
         pass
 
 class CPPDestructor(CPPSymbol):
-    __slots__ = 'name','access','virtual','context'
+    __slots__ = 'name','access','virtual','context','artificial'
 
     def link(self,items):
         pass
@@ -442,7 +442,7 @@ class tag_Union(tag):
 
 class tag_Destructor(tag):
     OType = CPPDestructor
-    __init__ = common_init(['name',("access",parse_access),'context'] + bool_keys("virtual"))
+    __init__ = common_init(['name',("access",parse_access),'context'] + bool_keys('virtual','artificial'))
 
 class tag_OffsetType(tag):
     OType = CPPOffsetType

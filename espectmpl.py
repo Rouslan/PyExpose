@@ -52,6 +52,7 @@ property_table = env.from_string('''<@
 
 destruct = env.from_string('''
 void obj_<% name %>_dealloc(obj_<% name %> *self) {
+== if features.managed_ref or (destructor and not new_init)
     switch(self->mode) {
 
 == if features.managed_ref
@@ -65,6 +66,9 @@ void obj_<% name %>_dealloc(obj_<% name %> *self) {
     default: // suppress warnings
         break;
     }
+== elif destructor
+    self->base.<% destructor %>();
+== endif
     self->ob_type->tp_free(reinterpret_cast<PyObject*>(self));
 }
 ''')
@@ -116,7 +120,7 @@ struct ref_<% name %> {
 
 struct obj_<% name %> {
     PyObject_HEAD
-== if checkinit or canholdref
+== if canholdref or not new_init
     storage_mode mode;
 == endif
     <% type %> base;
@@ -126,7 +130,7 @@ struct obj_<% name %> {
 == for con in constructors
     obj_<% name %>(<% con.args %>) : base(<% con.argvals %>) {
         PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
-==     if checkinit or canholdref
+==     if canholdref or not new_init
         mode = CONTAINS;
 ==     endif
     }
@@ -143,11 +147,20 @@ classtypedef = env.from_string('''
     @>sizeof(obj_<% name %>)<@ endmacro @>
 
 int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
-    if(UNLIKELY(!safe_to_call_init(get_obj_<% name %>Type(),reinterpret_cast<PyObject*>(self)))) return -1;
+== if derived
+    if(UNLIKELY(
+==     for d in derived
+        <@ if not loop.first @>|| <@ endif @>PyObject_IsInstance(reinterpret_cast<PyObject*>(self),reinterpret_cast<PyObject*>(get_obj_<% d %>Type()))
+==     endfor
+    )) {
+        PyErr_SetString(PyExc_TypeError,init_on_derived_msg);
+        return -1;
+    }
+== endif
 
     <% type %> *addr = &self->base;
 
-== if features.managed_ref or destructor
+== if features.managed_ref or (destructor and not new_init)
     /* before we can call the constructor, the destructor needs to be called if
        we already have an initialized object */
     switch(self->mode) {
@@ -168,11 +181,25 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
         self->mode = CONTAINS;
         break;
     }
+== elif destructor
+    self->base.<% destructor %>();
+== elif not new_init
+    self->mode = CONTAINS;
 == endif
     try {
 <% initcode %>
     } EXCEPT_HANDLERS(-1)
 }
+
+== if new_init
+PyObject *obj_<% name %>_new(PyTypeObject *type,PyObject *,PyObject *) {
+    try {
+        obj_<% name %> *ptr = reinterpret_cast<obj_<% name %>*>(type->tp_alloc(type,0));
+        if(ptr) new(&ptr->base) <% type %>();
+        return reinterpret_cast<PyObject*>(ptr);
+    } EXCEPT_HANDLERS(0)
+}
+== endif
 
 == if dynamic
 PyTypeObject *obj_<% name %>Type;
@@ -197,7 +224,7 @@ inline PyTypeObject *create_obj_<% name %>Type() {
     }
 
     PyTypeObject *type = reinterpret_cast<PyTypeObject*>(
-        PyObject_CallFunctionObjArgs(reinterpret_cast<PyObject*>(&obj__CommonMetaType),name,bases,dict,0));
+        PyObject_CallFunctionObjArgs(reinterpret_cast<PyObject*>(&PyType_Type),name,bases,dict,0));
 
     Py_DECREF(bases);
     Py_DECREF(name);
@@ -227,12 +254,13 @@ inline PyTypeObject *create_obj_<% name %>Type() {
 <@ if '__iter__' in specialmethods @>    type->tp_iter = reinterpret_cast<getiterfunc>(&obj_<% name %>___iter__);<@ endif @>
 <@ if 'next' in specialmethods @>    type->tp_iter = reinterpret_cast<iternextfunc>(&obj_<% name %>_next);<@ endif @>
     type->tp_init = reinterpret_cast<initproc>(&obj_<% name %>_init);
+<@ if new_init @>    type->tp_new = &obj_<% name %>_new;<@ endif @>
 
     return type;
 }
 == else
 PyTypeObject obj_<% name %>Type = {
-    PyObject_HEAD_INIT(&obj__CommonMetaType)
+    PyObject_HEAD_INIT(0)
     0,                         /* ob_size */
     "<% module %>.<% name %>", /* tp_name */
     <% objsize() %>, /* tp_basicsize */
@@ -270,7 +298,7 @@ PyTypeObject obj_<% name %>Type = {
     0,                         /* tp_dictoffset */
     reinterpret_cast<initproc>(&obj_<% name %>_init), /* tp_init */
     0,                         /* tp_alloc */
-    0                          /* tp_new */
+    <@ if new_init @>&obj_<% name %>_new<@ else @>0<@ endif @> /* tp_new */
 };
 == endif
 ''')
@@ -341,6 +369,7 @@ const char *no_delete_msg = "This attribute cannot be deleted";
 const char *not_init_msg = "This object has not been initialized. Its __init__ method must be called first.";
 const char *unspecified_err_msg = "unspecified error";
 const char *no_keywords_msg = "keyword arguments are not accepted";
+const char *init_on_derived_msg = "__init__ cannot be used directly on a derived type";
 
 
 struct get_arg {{
@@ -543,67 +572,6 @@ void NoSuchOverload(PyObject *args) {{
 }}
 
 
-// A common metatype for our types, to distinguish from script-defined sub-types
-PyTypeObject obj__CommonMetaType = {{
-    PyObject_HEAD_INIT(0)
-    0,                         /* ob_size */
-    "{module}._internal_metaclass", /* tp_name */
-    PyType_Type.tp_basicsize,  /* tp_basicsize */
-    0,                         /* tp_itemsize */
-    0,                         /* tp_dealloc */
-    0,                         /* tp_print */
-    0,                         /* tp_getattr */
-    0,                         /* tp_setattr */
-    0,                         /* tp_compare */
-    0,                         /* tp_repr */
-    0,                         /* tp_as_number */
-    0,                         /* tp_as_sequence */
-    0,                         /* tp_as_mapping */
-    0,                         /* tp_hash */
-    0,                         /* tp_call */
-    0,                         /* tp_str */
-    0,                         /* tp_getattro */
-    0,                         /* tp_setattro */
-    0,                         /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE, /* tp_flags */
-    0,                         /* tp_doc */
-    0,                         /* tp_traverse */
-    0,                         /* tp_clear */
-    0,                         /* tp_richcompare */
-    0,                         /* tp_weaklistoffset */
-    0,                         /* tp_iter */
-    0,                         /* tp_iternext */
-    0,                         /* tp_methods */
-    0,                         /* tp_members */
-    0,                         /* tp_getset */
-    0,                         /* tp_base */
-    0,                         /* tp_dict */
-    0,                         /* tp_descr_get */
-    0,                         /* tp_descr_set */
-    0,                         /* tp_dictoffset */
-    0,                         /* tp_init */
-    0,                         /* tp_alloc */
-    0                          /* tp_new */
-}};
-
-/* Check if __init__ is being called on the wrong type.
-
-   Python already prevents methods from being used on objects that don't derive
-   from the appropriate class, so it is assumed that self->tp_mro contains our
-   type. */
-bool safe_to_call_init(PyTypeObject *target,PyObject *self) {{
-    assert(self->ob_type && self->ob_type->tp_mro);
-    PyObject *mro = self->ob_type->tp_mro;
-    for(unsigned int i = 0; reinterpret_cast<PyTypeObject*>(PyTuple_GET_ITEM(mro,i)) != target; ++i) {{
-        assert(i < PyTuple_GET_SIZE(mro));
-        if(UNLIKELY(PyTuple_GET_ITEM(mro,i)->ob_type == &obj__CommonMetaType)) {{
-            PyErr_SetString(PyExc_TypeError,"__init__ cannot be used directly on a derived type");
-            return false;
-        }}
-    }}
-    return true;
-}}
-
 
 struct obj__Common {{
     PyObject_HEAD
@@ -613,7 +581,7 @@ struct obj__Common {{
 /* trying to inherit from more than one type raises a TypeError if there isn't a
    common base */
 PyTypeObject obj__CommonType = {{
-    PyObject_HEAD_INIT(&obj__CommonMetaType)
+    PyObject_HEAD_INIT(0)
     0,                         /* ob_size */
     "{module}._internal_class", /* tp_name */
     sizeof(obj__Common),       /* tp_basicsize */
@@ -666,9 +634,6 @@ PyMethodDef func_table[] = {
 
 
 extern "C" SHARED(void) init<% module %>(void) {
-    obj__CommonMetaType.tp_base = &PyType_Type;
-    if(UNLIKELY(PyType_Ready(&obj__CommonMetaType) < 0)) return;
-
     if(UNLIKELY(PyType_Ready(&obj__CommonType) < 0)) return;
 
 == set classes = classes|list
@@ -676,15 +641,14 @@ extern "C" SHARED(void) init<% module %>(void) {
 ==     if c.base
     obj_<% c.name %>Type.tp_base = get_obj_<% c.base %>Type();
 ==     endif
+==     if not c.new_init
     obj_<% c.name %>Type.tp_new = &PyType_GenericNew;
+==     endif
     if(UNLIKELY(PyType_Ready(&obj_<% c.name %>Type) < 0)) return;
 == endfor
 
     PyObject *m = Py_InitModule3("<% module %>",func_table,<% doc|quote if doc else '0' %>);
     if(UNLIKELY(!m)) return;
-
-    Py_INCREF(&obj__CommonMetaType);
-    PyModule_AddObject(m,"_internal_metaclass",reinterpret_cast<PyObject*>(&obj__CommonMetaType));
 
     Py_INCREF(&obj__CommonType);
     PyModule_AddObject(m,"_internal_class",reinterpret_cast<PyObject*>(&obj__CommonType));
@@ -706,17 +670,21 @@ extern "C" SHARED(void) init<% module %>(void) {
 
 cast_base = env.from_string('''
 <% type %> &cast_base_<% name %>(PyObject *o) {
+== if features.managed_ref or not new_init
     switch(reinterpret_cast<obj__Common*>(o)->mode) {
-== if features.managed_ref
+==     if features.managed_ref
     case MANAGEDREF:
         return reinterpret_cast<ref_<% name %>*>(o)->base;
-== endif
+==     endif
     case CONTAINS:
         return reinterpret_cast<obj_<% name %>*>(o)->base;
     default:
         PyErr_SetString(PyExc_RuntimeError,not_init_msg);
         throw py_error_set();
     }
+== else
+    return reinterpret_cast<obj_<% name %>*>(o)->base;
+== endif
 }
 ''')
 
@@ -822,7 +790,6 @@ typecheck_else = '''
 
 function = '''
 {rettype} {name}({args}) {{
-{prolog}
     try {{
 {code}
     }} EXCEPT_HANDLERS({errval})
@@ -847,8 +814,8 @@ PyObject *obj_{cname}_{op}({args}) {{
 
 richcompare_start = '''
 PyObject *obj_{name}_richcompare(obj_{name} *self,PyObject *arg,int op) {{
-{prolog}
     try {{
+{prolog}
         switch(op) {{
 '''
 
