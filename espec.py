@@ -226,6 +226,13 @@ def varargs(x):
     return x.args and x.args[-1] is gccxml.cppellipsis
 
 
+def forwarding_args(args):
+    return ','.join('{0} _{1}'.format(a.type.typestr(),i) for i,a in enumerate(args))
+
+def forwarding_arg_vals(args):
+    return ','.join('_{0}'.format(i) for i in xrange(len(args)))
+
+
 def has_trivial_destructor(x):
     if not isinstance(x,gccxml.CPPClass): return True
     d = x.getDestructor()
@@ -555,7 +562,14 @@ class TypedMethodDef(TypedDefDef):
 
     def call_code_base(self,ov):
         if isinstance(ov.func,gccxml.CPPMethod):
-            return base_prefix(ov.func)
+            if ov.func.static:
+                return ov.func.full_name
+
+            f = ov.func.canon_name
+            if ov.func.virtual:
+                # don't bother calling the overridden method from X_virt_handler
+                f = self.classdef.type.typestr() + '::' + f
+            return 'base.' + f
 
         return super(TypedMethodDef,self).call_code_base(ov)
 
@@ -1336,6 +1350,12 @@ class TypedClassDef:
             self.type.full_name,
             ('get_base_{0}({1},false)' if self.has_multi_inherit_subclass() else 'cast_base_{0}({1})').format(self.name,var))
 
+    def constructor_args(self):
+        return ({
+            'args' : forwarding_args(m.args),
+            'argvals' : forwarding_arg_vals(m.args)}
+                for m in self.type.members if isinstance(m,gccxml.CPPConstructor) and not varargs(m))
+
     def output(self,out,module):
         has_mi_subclass = self.has_multi_inherit_subclass()
 
@@ -1349,17 +1369,37 @@ class TypedClassDef:
                 # common type needed for multiple inheritance
                 bases = ['&obj__CommonType']
 
+        virtmethods = []
+        typestr = self.type.typestr()
+        for m in self.methods:
+            for o in m.overloads:
+                if isinstance(o.func,gccxml.CPPMethod) and o.func.virtual:
+                    virtmethods.append((m,o.func))
+
+        if virtmethods:
+            print >> out.h, tmpl.subclass.render(
+                name = self.name,
+                type = self.type.typestr(),
+                constructors = self.constructor_args(),
+                methods = ({
+                    'name' : m.canon_name,
+                    'ret' : m.returns.typestr(),
+                    'args' : forwarding_args(m.args),
+                    'const' : m.const}
+                        for d,m in virtmethods))
+
+            typestr += '_virt_handler'
 
         print >> out.h, tmpl.classdef.render(
             name = self.name,
-            type = self.type.full_name,
+            type = typestr,
             new_init = self.new_initializes,
             dynamic = self.dynamic,
             canholdref = self.features.managed_ref,
-            constructors = ({
-                'args' : ','.join('{0!s} _{1}'.format(a,i) for i,a in enumerate(m.args)),
-                'argvals' : ','.join('_{0}'.format(i) for i in xrange(len(m.args)))}
-                    for m in self.type.members if isinstance(m,gccxml.CPPConstructor) and not varargs(m))),
+            constructors = self.constructor_args()),
+
+        if virtmethods:
+            print >> out.h, tmpl.subclass_meth.render(name=self.name)
 
         richcompare = self.rich_compare(out)
         number = self.number(out)
@@ -1420,8 +1460,20 @@ class TypedClassDef:
         for fn in ('__cmp__','__repr__','__hash__','__call__','__str__','__getattr__','__setattr__','__iter__','next'):
             self.output_special(fn,out)
 
+        if virtmethods:
+            for d,m in virtmethods:
+                print >> out.cpp, tmpl.virtmethod.render(
+                    cname = self.name,
+                    name = d.name,
+                    ret = m.returns.typestr(),
+                    func = m.canon_name,
+                    const = m.const,
+                    type = self.type.typestr(),
+                    argvals = forwarding_arg_vals(m.args),
+                    pyargvals = ','.join(out.conv.to_py(a.type).format('_{0}'.format(i)) for i,a in enumerate(m.args)),
+                    retfrompy = out.conv.frompy(m.returns)[0].format('ret'))
 
-        func = CallCode('new(addr) {0}({{0}}); return 0;'.format(self.type.full_name))
+        func = CallCode('new(addr) {0}({{0}}); return 0;'.format(typestr))
         if self.constructor:
             if self.constructor.overloads[0].args is None:
                 # no overload specified means use all constructors
@@ -1438,7 +1490,7 @@ class TypedClassDef:
         print >> out.cpp, tmpl.classtypedef.render(
             dynamic = self.dynamic,
             name = self.name,
-            type = self.type.full_name,
+            type = typestr,
             features = self.features,
             new_init = self.new_initializes,
             destructor = destructor,

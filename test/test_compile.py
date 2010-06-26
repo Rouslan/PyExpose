@@ -561,5 +561,33 @@ class TestConstructorDestructor(TestCompile):
         self.assertEqual(tm.count(),0)
 
 
+class TestVirtualMethod(TestCompile):
+    header_file = '''
+        struct Thing {
+            virtual double factor() const { return 22; }
+            double getval() const { return factor() * 2; }
+        };
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="Thing">
+                <def func="factor"/>
+                <def func="getval"/>
+            </class>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+        thing = tm.Thing()
+        self.assertEqual(thing.getval(),44)
+        class SubClass(tm.Thing):
+            def factor(self):
+                return 3
+        thing = SubClass()
+        self.assertEqual(thing.getval(),6)
+
+
 if __name__ == '__main__':
     unittest.main()

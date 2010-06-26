@@ -96,7 +96,7 @@ PyMethodDef obj_{name}_methods[] = {{
 
 classdef = env.from_string('''
 extern PyTypeObject <% '*' if dynamic %>obj_<% name %>Type;
-PyTypeObject *get_obj_<% name %>Type() { return <% '&' if not dynamic %>obj_<% name %>Type; }
+inline PyTypeObject *get_obj_<% name %>Type() { return <% '&' if not dynamic %>obj_<% name %>Type; }
 
 == if canholdref
 struct ref_<% name %> {
@@ -905,4 +905,40 @@ PySequenceMethods obj_<% name %>_sequence_methods = {
     <@ if '__iconcat__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___iconcat__)<@ else @>0<@ endif @>,
     <@ if '__irepeat__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___irepeat__)<@ else @>0<@ endif @>
 };
+''')
+
+subclass = env.from_string('''
+class <% name %>_virt_handler : public <% type %> {
+public:
+== for con in constructors
+    <% name %>_virt_handler(<% con.args %>) : <% type %>(<% con.argvals %>) {}
+== endfor
+
+== for m in methods
+    <% m.ret %> <% m.name %>(<% m.args %>)<% ' const' if m.const %>;
+== endfor
+
+protected:
+    PyObject *self() const;
+};
+''')
+
+subclass_meth = env.from_string('''
+inline PyObject *<% name %>_virt_handler::self() const {
+    return reinterpret_cast<PyObject*>(reinterpret_cast<size_t>(this) - offsetof(obj_<% name %>,base));
+}
+''')
+
+virtmethod = env.from_string('''
+<% ret %> <% cname %>_virt_handler::<% func %>(<% args %>)<% ' const' if const %> {
+    PyObject *f = PyObject_GetAttrString(self(),"<% name %>");
+    if(!f) throw py_error_set(); // TODO: throw better exception
+    if(PyCFunction_Check(f) && PyCFunction_GET_FUNCTION(f) == reinterpret_cast<PyCFunction>(&obj_<% cname %>_method_<% name %>)) {
+        <% 'return ' if ret != 'void' %><% type %>::<% func %>(<% argvals %>);
+    } else {
+        PyObject *ret = PyObject_CallFunctionObjArgs(f,<% pyargvals %>NULL);
+        if(!ret) throw py_error_set(); // TODO: throw better exception
+        <@ if ret != 'void' @>return <% retfrompy %>;<@ endif @>
+    }
+}
 ''')
