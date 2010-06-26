@@ -8,21 +8,21 @@
     <xsd:documentation>
       Example:
       <pre><![CDATA[
-      <?xml version="1.0"?>
-      <module name="modulename" include="vector">
-        <doc>module doc string</doc>
+<?xml version="1.0"?>
+<module name="modulename" include="vector">
+  <doc>module doc string</doc>
 
-        <class name="DVector" type="std::vector&lt;double&gt;">
-          <doc>class doc string</doc>
-          <init overload=""/>
-          <init overload="size_t,const double&amp;"/>
-          <property name="size" get="size" set="resize"/>
-          <def func="push_back"/>
-          <def name="__sequence__getitem__" func="at" return-semantic="copy"/>
-          <def name="__sequence__setitem__" assign-to="at"/>
-        </class>
-      </module>
-      ]]></pre>
+  <class name="DVector" type="std::vector&lt;double&gt;">
+    <doc>class doc string</doc>
+    <init overload=""/>
+    <init overload="size_t,const double&amp;"/>
+    <property name="size" get="size" set="resize"/>
+    <def func="push_back"/>
+    <def name="__sequence__getitem__" func="at" return-semantic="copy"/>
+    <def name="__sequence__setitem__" assign-to="at"/>
+  </class>
+</module>
+]]></pre>
     </xsd:documentation>
   </xsd:annotation>
 
@@ -63,6 +63,8 @@
         <xsd:element ref="def"/>
         <xsd:element ref="class"/>
         <xsd:element ref="doc"/>
+        <xsd:element ref="to-pyobject"/>
+        <xsd:element ref="from-pyobject"/>
       </xsd:choice>
       <xsd:attribute name="name" type="ident" use="required">
         <xsd:annotation>
@@ -446,4 +448,58 @@
       </xsd:restriction>
     </xsd:simpleType>
   </xsd:element>
+
+
+  <xsd:element name="to-pyobject">
+    <xsd:annotation>
+      <xsd:documentation>
+        <p>Specifies how to convert a particular type to <code>PyObject*</code>.</p>
+      </xsd:documentation>
+    </xsd:annotation>
+    <xsd:complexType mixed="true">
+      <xsd:choice maxOccurs="unbounded" minOccurs="0">
+        <xsd:element ref="val"/>
+      </xsd:choice>
+
+      <xsd:attribute name="type" type="symbol">
+        <xsd:annotation>
+          <xsd:documentation>
+            The type the conversion applies to.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+    </xsd:complexType>
+  </xsd:element>
+
+
+  <xsd:element name="from-pyobject">
+    <xsd:annotation>
+      <xsd:documentation>
+        <p>Specifies how to convert <code>PyObject*</code> to a particular type.</p>
+      </xsd:documentation>
+    </xsd:annotation>
+    <xsd:complexType mixed="true">
+      <xsd:choice maxOccurs="unbounded" minOccurs="0">
+        <xsd:element ref="val"/>
+      </xsd:choice>
+
+      <xsd:attribute name="type" type="symbol">
+        <xsd:annotation>
+          <xsd:documentation>
+            The type the conversion applies to.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+    </xsd:complexType>
+  </xsd:element>
+
+  <xsd:element name="val">
+    <xsd:annotation>
+      <xsd:documentation>
+        This tag gets replaced by the expression that needs to be converted.
+      </xsd:documentation>
+    </xsd:annotation>
+    <xsd:complexType/>
+  </xsd:element>
+
 </xsd:schema>

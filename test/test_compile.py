@@ -589,5 +589,64 @@ class TestVirtualMethod(TestCompile):
         self.assertEqual(thing.getval(),6)
 
 
+class TestConversion(TestCompile):
+    header_file = '''
+        class borrowed_ref {
+            friend class object;
+            PyObject *_ptr;
+        public:
+            explicit borrowed_ref(PyObject *ptr) : _ptr(ptr) {}
+        };
+
+        class new_ref {
+            friend class object;
+            PyObject *_ptr;
+        public:
+            explicit new_ref(PyObject *ptr) : _ptr(ptr) {}
+        };
+
+        class object {
+            PyObject *_ptr;
+        public:
+            object(borrowed_ref r) : _ptr(r._ptr) {
+                Py_INCREF(_ptr);
+            }
+            object(new_ref r) : _ptr(r._ptr) {}
+            ~object() {
+                Py_DECREF(_ptr);
+            }
+
+            object &operator=(const object &b) {
+                Py_INCREF(b._ptr);
+                Py_DECREF(_ptr);
+                _ptr = b._ptr;
+                return *this;
+            }
+
+            PyObject *ptr() const { return _ptr; }
+            PyObject *get_new_ref() const {
+                Py_INCREF(_ptr);
+                return _ptr;
+            }
+        };
+
+        object dup_tuple(object o) {
+            return new_ref(PyTuple_Pack(2,o.ptr(),o.ptr()));
+        }
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <from-pyobject type="object">object(borrowed_ref(<val/>))</from-pyobject>
+            <to-pyobject type="object"><val/>.get_new_ref()</to-pyobject>
+            <def func="dup_tuple"/>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+        self.assertEqual(tm.dup_tuple('kitty'),('kitty','kitty'))
+
+
 if __name__ == '__main__':
     unittest.main()

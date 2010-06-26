@@ -1988,7 +1988,7 @@ class Conversion:
             errval = errval,
             endlabel = False)
 
-    def add_conv(self,t,to,from_):
+    def add_conv(self,t,to=None,from_=None):
         if to: self.__topy[t] = to
         if from_: self.__frompy[t] = from_
 
@@ -2032,10 +2032,13 @@ def methods_that_return(c):
 
 
 class ModuleDef:
-    def __init__(self):
+    def __init__(self,name):
+        self.name = name
         self.classes = []
         self.functions = {}
         self.doc = ''
+        self.topy = []
+        self.frompy = []
 
     def print_gccxml_input(self,out):
         # In addition to the include files, declare certain typedefs so they can
@@ -2052,6 +2055,12 @@ class ModuleDef:
             # and arguments specified by typedef in templates
             print >> out, 'typedef {0} class_type_{1};\n'.format(c.type,i)
 
+        for i,conv in enumerate(self.topy):
+            print >> out, 'typedef {0} topy_type_{1};\n'.format(conv[0],i)
+
+        for i,conv in enumerate(self.frompy):
+            print >> out, 'typedef {0} frompy_type_{1};\n'.format(conv[0],i)
+
         print >> out, '}\n'
 
         for c in self.classes:
@@ -2059,7 +2068,7 @@ class ModuleDef:
             if c.template:
                 print >> out, 'template class {0};\n'.format(c.type)
 
-    def _collect_overload_arg_lists(self,tns):
+    def _collect_overload_arg_lists(self,tns,conv):
         for i,x in enumerate(self._funcs_with_overload()):
             f = tns.find('dummy_func_{0}'.format(i))[0]
             assert isinstance(f,gccxml.CPPFunction)
@@ -2069,15 +2078,19 @@ class ModuleDef:
             t = tns.find('class_type_{0}'.format(i))[0]
             c.type = t
 
+        for i,to in enumerate(self.topy):
+            conv.add_conv(tns.find('topy_type_{0}'.format(i))[0],to=to[1])
+
+        for i,from_ in enumerate(self.frompy):
+            conv.add_conv(tns.find('frompy_type_{0}'.format(i))[0],from_=(False,from_[1]))
+
     def _formatted_includes(self):
         return "\n".join('#include "{0}"'.format(i) for i in self.includes)
 
     def write_file(self,path,scope):
         tns = scope.find(TEST_NS)[0]
-
-        self._collect_overload_arg_lists(tns)
-
         conv = Conversion(tns)
+        self._collect_overload_arg_lists(tns,conv)
 
         out = Output(
             open(os.path.join(path, self.name + '.cpp'),'w'),
@@ -2240,21 +2253,39 @@ class tag_Init(tag):
 
 class tag_Module(tag):
     def __init__(self,args):
-        self.r = ModuleDef()
-        self.r.name = args["name"]
+        self.r = ModuleDef(args["name"])
         self.r.includes = stripsplit(args["include"])
 
     def child(self,name,data):
         if name == "class":
             self.r.classes.append(data)
-        if name == "def":
+        elif name == "def":
             add_func(self.r.functions,data)
         elif name == "doc":
             self.r.doc = data
+        elif name == 'to-pyobject':
+            self.r.topy.append(data)
+        elif name == 'from-pyobject':
+            self.r.frompy.append(data)
+
+class tag_ToFromPyObject(tag):
+    def __init__(self,args):
+        self.type = args['type']
+        self.replacement = ''
+
+    def text(self,data):
+        self.replacement += data
+
+    def child(self,name,data):
+        if name == 'val':
+            self.replacement += '{0}'
+
+    def end(self):
+        return self.type,self.replacement
 
 class tag_Doc(tag):
     def __init__(self,args):
-        self.r = ""
+        self.r = ''
 
     def text(self,data):
         self.r = textwrap.dedent(data)
@@ -2379,7 +2410,10 @@ tagdefs = {
     "attr" : tag_Member,
     'get' : tag_GetSet,
     'set' : tag_GetSet,
-    'def' : tag_Def
+    'def' : tag_Def,
+    'to-pyobject' : tag_ToFromPyObject,
+    'from-pyobject' : tag_ToFromPyObject,
+    'val' : tag
 }
 
 def getspec(path):
