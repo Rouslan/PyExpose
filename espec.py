@@ -146,7 +146,7 @@ def _namespace_find(self,x,test):
         if matches:
             if len(parts) == 2:
                 if not isinstance(matches[0],(gccxml.CPPClass,gccxml.CPPNamespace)):
-                    raise SpecificationError('"{0}" is not a namespace, struct or class'.format(parts[0]))
+                    raise SpecificationError('"{0}" is not a namespace, struct, class or union'.format(parts[0]))
 
                 assert len(matches) == 1
                 return _namespace_find(matches[0],parts[1],test)
@@ -169,9 +169,10 @@ def namespace_find(self,x,test=None):
 
     raise SpecificationError('could not find "{0}"'.format(x))
 
+
 gccxml.CPPClass.find = namespace_find
 gccxml.CPPNamespace.find = namespace_find
-
+gccxml.CPPUnion.find = namespace_find
 
 
 class Tab:
@@ -241,7 +242,7 @@ def has_trivial_destructor(x):
         all(has_trivial_destructor(b.type) for b in x.bases)
 
 
-class ObjFeatures:
+class ObjFeatures(object):
     """Specifies the way a class may be stored.
 
     managed_ref -- A reference and the object that actually holds the object is
@@ -253,6 +254,9 @@ class ObjFeatures:
     managed_ref = False
     managed_ptr = False
     unmanaged_ref = False
+
+    def __nonzero__(self):
+        return self.managed_ref or self.managed_ptr or self.unmanaged_ref
 
 
 class MultiInheritNode:
@@ -780,22 +784,47 @@ class MemberDef:
     doc = None
 
 
+def member_type(x):
+    if not isinstance(x,gccxml.CPPField):
+        raise SpecificationError('"{0}" is not a member variable'.format(x.full_name))
+    return x.type
+
+class AttrAccess(object):
+    def __init__(self,classdef,seq):
+        self.seq = seq
+        member = classdef.type.find(seq[0])[0]
+        self.type = member_type(member)
+        self.static = member.static
+
+        for m in seq[1:]:
+            if isinstance(m,basestring):
+                if not isinstance(self.type,(gccxml.CPPClass,gccxml.CPPUnion)):
+                    raise SpecificationError('"{0}" is not a class, struct or union'.format(self.type.full_name))
+                self.type = member_type(self.type.find(m)[0])
+            else:
+                # m should be number
+                if not isinstance(self.type,(gccxml.CPPArrayType,gccxml.CPPPointerType)):
+                    raise SpecificationError('"{0}" is not an array or pointer type'.format(self.type.full_name))
+                self.type = self.type.type
+
+    @property
+    def canon_name(self):
+        return self.seq[0] + ''.join('.'+s if isinstance(s,basestring) else '[{0}]'.format(s) for s in self.seq[1:])
+
 class TypedMemberDef:
     def __init__(self,classdef,memdef):
         self.classdef = classdef
         self.name = memdef.name
         self.doc = memdef.doc
         self.readonly = memdef.readonly
-        self.cmember = classdef.type.find(memdef.cmember)[0]
-        if not isinstance(self.cmember,gccxml.CPPField):
-            raise SpecificationError('"{0}" is not a member variable'.format(memdef.cmember))
+        self.cmember = AttrAccess(classdef,memdef.cmember)
 
     def getter_type(self,conv):
         return self.cmember.type if conv.member_macro(self.cmember.type) else gccxml.CPPReferenceType(self.cmember.type)
 
     def output(self,conv):
         r = ''
-        if self.classdef.has_multi_inherit_subclass() or not conv.member_macro(self.cmember.type):
+        if self.really_a_property(conv):
             code = '        return {0};'.format(
                 conv.topy(self.getter_type(conv),RET_MANAGED_REF,'self').format(base_prefix(self.cmember)))
             if not self.cmember.static: code = self.classdef.method_prolog() + code
@@ -816,11 +845,11 @@ class TypedMemberDef:
         return r
 
     def really_a_property(self,conv):
-        return self.classdef.has_multi_inherit_subclass() or not conv.member_macro(self.cmember.type)
+        return self.classdef.variable_storage() or not conv.member_macro(self.cmember.type)
 
     def table_entry(self,conv):
         mm = conv.member_macro(self.cmember.type)
-        if self.classdef.has_multi_inherit_subclass() or not mm:
+        if self.classdef.variable_storage() or not mm:
             r = tmpl.property_table.render(
                 name = self.name,
                 cname = self.classdef.name,
@@ -834,7 +863,7 @@ class TypedMemberDef:
             type = mm,
             classdefname = self.classdef.name,
             classname = self.classdef.type.typestr(),
-            mname = self.cmember.name,
+            mname = self.cmember.canon_name,
             flags = 'READONLY' if self.readonly else '0',
             doc = 'const_cast<char*>({0})'.format(tmpl.quote_c(self.doc)) if self.doc else '0')
         return False,r
@@ -1110,6 +1139,10 @@ class TypedClassDef:
 
     def has_multi_inherit_subclass(self):
         return any(c.multi_inherit or c.has_multi_inherit_subclass() for c in self.derived)
+
+    def variable_storage(self):
+        """Returns true if the memory layout for this object varies"""
+        return self.has_multi_inherit_subclass() or self.features
 
     def findbases(self,classdefs):
         assert len(self.bases) == 0
@@ -1736,11 +1769,11 @@ class Conversion:
         fd = "PyFloat_FromDouble({0})"
 
         self.__topy = {
-            self.bool : 'bool_to_py({0})',
+            self.bool : 'BoolToPy({0})',
             self.sshort : fl,
             self.ushort : fl,
             self.sint : fl,
-            self.uint : ful if self.uint.size == self.ulong.size else fl,
+            self.uint : 'UIntToPy({0})',
             self.slong : fl,
             self.ulong : ful,
             self.float : fd,
@@ -2328,12 +2361,90 @@ def parse_bool(args,prop):
     except LookupError:
         raise ParseError('The value of "{0}" must be either "true" or "false"'.format(prop))
 
+
+def parse_cint(x):
+    if x.startswith('0x') or x.startswith('0X'):
+        return int(x[2:],16)
+    if x.startswith('0'):
+        return int(x,8)
+    return int(x)
+
+
+
+class AttrLexer(object):
+    def __init__(self,data):
+        self.data = data
+
+    word = re.compile(r'\w+')
+    space = re.compile(r'\s+')
+
+    def __call__(self):
+        m = AttrLexer.space.match(self.data)
+        if m:
+            self.data = self.data[m.end():]
+
+        if not self.data:
+            return None
+
+        m = AttrLexer.word.match(self.data)
+        if m:
+            self.data = self.data[m.end():]
+            return m.group()
+
+        m = self.data[0]
+        self.data = self.data[1:]
+        return m
+
+
 class tag_Member(tag):
     def __init__(self,args):
         self.r = MemberDef()
-        self.r.cmember = args['cmember']
-        self.r.name = get_valid_py_ident(args.get('name'),self.r.cmember)
+        cmember = args['cmember']
+        self.r.cmember = tag_Member.parse_cmember(cmember)
+        self.r.name = get_valid_py_ident(args.get('name'),cmember)
         self.r.readonly = parse_bool(args,'readonly')
+
+    @staticmethod
+    def parse_cmember(x):
+        """Parses a C attribute.
+
+        Takes a string in the format:
+
+            identifier ( '.' identifier | '[' integer ']' )*
+
+        and returns a list of strings and numbers where a string corresponds to
+        attribute access and a number corresponds to subscript access.
+        """
+        lex = AttrLexer(x)
+        head = lex()
+        if not head:
+            raise ParseError('cmember cannot be blank')
+
+        seq = [head]
+        while True:
+            head = lex()
+
+            if head is None:
+                return seq
+
+            if head == '.':
+                id = lex()
+                if not id: break
+                seq.append(id)
+            elif head == '[':
+                num = lex()
+                if not num: break
+                try:
+                    num = parse_cint(num)
+                except ValueError:
+                    break
+                seq.append(num)
+                if lex() != ']': break
+            else:
+                break
+
+        raise ParseError('''cmember must have the following format: "identifier ( '.' identifier | '[' integer ']' )*"''')
+
 
 
 def get_ret_semantic(args):

@@ -648,5 +648,52 @@ class TestConversion(TestCompile):
         self.assertEqual(tm.dup_tuple('kitty'),('kitty','kitty'))
 
 
+class TestSubscriptAttr(TestCompile):
+    header_file = '''
+        struct Nest1 {
+            int item;
+        };
+        union Nest2 {
+            Nest1 items[2];
+            double stuff;
+        };
+        class Thing {
+        public:
+            int items[3];
+            Nest2 nest;
+
+            int getitem(int index) {
+                // since this is just a test, we wont bother making sure that index is between 0 and 2
+                return items[index];
+            }
+            int getnested() {
+                return nest.items[1].item;
+            }
+        };
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="Thing">
+                <def func="getitem"/>
+                <def func="getnested"/>
+                <attr name="a" cmember="items[0]"/>
+                <attr name="b" cmember="items[2]"/>
+                <attr name="c" cmember="nest.items[1].item"/>
+            </class>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+        thing = tm.Thing()
+        thing.a = 12
+        thing.b = 30
+        thing.c = -2
+        self.assertEqual(thing.getitem(0),12)
+        self.assertEqual(thing.getitem(2),30)
+        self.assertEqual(thing.getnested(),-2)
+
+
 if __name__ == '__main__':
     unittest.main()

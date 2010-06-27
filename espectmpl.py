@@ -455,17 +455,23 @@ unsigned long PyToULong(PyObject *po) {{
 #if INT_MAX == LONG_MAX
     #define PyToInt(po) PyToLong(po)
     #define PyToUInt(po) PyToULong(po)
-#elif INT_MAX == SHRT_MAX
-    #define PyToInt(po) PyToShort(po)
-    #define PyToUInt(po) PyToUShort(po)
+    #define UIntToPy(x) PyLong_FromUnsignedLong(x)
 #else
-    int PyToInt(PyObject *po) {{
-        return static_cast<int>(PyToXInt(po,INT_MAX,INT_MIN));
-    }}
+    #define UIntToPy(x) PyInt_FromLong(x)
 
-    unsigned int PyToUInt(PyObject *po) {{
-        return static_cast<unsigned int>(PyToXInt(po,UINT_MAX,0));
-    }}
+    #if INT_MAX == SHRT_MAX
+        #define PyToInt(po) PyToShort(po)
+        #define PyToUInt(po) PyToUShort(po)
+
+    #else
+        int PyToInt(PyObject *po) {{
+            return static_cast<int>(PyToXInt(po,INT_MAX,INT_MIN));
+        }}
+
+        unsigned int PyToUInt(PyObject *po) {{
+            return static_cast<unsigned int>(PyToXInt(po,UINT_MAX,0));
+        }}
+    #endif
 #endif
 
 #ifdef HAVE_LONG_LONG
@@ -492,7 +498,7 @@ inline PyObject *StringToPy(const std::string &s) {{
     return PyString_FromStringAndSize(s.c_str(),s.size());
 }}
 
-PyObject *bool_to_py(bool x) {{
+PyObject *BoolToPy(bool x) {{
     PyObject *r = x ? Py_True : Py_False;
     Py_INCREF(r);
     return r;
