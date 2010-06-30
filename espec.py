@@ -93,27 +93,6 @@ def compatible_args(f,given):
     return f
 
 
-def getConstructor(self,ovrld = None):
-    constructors = [c for c in self.members if isinstance(c,gccxml.CPPConstructor) and c.access == gccxml.ACCESS_PUBLIC]
-    if ovrld:
-        for c in constructors:
-            rc = compatible_args(c,ovrld)
-            if rc: return rc
-        msg = 'For class "{0}", there is no public constructor with the arguments specified by "overload"'.format(self.name)
-        if constructors:
-            msg += '\nThe available constructors are:' + ''.join('\n({0})'.format(','.join(map(str,c.args))) for c in constructors)
-        raise SpecificationError(msg)
-    else:
-        realconstructs = [c for c in constructors if not c.artificial]
-        if len(realconstructs) == 1:
-            return realconstructs[0]
-        else:
-            # if there is more than one constructor and an overload wasn't specified, look for one with no arguments (the default constructor)
-            for c in constructors:
-                if not c.args: return c
-            raise SpecificationError('There is more than one constructor and there is no default. An overload must be specified in the spec file.')
-gccxml.CPPClass.getConstructor = getConstructor
-
 class LevelBaseTraverser:
     """An iterator where the first item is a list containing the supplied class
     (CPPClass) and each subsequent item is a list of the immediate base classes
@@ -175,10 +154,22 @@ gccxml.CPPNamespace.find = namespace_find
 gccxml.CPPUnion.find = namespace_find
 
 
+def get_unique_num():
+    """Generates a unique number.
+
+    This is used by ClassDef and others to generate unique C++ identifiers.
+
+    """
+    get_unique_num.nextnum += 1
+    return get_unique_num.nextnum
+get_unique_num.nextnum = 0
+
+
 class Tab:
     """Yield 4 x self.amount whitespace characters when converted to a string.
 
-    An instance can be added to or subtracted from directly, to add to or subtract from "amount".
+    An instance can be added to or subtracted from directly, to add to or
+    subtract from "amount".
 
     """
     def __init__(self,amount = 1):
@@ -250,6 +241,8 @@ class ObjFeatures(object):
     managed_ptr -- A pointer is held and delete will be called upon destruction
     unmanaged_ref -- A reference is stored. The object's lifetime is not managed
 
+    Only managed_ref is implemented at the moment.
+
     """
     managed_ref = False
     managed_ptr = False
@@ -317,12 +310,29 @@ class Overload:
         self.static = static
         self.arity = arity
         self.assign = assign
+        self.uniquenum = get_unique_num()
+
+    def gccxml_input(self,outfile):
+        if self.args:
+            # declare a dummy function with the arguments we want gccxml to
+            # parse for us
+            print >> outfile, 'void dummy_func_{0}({1});\n'.format(self.uniquenum,self.args)
+
+    def get_parsed_args(self,tns):
+        f = tns.find('dummy_func_{0}'.format(self.uniquenum))[0]
+        assert isinstance(f,gccxml.CPPFunction)
+        return f.args
 
 class DefDef:
     def __init__(self,name = None,doc = None):
         self.name = name
         self.doc = doc
         self.overloads = []
+
+    def gccxml_input(self,outfile):
+        for o in self.overloads:
+            o.gccxml_input(outfile)
+
 
 class CallCode(object):
     """C++ code representing a function call with optional predefined argument values."""
@@ -350,15 +360,15 @@ def is_const(x):
     return isinstance(x,gccxml.CPPCvQualifiedType) and x.const
 
 class TypedOverload:
-    def __init__(self,func,overload):
+    def __init__(self,func,overload=None):
         self.func = func
-        self.retsemantic = overload.retsemantic
+        self.retsemantic = overload and overload.retsemantic
         self.argbinds = [BindableArg(a) for a in func.args]
-        self.explicit_static = overload.static
+        self.explicit_static = overload.static if overload else False
         self._returns = None
 
-        self.assign = overload.assign
-        if overload.assign:
+        self.assign = overload and overload.assign
+        if self.assign:
             ret = func.returns
             if not isinstance(ret,(gccxml.CPPReferenceType,gccxml.CPPPointerType)):
                 raise SpecificationError('"{0}" must return a reference or pointer type to be assigned to'.format(func.canon_name))
@@ -401,9 +411,23 @@ class TypedOverload:
         return self.explicit_static or isinstance(self.func,gccxml.CPPFunction) or (isinstance(self.func,gccxml.CPPMethod) and self.func.static)
 
 
+def choose_overload(ov,options,tns):
+    if ov.args is None:
+        return [TypedOverload(f,ov) for f in options]
+
+    args = ov.get_parsed_args(tns) if ov.args else []
+    for f in options:
+        newf = compatible_args(f,args)
+        if newf:
+            return [TypedOverload(newf,ov)]
+            break
+
+    raise SpecificationError(
+        'No overload matches the given arguments. The options are:' +
+        ''.join('\n({0})'.format(','.join(map(str,f.args))) for f in options))
 
 class TypedDefDef(object):
-    def __init__(self,scope,defdef):
+    def __init__(self,scope,defdef,tns):
         self.name = defdef.name
         self.doc = defdef.doc
         self.overloads = []
@@ -424,18 +448,7 @@ class TypedDefDef(object):
                 newcf = [f for f in cf if not (hasattr(f,'const') and f.const)]
                 if newcf: cf = newcf
 
-            if not ov.args:
-                self.overloads.extend(TypedOverload(f,ov) for f in cf)
-            else:
-                for f in cf:
-                    newf = compatible_args(f,ov.args)
-                    if newf:
-                        self.overloads.append(TypedOverload(newf,ov))
-                        break
-                else:
-                    raise SpecificationError(
-                        'No overload matches the given arguments. The options are:' +
-                        ''.join('\n({0})'.format(','.join(map(str,f.args))) for f in cf))
+            self.overloads.extend(choose_overload(ov,cf,tns))
 
     def call_code_base(self,ov):
         return ov.func.canon_name
@@ -550,8 +563,8 @@ def base_prefix(x):
 class TypedMethodDef(TypedDefDef):
     selfvar = 'reinterpret_cast<PyObject*>(self)'
 
-    def __init__(self,classdef,defdef):
-        super(TypedMethodDef,self).__init__(classdef.type,defdef)
+    def __init__(self,classdef,defdef,tns):
+        super(TypedMethodDef,self).__init__(classdef.type,defdef,tns)
         self.classdef = classdef
 
         for ov in self.overloads:
@@ -608,8 +621,8 @@ class TypedMethodDef(TypedDefDef):
 
 
 class SpecialMethod(TypedMethodDef):
-    def __init__(self,classdef,defdef,argtype,rettype = SF_RET_OBJ,defretsemantic = None):
-        super(SpecialMethod,self).__init__(classdef,defdef)
+    def __init__(self,classdef,defdef,tns,argtype,rettype = SF_RET_OBJ,defretsemantic = None):
+        super(SpecialMethod,self).__init__(classdef,defdef,tns)
         self.argtype = argtype
         self.rettype = rettype
         if defretsemantic:
@@ -719,8 +732,8 @@ class FOpMethod(SpecialMethod):
 class BinaryROpMethod(SpecialMethod):
     selfvar = 'b'
 
-    def __init__(self,classdef,defdef):
-        super(BinaryROpMethod,self).__init__(classdef,defdef,SF_ONE_ARG)
+    def __init__(self,classdef,defdef,tns):
+        super(BinaryROpMethod,self).__init__(classdef,defdef,tns,SF_ONE_ARG)
 
     def odd_function(self,ov):
         if not(len(ov.func.args) >= 2 and strip_refptr(ov.func.args[1].type) == self.classdef.type):
@@ -729,11 +742,32 @@ class BinaryROpMethod(SpecialMethod):
         ov.bind(1,'&base' if isinstance(ov.func.args[1].type,gccxml.CPPPointerType) else 'base')
 
 
-class InitDef:
-    def __init__(self):
+class TypedInitDef:
+    def __init__(self,scope,idef,tns):
         self.doc = None
         self.overloads = []
 
+        cons = [con for con in scope.members if isinstance(con,gccxml.CPPConstructor) and con.access == gccxml.ACCESS_PUBLIC]
+        if idef:
+            self.doc = idef.doc
+            for ov in idef.overloads:
+                self.overloads.extend(choose_overload(ov,cons,tns))
+        else:
+            realconstructs = [c for c in cons if not c.artificial]
+            if len(realconstructs) == 1:
+                self.overloads = [TypedOverload(realconstructs[0])]
+            else:
+                # if there is more than one constructor and an overload wasn't specified, look for one with no arguments (the default constructor)
+                for c in cons:
+                    if not c.args:
+                        self.overloads = [TypedOverload(c)]
+                        break
+                else:
+                    raise SpecificationError('There is more than one constructor and there is no default. An overload must be specified in the spec file.')
+
+    def output(self,conv,typestr):
+        cc = CallCode('new(addr) {0}({{0}}); return 0;'.format(typestr))
+        return conv.function_call([(cc,ov.args) for ov in self.overloads],'-1',True)
 
 class PropertyDef:
     def __init__(self,name,get=None,set=None):
@@ -743,11 +777,11 @@ class PropertyDef:
         self.doc = None
 
 class TypedPropertyDef:
-    def __init__(self,classdef,propdef):
+    def __init__(self,classdef,propdef,tns):
         self.name = propdef.name
         self.doc = propdef.doc
-        self.get = SpecialMethod(classdef,propdef.get,SF_NO_ARGS,SF_RET_OBJ)
-        self.set = SpecialMethod(classdef,propdef.set,SF_ONE_ARG,SF_RET_INT_VOID)
+        self.get = SpecialMethod(classdef,propdef.get,tns,SF_NO_ARGS,SF_RET_OBJ)
+        self.set = SpecialMethod(classdef,propdef.set,tns,SF_ONE_ARG,SF_RET_INT_VOID)
 
     def output(self,conv):
         r = ''
@@ -935,10 +969,25 @@ class ClassDef:
         self.properties = []
         self.vars = []
         self.doc = None
+        self.uniquenum = get_unique_num()
 
     @property
     def template(self):
         return '<' in self.type
+
+    def gccxml_input(self,outfile):
+        # create a typedef so we don't have to worry about default arguments
+        # and arguments specified by typedef in templates
+        print >> outfile, 'typedef {0} class_type_{1};\n'.format(self.type,self.uniquenum)
+
+        for m in self.methods.itervalues():
+            m.gccxml_input(outfile)
+
+        if self.constructor:
+            self.constructor.gccxml_input(outfile)
+
+    def get_type(self,tns):
+        return tns.find('class_type_{0}'.format(self.uniquenum))[0]
 
 
 def splitdefdef23code(defdef,conv,vars,ind=Tab(2)):
@@ -981,16 +1030,16 @@ def bindpyssize(conv,f,arg):
 
 
 class TypedClassDef:
-    def __init__(self,scope,classdef):
+    def __init__(self,scope,classdef,tns):
         self.name = classdef.name
-        self.type = classdef.type
+        self.type = classdef.get_type(tns)
         self.new_initializes = classdef.new_initializes
         self.no_destruct = has_trivial_destructor(self.type)
 
         if not isinstance(self.type,gccxml.CPPClass):
             raise SpecificationError('"{0}" is not a class or struct'.format(classdef.type))
 
-        self.constructor = classdef.constructor
+        self.constructor = TypedInitDef(self.type,classdef.constructor,tns)
 
         # TODO: allow this by putting the function call inside ob_<name>_dealloc
         if '__del__' in classdef.methods.data:
@@ -1111,11 +1160,11 @@ class TypedClassDef:
             ('__sequence__setitem__', SSizeObjArgsVoid) # tp_as_sequence.sq_ass_item
         ):
             m = classdef.methods.data.pop(key,None)
-            if m: self.special_methods[key] = mtype(self,m)
+            if m: self.special_methods[key] = mtype(self,m,tns)
 
-        self.methods = [TypedMethodDef(self,dd) for dd in classdef.methods.data.itervalues()]
+        self.methods = [TypedMethodDef(self,dd,tns) for dd in classdef.methods.data.itervalues()]
 
-        self.properties = [TypedPropertyDef(self,pd) for pd in classdef.properties]
+        self.properties = [TypedPropertyDef(self,pd,tns) for pd in classdef.properties]
         self.vars = [TypedMemberDef(self,mdef) for mdef in classdef.vars]
         self.doc = classdef.doc
 
@@ -1506,20 +1555,6 @@ class TypedClassDef:
                     pyargvals = ','.join(out.conv.to_py(a.type).format('_{0}'.format(i)) for i,a in enumerate(m.args)),
                     retfrompy = out.conv.frompy(m.returns)[0].format('ret'))
 
-        func = CallCode('new(addr) {0}({{0}}); return 0;'.format(typestr))
-        if self.constructor:
-            if self.constructor.overloads[0].args is None:
-                # no overload specified means use all constructors
-
-                assert len(self.constructor.overloads) == 1
-                cons = [(func,con.args) for con in self.type.members if isinstance(con,gccxml.CPPConstructor)]
-            else:
-                cons = [(func,self.type.getConstructor(ov.args).args) for ov in self.constructor.overloads]
-        else:
-            cons = [(func,self.type.getConstructor().args)]
-
-        cons = out.conv.function_call(cons,'-1',True)
-
         print >> out.cpp, tmpl.classtypedef.render(
             dynamic = self.dynamic,
             name = self.name,
@@ -1527,7 +1562,7 @@ class TypedClassDef:
             features = self.features,
             new_init = self.new_initializes,
             destructor = destructor,
-            initcode = cons,
+            initcode = self.constructor.output(out.conv,typestr),
             module = module,
             destructref = destructref,
             doc = self.doc,
@@ -2078,15 +2113,11 @@ class ModuleDef:
         # be matched against types used elsewhere
         print >> out, tmpl.gccxmlinput_start.format(self._formatted_includes(),TEST_NS)
 
-        # declare a bunch of dummy functions with the arguments we want gccxml
-        # to parse for us
-        for i,x in enumerate(self._funcs_with_overload()):
-            print >> out, 'void dummy_func_{0}({1});\n'.format(i,x.args)
+        for c in self.classes:
+            c.gccxml_input(out)
 
-        for i,c in enumerate(self.classes):
-            # create a typedef so we don't have to worry about default arguments
-            # and arguments specified by typedef in templates
-            print >> out, 'typedef {0} class_type_{1};\n'.format(c.type,i)
+        for f in self.functions.itervalues():
+            f.gccxml_input(out)
 
         for i,conv in enumerate(self.topy):
             print >> out, 'typedef {0} topy_type_{1};\n'.format(conv[0],i)
@@ -2101,29 +2132,18 @@ class ModuleDef:
             if c.template:
                 print >> out, 'template class {0};\n'.format(c.type)
 
-    def _collect_overload_arg_lists(self,tns,conv):
-        for i,x in enumerate(self._funcs_with_overload()):
-            f = tns.find('dummy_func_{0}'.format(i))[0]
-            assert isinstance(f,gccxml.CPPFunction)
-            x.args = f.args
-
-        for i,c in enumerate(self.classes):
-            t = tns.find('class_type_{0}'.format(i))[0]
-            c.type = t
-
-        for i,to in enumerate(self.topy):
-            conv.add_conv(tns.find('topy_type_{0}'.format(i))[0],to=to[1])
-
-        for i,from_ in enumerate(self.frompy):
-            conv.add_conv(tns.find('frompy_type_{0}'.format(i))[0],from_=(False,from_[1]))
-
     def _formatted_includes(self):
         return "\n".join('#include "{0}"'.format(i) for i in self.includes)
 
     def write_file(self,path,scope):
         tns = scope.find(TEST_NS)[0]
         conv = Conversion(tns)
-        self._collect_overload_arg_lists(tns,conv)
+
+        for i,to in enumerate(self.topy):
+            conv.add_conv(tns.find('topy_type_{0}'.format(i))[0],to=to[1])
+
+        for i,from_ in enumerate(self.frompy):
+            conv.add_conv(tns.find('frompy_type_{0}'.format(i))[0],from_=(False,from_[1]))
 
         out = Output(
             open(os.path.join(path, self.name + '.cpp'),'w'),
@@ -2140,7 +2160,7 @@ class ModuleDef:
         classes = {}
 
         for cdef in self.classes:
-            c = TypedClassDef(scope,cdef)
+            c = TypedClassDef(scope,cdef,tns)
             classes[c.type] = c
 
             # these assume the class has copy constructors
@@ -2189,7 +2209,7 @@ class ModuleDef:
 
         functable = []
         for f in self.functions.itervalues():
-            tentry,body = TypedDefDef(scope,f).output(conv)
+            tentry,body = TypedDefDef(scope,f,tns).output(conv)
             print >> out.cpp, body
             functable.append(tentry)
 
@@ -2207,20 +2227,6 @@ class ModuleDef:
 
         print >> out.h, tmpl.header_end
 
-    def _funcs_with_overload(self):
-        """yields function-like objects that have a non-empty overload defined"""
-
-        for c in self.classes:
-            if c.constructor:
-                for x in c.constructor.overloads:
-                    if x.args: yield x
-            for m in c.methods.itervalues():
-                for x in m.overloads:
-                    if x.args: yield x
-
-        for f in self.functions.itervalues():
-            for x in f.overloads:
-                if x.args: yield x
 
 
 pykeywords = set((
@@ -2281,7 +2287,7 @@ class tag_Class(tag):
 
 class tag_Init(tag):
     def __init__(self,args):
-        self.r = InitDef()
+        self.r = DefDef()
         self.r.overloads.append(Overload(args=args.get("overload")))
 
 class tag_Module(tag):
