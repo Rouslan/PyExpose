@@ -136,6 +136,28 @@ struct obj_<% name %> {
     }
 == endfor
 };
+== if template_assoc
+
+template<> inline PyTypeObject *get_type<<% original_type %> >() {
+    return get_obj_<% name %>Type();
+}
+
+==     if canholdref or not new_init
+<% original_type %> &cast_base_<% name %>(PyObject *o);
+template<> inline <% original_type %> &cast_base<<% original_type %> >(PyObject *o) {
+    return cast_base_<% name %>(o);
+}
+==     else
+template<> inline <% original_type %> &cast_base<<% original_type %> >(PyObject *o) {
+    return reinterpret_cast<obj_<% name %>*>(o)->base;
+}
+==     endif
+
+<% original_type %> &get_base_<% name %>(PyObject *o<% ',bool safe=true' if bool_arg_get %>);
+template<> inline <% original_type %> &get_base<<% original_type %> >(PyObject *o) {
+    return get_base_<% name %>(o);
+}
+== endif
 ''')
 
 
@@ -704,10 +726,10 @@ get_base = '''
 }}
 '''
 
-header_start = '''
+header_start = env.from_string('''
 #pragma once
-#ifndef {module}_h
-#define {module}_h
+#ifndef <% module %>_h
+#define <% module %>_h
 
 #ifdef __GNUC__
     #define LIKELY(X) __builtin_expect(static_cast<bool>(X),1)
@@ -726,26 +748,40 @@ header_start = '''
 #endif
 
 
-#define PY_MEM_NEW_DELETE void *operator new(size_t s) {{            \\
+#define PY_MEM_NEW_DELETE void *operator new(size_t s) {            \\
         void *ptr = PyMem_Malloc(s);                                \\
         if(!ptr) throw std::bad_alloc();                            \\
         return ptr;                                                 \\
-    }}                                                               \\
+    }                                                               \\
                                                                     \\
-    void operator delete(void *ptr) {{                               \\
+    void operator delete(void *ptr) {                               \\
         PyMem_Free(ptr);                                            \\
-    }}
+    }
 
 
 #pragma GCC visibility push(hidden)
 
 /* when thrown, indicates that a PyErr_X function was already called with the
    details of the exception. As such, it carries no information of its own. */
-struct py_error_set {{}};
+struct py_error_set {};
 
-enum storage_mode {{UNINITIALIZED = 0,CONTAINS,MANAGEDREF}};
+enum storage_mode {UNINITIALIZED = 0,CONTAINS,MANAGEDREF};
 
-'''
+== if template_assoc
+template<typename T> inline PyTypeObject *get_type() {
+    int dont_instantiate[sizeof(T) < 0 ? 1 : -1];
+    return 0;
+}
+
+template<typename T> inline T &cast_base(PyObject *o) {
+    int dont_instantiate[sizeof(T) < 0 ? 1 : -1];
+}
+
+template<typename T> inline T &get_base(PyObject *o) {
+    int dont_instantiate[sizeof(T) < 0 ? 1 : -1];
+}
+== endif
+''')
 
 header_end = '''
 #pragma GCC visibility pop
@@ -766,9 +802,9 @@ overload_func_call = env.from_string('''
         return <% errval %>;
 ''')
 
-typecheck_start = '''
-{type} &get_base_{name}(PyObject *x,bool safe = true) {{
-'''
+typecheck_start = env.from_string('''
+<% type %> &get_base_<% name %>(PyObject *x,bool safe<% ' = true' if not template_assoc %>) {
+''')
 
 # The
 # reinterpret_cast<long>(static_cast<{type}*>(reinterpret_cast<{othertype}*>(1))) != 1

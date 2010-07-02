@@ -608,10 +608,9 @@ class TestConversion(TestCompile):
         class object {
             PyObject *_ptr;
         public:
-            object(borrowed_ref r) : _ptr(r._ptr) {
-                Py_INCREF(_ptr);
-            }
+            object(borrowed_ref r) : _ptr(r._ptr) { Py_INCREF(_ptr); }
             object(new_ref r) : _ptr(r._ptr) {}
+            object(const object &b) : _ptr(b._ptr) { Py_INCREF(_ptr); }
             ~object() {
                 Py_DECREF(_ptr);
             }
@@ -646,6 +645,52 @@ class TestConversion(TestCompile):
     def runTest(self):
         tm = self.compile()
         self.assertEqual(tm.dup_tuple('kitty'),('kitty','kitty'))
+
+
+class TestTemplateAssoc(TestCompile):
+    header_file = TestConversion.header_file + '''
+        template<typename T> PyTypeObject *get_type();
+        template<typename T> T &get_base(PyObject *o);
+
+        template<typename T> class pyptr : public object {
+        public:
+            template<typename REF> pyptr(REF r) : object(r) { assert(PyObject_IsInstance(ptr(),get_type<T>())); }
+            pyptr(const pyptr<T> &b) : object(b) {}
+
+            T &base() {
+                return get_base<T>(ptr());
+            }
+            const T &base() const {
+                return get_base<T>(ptr());
+            }
+            T &operator*() { return base(); }
+            const T &operator*() const { return base(); }
+            T *operator->() { return &base(); }
+            const T *operator->() const { return &base(); }
+        };
+
+        class Thing {
+        public:
+            int func() { return 6; }
+        };
+
+        int getval(pyptr<Thing> t) {
+            return t->func();
+        }
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h" template-assoc="true">
+            <from-pyobject type="pyptr&lt;Thing&gt;">pyptr&lt;Thing&gt;(borrowed_ref(<val/>))</from-pyobject>
+            <to-pyobject type="pyptr&lt;Thing&gt;"><val/>.get_new_ref()</to-pyobject>
+            <class type="Thing"/>
+            <def func="getval"/>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+        self.assertEqual(tm.getval(tm.Thing()),6)
 
 
 class TestSubscriptAttr(TestCompile):

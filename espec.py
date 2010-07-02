@@ -280,10 +280,11 @@ class MultiInheritNode:
             other = self.main_type.name)
         return r
 
-    def downcast_func(self,features):
-        r = tmpl.typecheck_start.format(
+    def downcast_func(self,features,template_assoc):
+        r = tmpl.typecheck_start.render(
             name = self.main_type.name,
-            type = self.main_type.type.canon_name)
+            type = self.main_type.type.canon_name,
+            template_assoc = template_assoc)
 
         for d in self.derived_nodes:
             r += d.output(self)
@@ -1208,9 +1209,9 @@ class TypedClassDef:
             features = self.features,
             new_init = self.new_initializes)
 
-    def get_base_func(self):
+    def get_base_func(self,module):
         if self.has_multi_inherit_subclass():
-            return self.heirarchy_chain().downcast_func(self.features)
+            return self.heirarchy_chain().downcast_func(self.features,module.template_assoc)
         else:
             return tmpl.get_base.format(
                 type = self.type.typestr(),
@@ -1475,10 +1476,13 @@ class TypedClassDef:
         print >> out.h, tmpl.classdef.render(
             name = self.name,
             type = typestr,
+            original_type = self.type.typestr(),
+            bool_arg_get = self.has_multi_inherit_subclass(),
             new_init = self.new_initializes,
             dynamic = self.dynamic,
             canholdref = self.features.managed_ref,
-            constructors = self.constructor_args()),
+            constructors = self.constructor_args(),
+            template_assoc = module.template_assoc),
 
         if virtmethods:
             print >> out.h, tmpl.subclass_meth.render(name=self.name)
@@ -1563,7 +1567,7 @@ class TypedClassDef:
             new_init = self.new_initializes,
             destructor = destructor,
             initcode = self.constructor.output(out.conv,typestr),
-            module = module,
+            module = module.name,
             destructref = destructref,
             doc = self.doc,
             getsetref = getsetref,
@@ -2100,8 +2104,10 @@ def methods_that_return(c):
 
 
 class ModuleDef:
-    def __init__(self,name):
+    def __init__(self,name,includes=None,template_assoc=False):
         self.name = name
+        self.includes = includes or []
+        self.template_assoc = template_assoc
         self.classes = []
         self.functions = {}
         self.doc = ''
@@ -2154,7 +2160,9 @@ class ModuleDef:
             includes = self._formatted_includes(),
             module = self.name)
 
-        print >> out.h, tmpl.header_start.format(module = self.name)
+        print >> out.h, tmpl.header_start.render(
+            module = self.name,
+            template_assoc = self.template_assoc)
 
 
         classes = {}
@@ -2202,10 +2210,10 @@ class ModuleDef:
             print >> out.cpp, c.cast_base_func()
 
         for c in classes:
-            print >> out.cpp, c.get_base_func()
+            print >> out.cpp, c.get_base_func(self)
 
         for c in classes:
-            c.output(out,self.name)
+            c.output(out,self)
 
         functable = []
         for f in self.functions.itervalues():
@@ -2292,8 +2300,7 @@ class tag_Init(tag):
 
 class tag_Module(tag):
     def __init__(self,args):
-        self.r = ModuleDef(args["name"])
-        self.r.includes = stripsplit(args["include"])
+        self.r = ModuleDef(args["name"],stripsplit(args["include"]),parse_bool(args,'template-assoc'))
 
     def child(self,name,data):
         if name == "class":
@@ -2309,7 +2316,7 @@ class tag_Module(tag):
 
 class tag_ToFromPyObject(tag):
     def __init__(self,args):
-        self.type = args['type']
+        self.type = args.get('type')
         self.replacement = ''
 
     def text(self,data):
@@ -2318,6 +2325,8 @@ class tag_ToFromPyObject(tag):
     def child(self,name,data):
         if name == 'val':
             self.replacement += '{0}'
+        elif name == 'type':
+            self.replacement += '{1}'
 
     def end(self):
         return self.type,self.replacement
@@ -2530,7 +2539,8 @@ tagdefs = {
     'def' : tag_Def,
     'to-pyobject' : tag_ToFromPyObject,
     'from-pyobject' : tag_ToFromPyObject,
-    'val' : tag
+    'val' : tag,
+    'type' : tag
 }
 
 def getspec(path):
