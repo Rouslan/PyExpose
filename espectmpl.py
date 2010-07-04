@@ -157,6 +157,10 @@ template<> inline <% original_type %> &cast_base<<% original_type %> >(PyObject 
 template<> inline <% original_type %> &get_base<<% original_type %> >(PyObject *o) {
     return get_base_<% name %>(o);
 }
+
+template<> struct wrapped_type<<% original_type %> > {
+    typedef obj_<% name %> type;
+};
 == endif
 ''')
 
@@ -168,58 +172,65 @@ classtypedef = env.from_string('''
     endif
     @>sizeof(obj_<% name %>)<@ endmacro @>
 
+== if initcode
 int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
-== if derived
+==     if derived
     if(UNLIKELY(
-==     for d in derived
+==         for d in derived
         <@ if not loop.first @>|| <@ endif @>PyObject_IsInstance(reinterpret_cast<PyObject*>(self),reinterpret_cast<PyObject*>(get_obj_<% d %>Type()))
-==     endfor
+==         endfor
     )) {
         PyErr_SetString(PyExc_TypeError,init_on_derived_msg);
         return -1;
     }
-== endif
+==     endif
 
     <% type %> *addr = &self->base;
 
-== if features.managed_ref or (destructor and not new_init)
+==     if features.managed_ref or (destructor and not new_init)
     /* before we can call the constructor, the destructor needs to be called if
        we already have an initialized object */
     switch(self->mode) {
-==     if features.managed_ref
+==         if features.managed_ref
     case MANAGEDREF:
-==         if destructor
+==             if destructor
         reinterpret_cast<ref_<% name %>*>(self)->base.<% destructor %>();
-==         endif
+==             endif
         addr = &reinterpret_cast<ref_<% name %>*>(self)->base;
         break;
-==     endif
-==     if destructor
+==         endif
+==         if destructor
     case CONTAINS:
         self->base.<% destructor %>();
         break;
-==     endif
+==         endif
     default:
         self->mode = CONTAINS;
         break;
     }
-== elif destructor
+==     elif destructor
     self->base.<% destructor %>();
-== elif not new_init
+==     elif not new_init
     self->mode = CONTAINS;
-== endif
+==     endif
     try {
 <% initcode %>
     } EXCEPT_HANDLERS(-1)
 }
+== endif
 
-== if new_init
+== if new_init or not initcode
 PyObject *obj_<% name %>_new(PyTypeObject *type,PyObject *,PyObject *) {
+== if new_init
     try {
         obj_<% name %> *ptr = reinterpret_cast<obj_<% name %>*>(type->tp_alloc(type,0));
         if(ptr) new(&ptr->base) <% type %>();
         return reinterpret_cast<PyObject*>(ptr);
     } EXCEPT_HANDLERS(0)
+== else
+    PyErr_SetString(PyExc_TypeError,"The <% name %> type cannot be instantiated");
+    return 0;
+== endif
 }
 == endif
 
@@ -275,8 +286,8 @@ inline PyTypeObject *create_obj_<% name %>Type() {
 <@ if richcompare @>    type->tp_richcompare = reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare);<@ endif @>
 <@ if '__iter__' in specialmethods @>    type->tp_iter = reinterpret_cast<getiterfunc>(&obj_<% name %>___iter__);<@ endif @>
 <@ if 'next' in specialmethods @>    type->tp_iter = reinterpret_cast<iternextfunc>(&obj_<% name %>_next);<@ endif @>
-    type->tp_init = reinterpret_cast<initproc>(&obj_<% name %>_init);
-<@ if new_init @>    type->tp_new = &obj_<% name %>_new;<@ endif @>
+<@ if initcode @>    type->tp_init = reinterpret_cast<initproc>(&obj_<% name %>_init);<@ endif @>
+<@ if new_init or not initcode @>    type->tp_new = &obj_<% name %>_new;<@ endif @>
 
     return type;
 }
@@ -318,9 +329,9 @@ PyTypeObject obj_<% name %>Type = {
     0,                         /* tp_descr_get */
     0,                         /* tp_descr_set */
     0,                         /* tp_dictoffset */
-    reinterpret_cast<initproc>(&obj_<% name %>_init), /* tp_init */
+    <@ if initcode @>reinterpret_cast<initproc>(&obj_<% name %>_init)<@ else @>0<@ endif @>, /* tp_init */
     0,                         /* tp_alloc */
-    <@ if new_init @>&obj_<% name %>_new<@ else @>0<@ endif @> /* tp_new */
+    <@ if new_init or not initcode @>&obj_<% name %>_new<@ else @>0<@ endif @> /* tp_new */
 };
 == endif
 ''')
@@ -669,7 +680,7 @@ extern "C" SHARED(void) init<% module %>(void) {
 ==     if c.base
     obj_<% c.name %>Type.tp_base = get_obj_<% c.base %>Type();
 ==     endif
-==     if not c.new_init
+==     if not (c.new_init or c.no_init)
     obj_<% c.name %>Type.tp_new = &PyType_GenericNew;
 ==     endif
     if(UNLIKELY(PyType_Ready(&obj_<% c.name %>Type) < 0)) return;
@@ -780,6 +791,10 @@ template<typename T> inline T &cast_base(PyObject *o) {
 template<typename T> inline T &get_base(PyObject *o) {
     int dont_instantiate[sizeof(T) < 0 ? 1 : -1];
 }
+
+template<typename T> struct wrapped_type {
+    typedef void type;
+};
 == endif
 ''')
 

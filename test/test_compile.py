@@ -740,5 +740,23 @@ class TestSubscriptAttr(TestCompile):
         self.assertEqual(thing.getnested(),-2)
 
 
+class TestNoInit(TestCompile):
+    header_file = '''
+        struct X {};
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="X">
+                <no-init/>
+            </class>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+        self.assertRaises(TypeError,tm.X)
+
+
 if __name__ == '__main__':
     unittest.main()

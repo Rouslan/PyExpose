@@ -960,6 +960,13 @@ class MethodDict(object):
         return self.data.itervalues()
 
 
+class _NoInit:
+    """A special value meaning no __init__ method is to be created"""
+    def __nonzero__(self):
+        return False
+
+NoInit = _NoInit()
+
 class ClassDef:
     def __init__(self,name,type,new_initializes=False):
         self.name = name
@@ -1040,7 +1047,7 @@ class TypedClassDef:
         if not isinstance(self.type,gccxml.CPPClass):
             raise SpecificationError('"{0}" is not a class or struct'.format(classdef.type))
 
-        self.constructor = TypedInitDef(self.type,classdef.constructor,tns)
+        self.constructor = None if classdef.constructor is NoInit else TypedInitDef(self.type,classdef.constructor,tns)
 
         # TODO: allow this by putting the function call inside ob_<name>_dealloc
         if '__del__' in classdef.methods.data:
@@ -1566,7 +1573,7 @@ class TypedClassDef:
             features = self.features,
             new_init = self.new_initializes,
             destructor = destructor,
-            initcode = self.constructor.output(out.conv,typestr),
+            initcode = self.constructor and self.constructor.output(out.conv,typestr),
             module = module.name,
             destructref = destructref,
             doc = self.doc,
@@ -2229,6 +2236,7 @@ class ModuleDef:
                 'name' : c.name,
                 'dynamic' : c.dynamic,
                 'new_init' : c.new_initializes,
+                'no_init' : not c.constructor,
                 'base' : c.static_from_dynamic and c.bases[0].name}
                     for c in classes)
         )
@@ -2279,8 +2287,15 @@ class tag_Class(tag):
         t = args['type']
         self.r = ClassDef(get_valid_py_ident(args.get("name"),t),t,parse_bool(args,'new-initializes'))
 
+    @staticmethod
+    def noinit_means_noinit():
+        raise SpecificationError("You can't have both no-init and init")
+
     def child(self,name,data):
         if name == 'init':
+            if self.r.constructor is NoInit:
+                tag_Class.noinit_means_noinit()
+
             if self.r.constructor: join_func(self.r.constructor,data)
             else: self.r.constructor = data
         elif name == "doc":
@@ -2291,6 +2306,10 @@ class tag_Class(tag):
             self.r.vars.append(data)
         elif name == 'def':
             add_func(self.r.methods,data)
+        elif name == 'no-init':
+            if self.r.constructor:
+                tag_Class.noinit_means_noinit()
+            self.r.constructor = NoInit
 
 
 class tag_Init(tag):
@@ -2500,7 +2519,7 @@ class tag_Def(tag):
         arity = args.get('arity')
         if arity:
             def badval():
-                raise ParseError('"arity" must be a positive integer')
+                raise ParseError('"arity" must be a non-negative integer')
 
             try:
                 arity = int(arity)
@@ -2540,7 +2559,7 @@ tagdefs = {
     'to-pyobject' : tag_ToFromPyObject,
     'from-pyobject' : tag_ToFromPyObject,
     'val' : tag,
-    'type' : tag
+    'no-init' : tag
 }
 
 def getspec(path):

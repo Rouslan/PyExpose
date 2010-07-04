@@ -381,6 +381,19 @@ public:
   </xsd:element>
 
 
+  <xsd:element name="no-init">
+    <xsd:annotation>
+      <xsd:documentation>
+        <p>Specifies that the class will not have an __init__ method. Unless
+        <var>new-initializes</var> is specified, the class cannot be
+        instantiated directly in Python code. Attempting to do so will raise a
+        TypeError.</p>
+      </xsd:documentation>
+    </xsd:annotation>
+    <xsd:complexType/>
+  </xsd:element>
+
+
   <xsd:element name="property">
     <xsd:complexType>
       <xsd:choice maxOccurs="unbounded" minOccurs="0">
@@ -441,6 +454,7 @@ public:
     <xsd:complexType>
       <xsd:choice maxOccurs="unbounded" minOccurs="0">
         <xsd:element ref="init"/>
+        <xsd:element ref="no-init"/>
         <xsd:element ref="def"/>
         <xsd:element ref="property"/>
         <xsd:element ref="attr"/>
