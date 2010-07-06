@@ -564,16 +564,20 @@ class TestConstructorDestructor(TestCompile):
 class TestVirtualMethod(TestCompile):
     header_file = '''
         struct Thing {
-            virtual double factor() const { return 22; }
-            double getval() const { return factor() * 2; }
+            virtual double factor1() const { return 22; }
+            virtual double factor2() const { return 33; }
+            double getval1() const { return factor1() * 2; }
+            double getval2() const { return factor2() * 3; }
         };
     '''
 
     spec_file = '''<?xml version="1.0"?>
         <module name="testmodule" include="main.h">
             <class type="Thing">
-                <def func="factor"/>
-                <def func="getval"/>
+                <def func="factor1"/>
+                <def func="getval1"/>
+                <def func="factor2" bridge-virtual="false"/>
+                <def func="getval2"/>
             </class>
         </module>
     '''
@@ -581,12 +585,17 @@ class TestVirtualMethod(TestCompile):
     def runTest(self):
         tm = self.compile()
         thing = tm.Thing()
-        self.assertEqual(thing.getval(),44)
+        self.assertEqual(thing.getval1(),44)
+
         class SubClass(tm.Thing):
-            def factor(self):
+            def factor1(self):
                 return 3
+            def factor2(self):
+                return 5
+
         thing = SubClass()
-        self.assertEqual(thing.getval(),6)
+        self.assertEqual(thing.getval1(),6)
+        self.assertEqual(thing.getval2(),99)
 
 
 class TestConversion(TestCompile):

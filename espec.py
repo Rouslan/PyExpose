@@ -304,13 +304,14 @@ class Output:
 
 
 class Overload:
-    def __init__(self,func=None,retsemantic=None,args=None,static=False,arity=None,assign=False):
+    def __init__(self,func=None,retsemantic=None,args=None,static=False,arity=None,assign=False,bridge_virt=True):
         self.func = func
         self.retsemantic = retsemantic
         self.args = args
         self.static = static
         self.arity = arity
         self.assign = assign
+        self.bridge_virt = bridge_virt
         self.uniquenum = get_unique_num()
 
     def gccxml_input(self,outfile):
@@ -366,6 +367,7 @@ class TypedOverload:
         self.retsemantic = overload and overload.retsemantic
         self.argbinds = [BindableArg(a) for a in func.args]
         self.explicit_static = overload.static if overload else False
+        self.bridge_virt = overload.bridge_virt if overload else False
         self._returns = None
 
         self.assign = overload and overload.assign
@@ -427,7 +429,21 @@ def choose_overload(ov,options,tns):
         'No overload matches the given arguments. The options are:' +
         ''.join('\n({0})'.format(','.join(map(str,f.args))) for f in options))
 
+
+def append_except(f):
+    @functools.wraps(f)
+    def wrapper(self,*args,**kwds):
+        try:
+            return f(self,*args,**kwds)
+        except err.Error as e:
+            e.info[self.what] = self.name
+            raise
+    return wrapper
+
 class TypedDefDef(object):
+    what = 'function'
+
+    @append_except
     def __init__(self,scope,defdef,tns):
         self.name = defdef.name
         self.doc = defdef.doc
@@ -450,6 +466,7 @@ class TypedDefDef(object):
                 if newcf: cf = newcf
 
             self.overloads.extend(choose_overload(ov,cf,tns))
+
 
     def call_code_base(self,ov):
         return ov.func.canon_name
@@ -509,6 +526,7 @@ class TypedDefDef(object):
         assert len(self.overloads) == 1
         return ind.line(self.call_code(conv,self.overloads[0]).output([],ind))
 
+    @append_except
     def _output(self,conv,prolog,type_extra,selfvar,funcnameprefix):
         arglens = [len(ov.args) for ov in self.overloads]
         maxargs = max(len(ov.args) for ov in self.overloads)
@@ -562,6 +580,7 @@ def base_prefix(x):
 
 
 class TypedMethodDef(TypedDefDef):
+    what = 'method'
     selfvar = 'reinterpret_cast<PyObject*>(self)'
 
     def __init__(self,classdef,defdef,tns):
@@ -688,6 +707,7 @@ class SpecialMethod(TypedMethodDef):
         assert self.rettype == SF_RET_OBJ
         return super(SpecialMethod,self).call_code(conv,ov)
 
+    @append_except
     def output(self,conv,ind=Tab(2)):
         errval = '-1'
         if self.rettype in (SF_RET_INT,SF_RET_INT_VOID,SF_RET_INT_BOOL):
@@ -781,8 +801,8 @@ class TypedPropertyDef:
     def __init__(self,classdef,propdef,tns):
         self.name = propdef.name
         self.doc = propdef.doc
-        self.get = SpecialMethod(classdef,propdef.get,tns,SF_NO_ARGS,SF_RET_OBJ)
-        self.set = SpecialMethod(classdef,propdef.set,tns,SF_ONE_ARG,SF_RET_INT_VOID)
+        self.get = propdef.get and SpecialMethod(classdef,propdef.get,tns,SF_NO_ARGS,SF_RET_OBJ)
+        self.set = propdef.set and SpecialMethod(classdef,propdef.set,tns,SF_ONE_ARG,SF_RET_INT_VOID)
 
     def output(self,conv):
         r = ''
@@ -847,6 +867,8 @@ class AttrAccess(object):
         return self.seq[0] + ''.join('.'+s if isinstance(s,basestring) else '[{0}]'.format(s) for s in self.seq[1:])
 
 class TypedMemberDef:
+    what = 'attr'
+
     def __init__(self,classdef,memdef):
         self.classdef = classdef
         self.name = memdef.name
@@ -857,6 +879,7 @@ class TypedMemberDef:
     def getter_type(self,conv):
         return self.cmember.type if conv.member_macro(self.cmember.type) else gccxml.CPPReferenceType(self.cmember.type)
 
+    @append_except
     def output(self,conv):
         r = ''
         if self.really_a_property(conv):
@@ -1038,6 +1061,9 @@ def bindpyssize(conv,f,arg):
 
 
 class TypedClassDef:
+    what = 'class'
+
+    @append_except
     def __init__(self,scope,classdef,tns):
         self.name = classdef.name
         self.type = classdef.get_type(tns)
@@ -1446,6 +1472,7 @@ class TypedClassDef:
             'argvals' : forwarding_arg_vals(m.args)}
                 for m in self.type.members if isinstance(m,gccxml.CPPConstructor) and not varargs(m))
 
+    @append_except
     def output(self,out,module):
         has_mi_subclass = self.has_multi_inherit_subclass()
 
@@ -1463,7 +1490,7 @@ class TypedClassDef:
         typestr = self.type.typestr()
         for m in self.methods:
             for o in m.overloads:
-                if isinstance(o.func,gccxml.CPPMethod) and o.func.virtual:
+                if isinstance(o.func,gccxml.CPPMethod) and o.func.virtual and o.bridge_virt:
                     virtmethods.append((m,o.func))
 
         if virtmethods:
@@ -1563,7 +1590,7 @@ class TypedClassDef:
                     const = m.const,
                     type = self.type.typestr(),
                     argvals = forwarding_arg_vals(m.args),
-                    pyargvals = ','.join(out.conv.to_py(a.type).format('_{0}'.format(i)) for i,a in enumerate(m.args)),
+                    pyargvals = ','.join(out.conv.topy(a.type).format('_{0}'.format(i)) for i,a in enumerate(m.args)),
                     retfrompy = out.conv.frompy(m.returns)[0].format('ret'))
 
         print >> out.cpp, tmpl.classtypedef.render(
@@ -2335,7 +2362,7 @@ class tag_Module(tag):
 
 class tag_ToFromPyObject(tag):
     def __init__(self,args):
-        self.type = args.get('type')
+        self.type = args['type']
         self.replacement = ''
 
     def text(self,data):
@@ -2387,9 +2414,9 @@ class tag_Property(tag):
             if self.r.set: join_func(self.r.set,data)
             else: self.r.set = data
 
-def parse_bool(args,prop):
-    val = args.get(prop,False)
-    if val is False: return False
+def parse_bool(args,prop,default=False):
+    val = args.get(prop,None)
+    if val is None: return default
     try:
         return {'true':True,'false':False}[val.lower()]
     except LookupError:
@@ -2533,7 +2560,8 @@ class tag_Def(tag):
             args.get('overload'),
             parse_bool(args,'static'),
             arity,
-            assign))
+            assign,
+            parse_bool(args,'bridge-virtual',True)))
 
 
     op_parse_re = re.compile(r'.*\boperator\b')

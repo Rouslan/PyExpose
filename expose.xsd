@@ -370,6 +370,17 @@ public:
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
+
+      <xsd:attribute name="bridge-virtual" type="xsd:boolean" default="true">
+        <xsd:annotation>
+          <xsd:documentation>
+            For virtual methods, if true (the default), the method will be
+            overridable in Python code. An attribute lookup must be performed to
+            determine if the method is overridden, so setting this to false
+            avoids a small amount of overhead.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
     </xsd:complexType>
   </xsd:element>
 
