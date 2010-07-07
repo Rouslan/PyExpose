@@ -368,6 +368,7 @@ typedef std::string type_stdstring;
 typedef std::wstring type_stdwstring;
 typedef void type_void;
 typedef Py_ssize_t type_py_ssize_t;
+typedef PyObject *type_pyobject;
 
 '''
 
@@ -995,7 +996,9 @@ virtmethod = env.from_string('''
     } else {
         PyObject *ret = PyObject_CallFunctionObjArgs(f,<% pyargvals %>NULL);
         if(!ret) throw py_error_set(); // TODO: throw better exception
-        <@ if ret != 'void' @>return <% retfrompy %>;<@ endif @>
+        <@ if ret != 'void' @><% rettype %> cret = <% retfrompy %>;<@ endif @>
+        Py_DECREF(ret);
+        <@ if ret != 'void' @>return cret;<@ endif @>
     }
 }
 ''')

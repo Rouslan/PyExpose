@@ -1582,16 +1582,23 @@ class TypedClassDef:
 
         if virtmethods:
             for d,m in virtmethods:
-                print >> out.cpp, tmpl.virtmethod.render(
-                    cname = self.name,
-                    name = d.name,
-                    ret = m.returns.typestr(),
-                    func = m.canon_name,
-                    const = m.const,
-                    type = self.type.typestr(),
-                    argvals = forwarding_arg_vals(m.args),
-                    pyargvals = ','.join(out.conv.topy(a.type).format('_{0}'.format(i)) for i,a in enumerate(m.args)),
-                    retfrompy = out.conv.frompy(m.returns)[0].format('ret'))
+                try:
+                    (frompy,rettype) = out.conv.frompy(m.returns) if m.returns != out.conv.void else (None,None)
+                    print >> out.cpp, tmpl.virtmethod.render(
+                        cname = self.name,
+                        name = d.name,
+                        ret = m.returns.typestr(),
+                        func = m.canon_name,
+                        const = m.const,
+                        type = self.type.typestr(),
+                        args = forwarding_args(m.args),
+                        argvals = forwarding_arg_vals(m.args),
+                        pyargvals = ''.join(out.conv.topy(a.type).format('_{0}'.format(i)) + ',' for i,a in enumerate(m.args)),
+                        retfrompy = frompy and frompy.format('ret'),
+                        rettype = rettype and rettype.typestr())
+                except err.Error as e:
+                    e.info['method'] = d.name
+                    raise
 
         print >> out.cpp, tmpl.classtypedef.render(
             dynamic = self.dynamic,
@@ -1820,7 +1827,7 @@ class Conversion:
         for x in ("bool","sint","uint","sshort","ushort","slong","ulong",
                   "float","double","long_double","size_t","py_ssize_t","schar",
                   "uchar","char","wchar_t","py_unicode","void","stdstring",
-                  "stdwstring"):
+                  "stdwstring","pyobject"):
             setattr(self,x,tns.find("type_"+x)[0])
 
         try:
@@ -1834,7 +1841,6 @@ class Conversion:
         self.cstring = cptr(cconst(self.char))
         self.cmutstring = cptr(self.char)
         self.cwstring = cptr(cconst(self.wchar_t))
-        self.pyobject = cptr(gccxml.CPPBasicType("PyObject"))
 
 
         fl = "PyInt_FromLong({0})"
@@ -2021,7 +2027,7 @@ class Conversion:
             var = frompytype.typestr("_{0}".format(i))
             name = '"{0}"'.format(a.name) if a.name and use_kwds else '0'
             if a.default:
-                prep += '{0}temp = ga({1},false);\n{0}{2} = temp ? {3} : {4};\n'.format(indent,name,var,frompy.format('temp'),a.defult)
+                prep += '{0}temp = ga({1},false);\n{0}{2} = temp ? {3} : {4};\n'.format(indent,name,var,frompy.format('temp'),a.default)
             else:
                 prep += indent.line('{1} = {2};'.format(indent,var,frompy.format('ga({0},true)'.format(name))))
 

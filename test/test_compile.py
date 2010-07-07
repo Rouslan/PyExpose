@@ -568,6 +568,9 @@ class TestVirtualMethod(TestCompile):
             virtual double factor2() const { return 33; }
             double getval1() const { return factor1() * 2; }
             double getval2() const { return factor2() * 3; }
+
+            virtual int add(int a,int b) { return a + b; }
+            int add56() { return add(5,6); }
         };
     '''
 
@@ -578,6 +581,8 @@ class TestVirtualMethod(TestCompile):
                 <def func="getval1"/>
                 <def func="factor2" bridge-virtual="false"/>
                 <def func="getval2"/>
+                <def func="add"/>
+                <def func="add56"/>
             </class>
         </module>
     '''
@@ -592,10 +597,13 @@ class TestVirtualMethod(TestCompile):
                 return 3
             def factor2(self):
                 return 5
+            def add(self,a,b):
+                return a * b
 
         thing = SubClass()
         self.assertEqual(thing.getval1(),6)
         self.assertEqual(thing.getval2(),99)
+        self.assertEqual(thing.add56(),30)
 
 
 class TestConversion(TestCompile):
