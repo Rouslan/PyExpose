@@ -98,7 +98,7 @@ classdef = env.from_string('''
 extern PyTypeObject <% '*' if dynamic %>obj_<% name %>Type;
 inline PyTypeObject *get_obj_<% name %>Type() { return <% '&' if not dynamic %>obj_<% name %>Type; }
 
-== if canholdref
+== if features.managed_ref
 struct ref_<% name %> {
     PyObject_HEAD
     storage_mode mode;
@@ -120,21 +120,30 @@ struct ref_<% name %> {
 
 struct obj_<% name %> {
     PyObject_HEAD
-== if canholdref or not new_init
+== if features.managed_ref or not new_init
     storage_mode mode;
 == endif
+== if uninstantiatable
+    /* a dummy type whose offset in the struct should be the same as any derived
+       type's */
+    union {
+        double a;
+        void *b;
+    } base;
+== else
     <% type %> base;
 
     PY_MEM_NEW_DELETE
 
-== for con in constructors
+==     for con in constructors
     obj_<% name %>(<% con.args %>) : base(<% con.argvals %>) {
         PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
-==     if canholdref or not new_init
+==         if features.managed_ref or not new_init
         mode = CONTAINS;
-==     endif
+==         endif
     }
-== endfor
+==     endfor
+== endif
 };
 == if template_assoc
 
@@ -142,7 +151,7 @@ template<> inline PyTypeObject *get_type<<% original_type %> >() {
     return get_obj_<% name %>Type();
 }
 
-==     if canholdref or not new_init
+==     if features.managed_ref or not new_init
 <% original_type %> &cast_base_<% name %>(PyObject *o);
 template<> inline <% original_type %> &cast_base<<% original_type %> >(PyObject *o) {
     return cast_base_<% name %>(o);
@@ -404,6 +413,7 @@ const char *not_init_msg = "This object has not been initialized. Its __init__ m
 const char *unspecified_err_msg = "unspecified error";
 const char *no_keywords_msg = "keyword arguments are not accepted";
 const char *init_on_derived_msg = "__init__ cannot be used directly on a derived type";
+const char *not_implemented_msg = "This method is not implemented";
 
 
 struct get_arg {{
@@ -717,7 +727,11 @@ cast_base = env.from_string('''
         return reinterpret_cast<ref_<% name %>*>(o)->base;
 ==     endif
     case CONTAINS:
+==     if uninstantiatable
+        return reinterpret_cast<<% type %>&>(reinterpret_cast<obj_<% name %>*>(o)->base);
+==     else
         return reinterpret_cast<obj_<% name %>*>(o)->base;
+==     endif
     default:
         PyErr_SetString(PyExc_RuntimeError,not_init_msg);
         throw py_error_set();
@@ -992,7 +1006,11 @@ virtmethod = env.from_string('''
     PyObject *f = PyObject_GetAttrString(self(),"<% name %>");
     if(!f) throw py_error_set(); // TODO: throw better exception
     if(PyCFunction_Check(f) && PyCFunction_GET_FUNCTION(f) == reinterpret_cast<PyCFunction>(&obj_<% cname %>_method_<% name %>)) {
+== if pure
+        PyErr_SetString(PyExc_NotImplementedError,not_implemented_msg);
+== else
         <% 'return ' if ret != 'void' %><% type %>::<% func %>(<% argvals %>);
+== endif
     } else {
         PyObject *ret = PyObject_CallFunctionObjArgs(f,<% pyargvals %>NULL);
         if(!ret) throw py_error_set(); // TODO: throw better exception

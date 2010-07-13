@@ -353,6 +353,13 @@ class CallCode(object):
             return self.code.format(joinargs(args[0:-1]),args[-1])
         return self.code.format(joinargs(args))
 
+class PureVirtualCallCode(object):
+    def __init__(self,errval):
+        self.errval = errval
+
+    def output(self,args,ind):
+        return '{0}PyErr_SetString(PyExc_NotImplementedError,not_implemented_msg);\n{0}return {1};'.format(ind,self.errval)
+
 class BindableArg:
     def __init__(self,arg,val=None):
         self.arg = arg
@@ -578,6 +585,11 @@ def base_prefix(x):
 
     return 'base.' + x.canon_name
 
+def pure_virtual(x):
+    return isinstance(x,gccxml.CPPMethod) and x.pure_virtual
+
+def is_virtual(x):
+    return isinstance(x,gccxml.CPPMethod) and x.virtual
 
 class TypedMethodDef(TypedDefDef):
     what = 'method'
@@ -603,7 +615,7 @@ class TypedMethodDef(TypedDefDef):
                 return ov.func.full_name
 
             f = ov.func.canon_name
-            if ov.func.virtual:
+            if is_virtual(ov.func):
                 # don't bother calling the overridden method from X_virt_handler
                 f = self.classdef.type.typestr() + '::' + f
             return 'base.' + f
@@ -611,6 +623,9 @@ class TypedMethodDef(TypedDefDef):
         return super(TypedMethodDef,self).call_code_base(ov)
 
     def call_code(self,conv,ov):
+        if pure_virtual(ov.func):
+            return PureVirtualCallCode('0')
+
         if ov.retsemantic == RET_SELF:
             cc = self.call_code_mid(conv,ov)
             cc.code += '; Py_INCREF({0}); return {0};'.format(self.selfvar)
@@ -622,6 +637,33 @@ class TypedMethodDef(TypedDefDef):
 
     def topy(self,conv,t,retsemantic):
         return conv.topy(t,retsemantic,'self')
+
+    def all_pure_virtual(self):
+        return all(pure_virtual(ov.func) for ov in self.overloads)
+
+    def function_call_var_args(self,conv,use_kwds,errval='0'):
+        if self.all_pure_virtual():
+            return PureVirtualCallCode(errval).output(None,Tab(2))
+
+        return super(TypedMethodDef,self).function_call_var_args(conv,use_kwds,errval)
+
+    def function_call_1arg(self,conv,ind=Tab(2),var='arg',errval='0'):
+        if self.all_pure_virtual():
+            return PureVirtualCallCode(errval).output(None,ind)
+
+        return super(TypedMethodDef,self).function_call_1arg(conv,ind,var,errval)
+
+    def function_call_narg(self,conv,vars,ind=Tab(2),errval='0'):
+        if self.all_pure_virtual():
+            return PureVirtualCallCode(errval).output(None,ind)
+
+        return super(TypedMethodDef,self).function_call_narg(conv,vars,ind,errval)
+
+    def function_call_0arg(self,conv,ind=Tab(2),errval='0'):
+        if self.all_pure_virtual():
+            return PureVirtualCallCode(errval).output(None,ind)
+
+        return super(TypedMethodDef,self).function_call_0arg(conv,ind)
 
     def output(self,conv):
         prolog = ''
@@ -1227,6 +1269,9 @@ class TypedClassDef:
         """Returns true if the memory layout for this object varies"""
         return self.has_multi_inherit_subclass() or self.features
 
+    def uninstantiatable(self):
+        return (not self.constructor) and any(pure_virtual(m) for m in self.type.members)
+
     def findbases(self,classdefs):
         assert len(self.bases) == 0
         for b in self.type.bases:
@@ -1239,10 +1284,20 @@ class TypedClassDef:
         return tmpl.cast_base.render(
             type = self.type.typestr(),
             name = self.name,
+            uninstantiatable = self.uninstantiatable(),
             features = self.features,
             new_init = self.new_initializes)
 
     def get_base_func(self,module):
+        """Generate the get_base_X(PyObject o) function.
+
+        This function checks if the supplied object is the correct type and
+        returns a reference to the wrapped type. If a subclass of the wrapped
+        type inherits from more than one type, this function also checks if the
+        wrapped type is one of the derived types and casts to it first, to allow
+        the proper pointer fix-up to happen.
+
+        """
         if self.has_multi_inherit_subclass():
             return self.heirarchy_chain().downcast_func(self.features,module.template_assoc)
         else:
@@ -1490,7 +1545,7 @@ class TypedClassDef:
         typestr = self.type.typestr()
         for m in self.methods:
             for o in m.overloads:
-                if isinstance(o.func,gccxml.CPPMethod) and o.func.virtual and o.bridge_virt:
+                if is_virtual(o.func) and o.bridge_virt:
                     virtmethods.append((m,o.func))
 
         if virtmethods:
@@ -1511,10 +1566,11 @@ class TypedClassDef:
             name = self.name,
             type = typestr,
             original_type = self.type.typestr(),
+            uninstantiatable = self.uninstantiatable(),
             bool_arg_get = self.has_multi_inherit_subclass(),
             new_init = self.new_initializes,
             dynamic = self.dynamic,
-            canholdref = self.features.managed_ref,
+            features = self.features,
             constructors = self.constructor_args(),
             template_assoc = module.template_assoc),
 
@@ -1587,6 +1643,7 @@ class TypedClassDef:
                     print >> out.cpp, tmpl.virtmethod.render(
                         cname = self.name,
                         name = d.name,
+                        pure = m.pure_virtual,
                         ret = m.returns.typestr(),
                         func = m.canon_name,
                         const = m.const,
@@ -2035,6 +2092,25 @@ class Conversion:
 
         return ['_{0}'.format(i) for i in range(len(args))], prep
 
+    def arg_parser_b(self,args,use_kwds=True,indent=Tab(2)):
+        prep = ''
+        if any(a.default for a in args):
+            convargs = [(i,a) + self.frompy(a.type) for i,a in enumerate(args)]
+            convargs.reverse()
+            for i,a,frompy,ftype in convargs:
+                prep += indent.line('{0} _{1} = {2};'.format(ftype,i,a.default))
+            prep += indent.line('switch(PyTuple_GET_SIZE(args)) {')
+            i2 = indent + 1
+            case = 'case {0}:'
+            prep += indent.line(case.format(len(args)))
+            for i,a,frompy,ftype in convargs:
+                prep += i2.line('_{0} = {1}'.format(i,frompy.format('PyTuple_GET_ITEM(args,{0})'.format(i))))
+                if a.default:
+                    prep += indent.line(case.format(i))
+            prep += '{0}    break;\n{0}default:\n{0}}}\n'
+
+        return ['_{0}'.format(i) for i in range(len(args))], prep
+
     def function_call(self,calls,errval = '0',use_kwds = True):
         """Generate code to call one function from a list of overloads.
 
@@ -2242,6 +2318,31 @@ class ModuleDef:
 
         # Sort classes by heirarchy. Base classes need to be declared before derived classes.
         classes = sorted(classes.values(),key=TypedClassDef.basecount)
+
+        # any method that is redefined in a subclass needs to be re-exposed
+        # (even virtual methods because they are always called with a
+        # type-qualifier).
+        for c in classes:
+            for m in c.methods:
+                for d in c.derived:
+                    if not any(m.name == dm.name for dm in d.methods):
+                        newm = False
+                        newo = []
+                        for o in m.overloads:
+                            if isinstance(o.func,gccxml.CPPMethod) and o.func.context is not d.type.find(o.func.canon_name)[0].context:
+                                newm = True
+                                no = copy.copy(o)
+                                no.func = copy.copy(o.func)
+                                no.func.pure_virtual = False
+                                newo.append(no)
+                            else:
+                                newo.append(o)
+
+                        if newm:
+                            newm = copy.copy(m)
+                            newm.overloads = newo
+                            newm.classdef = d
+                            d.methods.append(newm)
 
         # TODO: These functions result in the same machine code as long as the
         # types have the same alignment. They can probably be replace by a

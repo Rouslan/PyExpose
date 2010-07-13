@@ -572,6 +572,10 @@ class TestVirtualMethod(TestCompile):
             virtual int add(int a,int b) { return a + b; }
             int add56() { return add(5,6); }
         };
+
+        struct Thing2 {
+            virtual void get_str() = 0;
+        };
     '''
 
     spec_file = '''<?xml version="1.0"?>
@@ -583,6 +587,9 @@ class TestVirtualMethod(TestCompile):
                 <def func="getval2"/>
                 <def func="add"/>
                 <def func="add56"/>
+            </class>
+            <class type="Thing2">
+                <def func="get_str"/>
             </class>
         </module>
     '''
@@ -604,6 +611,9 @@ class TestVirtualMethod(TestCompile):
         self.assertEqual(thing.getval1(),6)
         self.assertEqual(thing.getval2(),99)
         self.assertEqual(thing.add56(),30)
+
+        thing = tm.Thing2()
+        self.assertRaises(NotImplementedError,thing.get_str)
 
 
 class TestConversion(TestCompile):
@@ -759,20 +769,31 @@ class TestSubscriptAttr(TestCompile):
 
 class TestNoInit(TestCompile):
     header_file = '''
-        struct X {};
+        struct Abstract {
+            virtual int method() = 0;
+        };
+
+        struct Concrete : Abstract {
+            int method() { return 5; }
+        };
     '''
 
     spec_file = '''<?xml version="1.0"?>
         <module name="testmodule" include="main.h">
-            <class type="X">
+            <class type="Abstract">
                 <no-init/>
+                <def func="method" bridge-virtual="false"/>
             </class>
+            <class type="Concrete"/>
         </module>
     '''
 
     def runTest(self):
         tm = self.compile()
-        self.assertRaises(TypeError,tm.X)
+        self.assertRaises(TypeError,tm.Abstract)
+        c = tm.Concrete()
+        self.assertEqual(c.method(),5)
+        self.assertRaises(NotImplementedError,tm.Abstract.method,c)
 
 
 if __name__ == '__main__':
