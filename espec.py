@@ -418,7 +418,7 @@ class TypedOverload:
 
     @property
     def static(self):
-        return self.explicit_static or isinstance(self.func,gccxml.CPPFunction) or (isinstance(self.func,gccxml.CPPMethod) and self.func.static)
+        return self.explicit_static or (isinstance(self.func,gccxml.CPPMethod) and self.func.static)
 
 
 def choose_overload(ov,options,tns):
@@ -591,6 +591,9 @@ def pure_virtual(x):
 def is_virtual(x):
     return isinstance(x,gccxml.CPPMethod) and x.virtual
 
+def is_static(x):
+    return isinstance(x,gccxml.CPPMethod) and x.virtual
+
 class TypedMethodDef(TypedDefDef):
     what = 'method'
     selfvar = 'reinterpret_cast<PyObject*>(self)'
@@ -607,7 +610,7 @@ class TypedMethodDef(TypedDefDef):
                     ov.bind(0,'&base' if isinstance(ov.func.args[0].type,gccxml.CPPPointerType) else 'base')
 
     def static(self):
-        return all(ov.func.static for ov in self.overloads)
+        return all(ov.static for ov in self.overloads)
 
     def call_code_base(self,ov):
         if isinstance(ov.func,gccxml.CPPMethod):
@@ -1102,12 +1105,25 @@ def bindpyssize(conv,f,arg):
             raise SpecificationError('"{0}" must accept an integer type as its first argument'.format(ov.func.name))
 
 
+def default_to_ov(args):
+    """turn default values into overloads"""
+    newargs = []
+    for a in args:
+        if a.default:
+            yield newargs[:]
+            a = copy.copy(a)
+            a.default = None
+        newargs.append(a)
+    yield newargs
+
+
 class TypedClassDef:
     what = 'class'
 
     @append_except
     def __init__(self,scope,classdef,tns):
         self.name = classdef.name
+        self.uniquenum = classdef.uniquenum
         self.type = classdef.get_type(tns)
         self.new_initializes = classdef.new_initializes
         self.no_destruct = has_trivial_destructor(self.type)
@@ -1515,17 +1531,22 @@ class TypedClassDef:
 
         return have
 
+    def cast_base_expr(self):
+        return ('get_base_{0}({{0}},false)' if self.has_multi_inherit_subclass() else 'cast_base_{0}({{0}})').format(self.name)
+
     def method_prolog(self,var='reinterpret_cast<PyObject*>(self)',ind=Tab(2)):
         return '{0}{1} &base = {2};\n'.format(
             ind,
             self.type.full_name,
-            ('get_base_{0}({1},false)' if self.has_multi_inherit_subclass() else 'cast_base_{0}({1})').format(self.name,var))
+            self.cast_base_expr().format(var))
 
     def constructor_args(self):
         return ({
-            'args' : forwarding_args(m.args),
-            'argvals' : forwarding_arg_vals(m.args)}
-                for m in self.type.members if isinstance(m,gccxml.CPPConstructor) and not varargs(m))
+            'args' : forwarding_args(args),
+            'argvals' : forwarding_arg_vals(args)}
+                for m in self.type.members
+                    if isinstance(m,gccxml.CPPConstructor) and not varargs(m)
+                for args in default_to_ov(m.args))
 
     @append_except
     def output(self,out,module):
@@ -1585,7 +1606,7 @@ class TypedClassDef:
         destructref = False
         destructor = None
         d = self.type.getDestructor()
-        if (not self.no_destruct) and d:
+        if (not (self.no_destruct or self.uninstantiatable())) and d:
             destructor = d.canon_name
             destructref = True
             print >> out.cpp, tmpl.destruct.render(
@@ -1678,7 +1699,6 @@ class TypedClassDef:
             bases = bases,
             derived = [d.name for d in self.derived],
             specialmethods = self.special_methods),
-
 
 
 def base_count(x):
@@ -2024,7 +2044,7 @@ class Conversion:
                 classdef = self.cppclasstopy.get(strip_cvq(t.type))
                 if classdef:
                     return 'reinterpret_cast<PyObject*>(new ref_{0}({2},reinterpret_cast<PyObject*>({1})))'.format(
-                        classdef.name,
+                        classdef[0].name,
                         container,
                         '{0}' if isinstance(t,gccxml.CPPReferenceType) else '*({0})')
 
@@ -2063,12 +2083,12 @@ class Conversion:
     def check_and_cast(self,t):
         st = strip_refptr(t)
         try:
-            cdef = self.cppclasstopy[st]
+            cdef,cast = self.cppclasstopy[st]
         except KeyError:
-            raise SpecificationError('No conversion from "PyObject*" to "{0}" is registered'.format(st))
+            raise SpecificationError('No conversion from "PyObject*" to "{0}" is registered'.format(st.typestr()))
 
         check ='PyObject_TypeCheck({{0}},get_obj_{0}Type())'.format(cdef.name)
-        cast = '{0}reinterpret_cast<obj_{1}*>({{0}})->base'.format('&' if isinstance(t,gccxml.CPPPointerType) else '',cdef.name)
+        if isinstance(t,gccxml.CPPPointerType): cast = '&' + cast
         return check,cast
 
     def arg_parser(self,args,use_kwds = True,indent = Tab(2)):
@@ -2076,19 +2096,33 @@ class Conversion:
 
         prep = indent.line('get_arg ga(args,{1});'.format(indent,'kwds' if use_kwds else '0'))
 
-        if any(a.default for a in args):
+        namesvar = '0'
+        if use_kwds and any(a.name for a in args):
+            prep += indent.line('const char *names[] = {{{0}}};'.format(
+                ','.join(('"{0}"'.format(a.name) if a.name else '0') for a in args)))
+            namesvar = 'names'
+
+        if args:
             prep += indent.line('PyObject *temp;')
 
         for i,a in enumerate(args):
             frompy, frompytype = self.frompy(a.type)
             var = frompytype.typestr("_{0}".format(i))
-            name = '"{0}"'.format(a.name) if a.name and use_kwds else '0'
+            name = 'names[{0}]'.format(i) if a.name and use_kwds else '0'
             if a.default:
-                prep += '{0}temp = ga({1},false);\n{0}{2} = temp ? {3} : {4};\n'.format(indent,name,var,frompy.format('temp'),a.default)
+                defval = a.default
+                if isinstance(a.type,gccxml.CPPReferenceType) and cconst(a.type.type):
+                    # if the argument takes a const reference, the default value
+                    # is very likely to be a temporary, so we need to save it
+                    # to a variable
+                    prep += indent.line('{0} temp{1} = {2};'.format(a.type.type.type.typestr(),i,a.default))
+                    defval = 'temp{0}'.format(i)
+                prep += '{0}temp = ga({1},false);\n{0}{2} = temp ? {3} : {4};\n'.format(indent,name,var,frompy.format('temp'),defval)
             else:
-                prep += indent.line('{1} = {2};'.format(indent,var,frompy.format('ga({0},true)'.format(name))))
+                # we put the PyObject in a variable in case frompy has more than one '{0}'
+                prep += '{0}temp = ga({1},true);\n{0}{2} = {3};\n'.format(indent,name,var,frompy.format('temp'))
 
-        prep += indent.line('ga.finished();')
+        prep += indent.line('ga.finished({0});'.format(namesvar))
 
         return ['_{0}'.format(i) for i in range(len(args))], prep
 
@@ -2096,14 +2130,21 @@ class Conversion:
         prep = ''
         if any(a.default for a in args):
             convargs = [(i,a) + self.frompy(a.type) for i,a in enumerate(args)]
-            convargs.reverse()
-            for i,a,frompy,ftype in convargs:
-                prep += indent.line('{0} _{1} = {2};'.format(ftype,i,a.default))
+
+            for a in args:
+                t = a.type
+                if isinstance(t,gccxml.CPPReferenceType) and cconst(t.type):
+                    # if the argument takes a const reference, the default value
+                    # is very likely to be a temporary
+                    t = t.type.type
+
+                prep += indent.line('{0} _{1};'.format(t.typestr(),i,' = {2}'.format(a.default) if a.default else ''))
+
             prep += indent.line('switch(PyTuple_GET_SIZE(args)) {')
             i2 = indent + 1
             case = 'case {0}:'
             prep += indent.line(case.format(len(args)))
-            for i,a,frompy,ftype in convargs:
+            for i,a in reversed(list(enumerate(args))):
                 prep += i2.line('_{0} = {1}'.format(i,frompy.format('PyTuple_GET_ITEM(args,{0})'.format(i))))
                 if a.default:
                     prep += indent.line(case.format(i))
@@ -2143,14 +2184,7 @@ class Conversion:
         # turn default values into overloads
         ovlds = []
         for f,args in calls:
-            newargs = []
-            for a in args:
-                if a.default:
-                    ovlds.append((f,newargs[:]))
-                    a = copy.copy(a)
-                    a.default = None
-                newargs.append(a)
-            ovlds.append((f,newargs))
+            ovlds.extend((f,newargs) for newargs in default_to_ov(args))
 
         return tmpl.overload_func_call.render(
             inner = self.generate_arg_tree(ovlds).get_code(self),
@@ -2219,6 +2253,23 @@ def methods_that_return(c):
     return itertools.chain(((m.name,m) for m in c.methods),((p.name,p.get) for p in c.properties if p.get))
 
 
+class SmartPtr:
+    def __init__(self):
+        self.to = None
+        self.from_ = None
+        self.type = None
+        self.uniquenum = get_unique_num()
+
+    def gccxml_input(self,outfile,classes):
+        assert self.type
+
+        for c in classes:
+            print >> outfile, 'typedef {0} smartptr_{1}_{2};\n'.format(self.type.format(c.type),c.uniquenum,self.uniquenum)
+
+    def get_type(self,tns,class_):
+        return tns.find('smartptr_{0}_{1}'.format(class_.uniquenum,self.uniquenum))[0]
+
+
 class ModuleDef:
     def __init__(self,name,includes=None,template_assoc=False):
         self.name = name
@@ -2229,6 +2280,7 @@ class ModuleDef:
         self.doc = ''
         self.topy = []
         self.frompy = []
+        self.smartptrs = []
 
     def print_gccxml_input(self,out):
         # In addition to the include files, declare certain typedefs so they can
@@ -2240,6 +2292,9 @@ class ModuleDef:
 
         for f in self.functions.itervalues():
             f.gccxml_input(out)
+
+        for s in self.smartptrs:
+            s.gccxml_input(out,self.classes)
 
         for i,conv in enumerate(self.topy):
             print >> out, 'typedef {0} topy_type_{1};\n'.format(conv[0],i)
@@ -2289,7 +2344,17 @@ class ModuleDef:
 
             # these assume the class has copy constructors
             conv.add_conv(c.type,'reinterpret_cast<PyObject*>(new obj_{0}({{0}}))'.format(c.name),(True,'get_base_{0}({{0}})'.format(c.name)))
-            conv.cppclasstopy[c.type] = c
+            conv.cppclasstopy[c.type] = c,c.cast_base_expr()
+
+        for s in self.smartptrs:
+            for c in classes.itervalues():
+                t = s.get_type(tns,c)
+                conv.add_conv(
+                    t,
+                    s.to and s.to.format('{0}',c.type.typestr()),
+                    s.from_ and (False,s.from_.format('get_base_{0}({{0}})'.format(c.name),c.type.typestr(),'{0}')))
+                if s.from_:
+                    conv.cppclasstopy[t] = c,s.from_.format(c.cast_base_expr(),c.type.typestr(),'{0}')
 
         for c in classes.itervalues():
             c.findbases(classes)
@@ -2416,34 +2481,7 @@ def add_func(x,func):
 def stripsplit(x):
     return [i.strip() for i in x.split(',')]
 
-class tag_Class(tag):
-    def __init__(self,args):
-        t = args['type']
-        self.r = ClassDef(get_valid_py_ident(args.get("name"),t),t,parse_bool(args,'new-initializes'))
 
-    @staticmethod
-    def noinit_means_noinit():
-        raise SpecificationError("You can't have both no-init and init")
-
-    def child(self,name,data):
-        if name == 'init':
-            if self.r.constructor is NoInit:
-                tag_Class.noinit_means_noinit()
-
-            if self.r.constructor: join_func(self.r.constructor,data)
-            else: self.r.constructor = data
-        elif name == "doc":
-            self.r.doc = data
-        elif name == "property":
-            self.r.properties.append(data)
-        elif name == 'attr':
-            self.r.vars.append(data)
-        elif name == 'def':
-            add_func(self.r.methods,data)
-        elif name == 'no-init':
-            if self.r.constructor:
-                tag_Class.noinit_means_noinit()
-            self.r.constructor = NoInit
 
 
 class tag_Init(tag):
@@ -2451,38 +2489,74 @@ class tag_Init(tag):
         self.r = DefDef()
         self.r.overloads.append(Overload(args=args.get("overload")))
 
-class tag_Module(tag):
-    def __init__(self,args):
-        self.r = ModuleDef(args["name"],stripsplit(args["include"]),parse_bool(args,'template-assoc'))
-
-    def child(self,name,data):
-        if name == "class":
-            self.r.classes.append(data)
-        elif name == "def":
-            add_func(self.r.functions,data)
-        elif name == "doc":
-            self.r.doc = data
-        elif name == 'to-pyobject':
-            self.r.topy.append(data)
-        elif name == 'from-pyobject':
-            self.r.frompy.append(data)
 
 class tag_ToFromPyObject(tag):
     def __init__(self,args):
-        self.type = args['type']
-        self.replacement = ''
+        self.r = ''
 
     def text(self,data):
-        self.replacement += data
+        self.r += data
 
-    def child(self,name,data):
-        if name == 'val':
-            self.replacement += '{0}'
-        elif name == 'type':
-            self.replacement += '{1}'
+    @tag_handler('val',tag)
+    def handle_val(self,data):
+        self.r += '{0}'
+
+    @tag_handler('type',tag)
+    def handle_type(self,data):
+        self.r += '{1}'
+
+
+class tag_ToFromPyObjectWithType(tag_ToFromPyObject):
+    def __init__(self,args):
+        super(tag_ToFromPyObjectWithType,self).__init__(args)
+        self.type = args['type']
 
     def end(self):
-        return self.type,self.replacement
+        return self.type,self.r
+
+
+class tag_ToFromPyObjectWithPyObject(tag_ToFromPyObject):
+    @tag_handler('pyobject',tag)
+    def handle_pyobject(self,data):
+        self.r += '{2}'
+
+class tag_PtrType(tag):
+    def __init__(self,args):
+        self.r = ''
+
+    def text(self,data):
+        self.r += data
+
+    @tag_handler('type',tag)
+    def handle_type(self,data):
+        self.r += '{0}'
+
+
+class tag_SmartPtr(tag):
+    def __init__(self,args):
+        self.r = SmartPtr()
+
+    @tag_handler('ptr-type',tag_PtrType)
+    def handle_ptrtype(self,data):
+        if self.r.type:
+            raise ParseError('<smart-ptr> can only have one <ptr-type>')
+        self.r.type = data
+
+    @tag_handler('to-pyobject',tag_ToFromPyObject)
+    def handle_topyobject(self,data):
+        self.r.to = data
+
+    @tag_handler('from-pyobject',tag_ToFromPyObject)
+    def handle_frompyobject(self,data):
+        self.r.from_ = data
+
+    def end(self):
+        if not self.r.type:
+            raise SpecificationError('<ptr-type> must be defined for <smart-ptr>')
+        if not (self.r.to or self.r.from_):
+            raise SpecificationError('<to-pyobject> or <from-pyobject> must be defined for <smart-ptr>')
+        return self.r
+
 
 class tag_Doc(tag):
     def __init__(self,args):
@@ -2491,11 +2565,22 @@ class tag_Doc(tag):
     def text(self,data):
         self.r = textwrap.dedent(data)
 
+
 def getset_or_none(x):
     if not x: return None
     r = DefDef()
     r.overloads.append(Overload(x))
     return r
+
+
+class tag_GetSet(tag):
+    def __init__(self,args):
+        self.r = DefDef()
+        self.r.overloads.append(Overload(
+            tag_Def.operator_parse(args['func']),
+            get_ret_semantic(args),
+            args.get('overload')))
+
 
 class tag_Property(tag):
     def __init__(self,args):
@@ -2509,17 +2594,22 @@ class tag_Property(tag):
             raise SpecificationError("property defined with neither a getter nor a setter")
         return self.r
 
-    def child(self,name,data):
-        if name == "doc":
-            self.r.doc = data
-        elif name == "get":
-            if self.r.get:
-                # only one get is allowed since it can't overloaded
-                raise SpecificationError("multiple getters defined for property")
-            self.r.get = data
-        elif name == "set":
-            if self.r.set: join_func(self.r.set,data)
-            else: self.r.set = data
+    @tag_handler('doc',tag_Doc)
+    def handle_doc(self,data):
+        self.r.doc = data
+
+    @tag_handler('get',tag_GetSet)
+    def handle_get(self,data):
+        if self.r.get:
+            # only one get is allowed since it can't be overloaded
+            raise SpecificationError("multiple getters defined for property")
+        self.r.get = data
+
+    @tag_handler('set',tag_GetSet)
+    def handle_set(self,data):
+        if self.r.set: join_func(self.r.set,data)
+        else: self.r.set = data
+
 
 def parse_bool(args,prop,default=False):
     val = args.get(prop,None)
@@ -2629,13 +2719,6 @@ def get_ret_semantic(args):
             raise ParseError('return-semantic (if specified) must be one of the following: {0}'.format(', '.join(mapping.keys())))
     return rs
 
-class tag_GetSet(tag):
-    def __init__(self,args):
-        self.r = DefDef()
-        self.r.overloads.append(Overload(
-            tag_Def.operator_parse(args['func']),
-            get_ret_semantic(args),
-            args.get('overload')))
 
 class tag_Def(tag):
     def __init__(self,args):
@@ -2681,21 +2764,80 @@ class tag_Def(tag):
             return m.group(0) + ' ' + ''.join(x[m.end():].split())
         return x
 
-tagdefs = {
-    "class" : tag_Class,
-    "init" : tag_Init,
-    "module" : tag_Module,
-    "property" : tag_Property,
-    "doc" : tag_Doc,
-    "attr" : tag_Member,
-    'get' : tag_GetSet,
-    'set' : tag_GetSet,
-    'def' : tag_Def,
-    'to-pyobject' : tag_ToFromPyObject,
-    'from-pyobject' : tag_ToFromPyObject,
-    'val' : tag,
-    'no-init' : tag
-}
+    @tag_handler('doc',tag_Doc)
+    def handle_doc(self,data):
+        self.r.doc = data
+
+
+class tag_Class(tag):
+    def __init__(self,args):
+        t = args['type']
+        self.r = ClassDef(get_valid_py_ident(args.get("name"),t),t,parse_bool(args,'new-initializes'))
+
+    @staticmethod
+    def noinit_means_noinit():
+        raise SpecificationError("You can't have both no-init and init")
+
+    @tag_handler('init',tag_Init)
+    def handle_init(self,data):
+        if self.r.constructor is NoInit:
+            tag_Class.noinit_means_noinit()
+
+        if self.r.constructor: join_func(self.r.constructor,data)
+        else: self.r.constructor = data
+
+    @tag_handler('doc',tag_Doc)
+    def handle_doc(self,data):
+        self.r.doc = data
+
+    @tag_handler('property',tag_Property)
+    def handle_property(self,data):
+        self.r.properties.append(data)
+
+    @tag_handler('attr',tag_Member)
+    def handle_attr(self,data):
+        self.r.vars.append(data)
+
+    @tag_handler('def',tag_Def)
+    def handle_def(self,data):
+        add_func(self.r.methods,data)
+
+    @tag_handler('no-init',tag)
+    def handle_noinit(self,data):
+        if self.r.constructor:
+            tag_Class.noinit_means_noinit()
+        self.r.constructor = NoInit
+
+
+class tag_Module(tag):
+    def __init__(self,args):
+        self.r = ModuleDef(args["name"],stripsplit(args["include"]),parse_bool(args,'template-assoc'))
+
+    @tag_handler('class',tag_Class)
+    def handle_class(self,data):
+        self.r.classes.append(data)
+
+    @tag_handler('def',tag_Def)
+    def handle_def(self,data):
+        add_func(self.r.functions,data)
+
+    @tag_handler('doc',tag_Doc)
+    def handle_doc(self,data):
+        self.r.doc = data
+
+    @tag_handler('to-pyobject',tag_ToFromPyObjectWithType)
+    def handle_to(self,data):
+        self.r.topy.append(data)
+
+    @tag_handler('from-pyobject',tag_ToFromPyObjectWithType)
+    def handle_from(self,data):
+        self.r.frompy.append(data)
+
+    @tag_handler('smart-ptr',tag_SmartPtr)
+    def handle_smartptr(self,data):
+        self.r.smartptrs.append(data)
+
+
 
 def getspec(path):
-    return parse(path,tagdefs)
+    return parse(path,'module',tag_Module)

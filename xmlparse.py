@@ -25,7 +25,39 @@ class ArgProxy(object):
     def __contains__(self,key):
         return key in self.args
 
+
+def tag_handler(tagname,tagclass):
+    def inner(func):
+        th = getattr(func,'_tag_handler',None)
+        if not th:
+            th = []
+            func._tag_handler = th
+        th.append((tagname,tagclass))
+        return func
+    return inner
+
+
+class TagMeta(type):
+    def __init__(cls,name,bases,dct):
+        super(TagMeta,cls).__init__(name,bases,dct)
+        handlers = getattr(cls,'tag_handlers',None)
+
+        for b in bases:
+            bh = getattr(b,'tag_handlers',None)
+            if bh: handlers.update(bh)
+
+        if not handlers:
+            handlers = {}
+            cls.tag_handlers = handlers
+        for func in dct.itervalues():
+            h = getattr(func,'_tag_handler',None)
+            if h:
+                for tagname,tagclass in h:
+                    handlers[tagname] = tagclass,func
+
+
 class tag(object):
+    __metaclass__ = TagMeta
     r = None
     def __init__(self,args):
         pass
@@ -33,14 +65,18 @@ class tag(object):
     def end(self):
         return self.r
 
-    def child(self,name,data):
-        pass
-
     def text(self,data):
-        pass
+        if(data and not data.isspace()):
+            raise ParseError('Unexpected text')
 
-def parse(path,tagdefs):
-    stack = []
+
+def parse(path,toplevelname,toplevel):
+    class TopLevel(tag):
+        @tag_handler(toplevelname,toplevel)
+        def accept(self,data):
+            self.value = data
+
+    stack = [(TopLevel(None),None)]
     p = xml.parsers.expat.ParserCreate()
 
     def add_to_except(e):
@@ -48,8 +84,9 @@ def parse(path,tagdefs):
         e.info['line #'] = p.CurrentLineNumber
 
     def start_tag(name,args):
+        handlers = getattr(stack[-1][0].__class__,'tag_handlers',{})
         try:
-            c = tagdefs[name]
+            c,f = handlers[name]
         except KeyError:
             raise ParseError('unexpected tag "{0}"'.format(name))
         try:
@@ -58,24 +95,27 @@ def parse(path,tagdefs):
             add_to_except(e)
             raise
 
-        stack.append(t)
+        stack.append((t,f))
 
     def end_tag(name):
-        if len(stack) > 1:
-            top = stack.pop()
-            try:
-                stack[-1].child(name,top.end())
-            except ParseError as e:
-                add_to_except(e)
-                raise
+        t,f = stack.pop()
+        try:
+            f(stack[-1][0],t.end())
+        except ParseError as e:
+            add_to_except(e)
+            raise
 
     def text(data):
-        if stack: stack[-1].text(data)
-
+        try:
+            stack[-1][0].text(data)
+        except ParseError as e:
+            add_to_except(e)
+            raise
 
     p.StartElementHandler = start_tag
     p.EndElementHandler = end_tag
     p.CharacterDataHandler = text
     p.ParseFile(open(path))
 
-    return stack[-1].end()
+    assert len(stack) == 1
+    return stack[0][0].value

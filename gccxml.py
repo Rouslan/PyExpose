@@ -1,6 +1,6 @@
 import itertools
 
-from xmlparse import tag,parse,ParseError
+from xmlparse import *
 
 
 ACCESS_PUBLIC = 1
@@ -348,19 +348,6 @@ def common_init(keys):
 def bool_keys(*keys):
     return [(k,zero_one,False) for k in keys]
 
-def function_child(self,name,data):
-    if name == 'Argument' or name == 'Ellipsis':
-        self.r[1].args.append(data)
-
-
-
-class tag_Class(tag):
-    OType = CPPClass
-    __init__ = common_init([('name',None,None),('size',None,None),'context'])
-
-    def child(self,name,data):
-        if name == "Base":
-            self.r[1].bases.append(data)
 
 class tag_Argument(tag):
     def __init__(self,args):
@@ -369,16 +356,35 @@ class tag_Argument(tag):
             args.get("name"),
             args.get("default"))
 
+class tag_Ellipsis(tag):
+    def __init__(self,args):
+        self.r = cppellipsis
+
+def function_handle_child(self,data):
+    self.r[1].args.append(data)
+function_handlers = {
+    'Argument' : (tag_Argument,function_handle_child),
+    'Ellipsis' : (tag_Ellipsis,function_handle_child)}
+
+
 class tag_Base(tag):
     def __init__(self,args):
         self.r = CPPBase()
         self.r.type = args["type"]
         self.r.access = parse_access(args["access"])
 
+class tag_Class(tag):
+    OType = CPPClass
+    __init__ = common_init([('name',None,None),('size',None,None),'context'])
+
+    @tag_handler('Base',tag_Base)
+    def handle_base(self,data):
+        self.r[1].bases.append(data)
+
 class tag_Function(tag):
     OType = CPPFunction
     __init__ = common_init(["name","returns",'context'])
-    child = function_child
+    tag_handlers = function_handlers
 
 class tag_PointerType(tag):
     OType = CPPPointerType
@@ -393,7 +399,7 @@ class tag_FundamentalType(tag):
 class tag_FunctionType(tag):
     OType = CPPFunctionType
     __init__ = common_init(["returns"])
-    child = function_child
+    tag_handlers = function_handlers
 
 class tag_Namespace(tag):
     OType = CPPNamespace
@@ -406,12 +412,12 @@ class tag_Field(tag):
 class tag_Method(tag):
     OType = CPPMethod
     __init__ = common_init(["name","returns",("access",parse_access),'context'] + bool_keys("const","virtual","pure_virtual","static"))
-    child = function_child
+    tag_handlers = function_handlers
 
 class tag_Constructor(tag):
     OType = CPPConstructor
     __init__ = common_init([('name',None,None),("access",parse_access),'context'] + bool_keys('artificial'))
-    child = function_child
+    tag_handlers = function_handlers
 
 class tag_OperatorMethod(tag_Method):
     OType = CPPOperatorMethod
@@ -431,7 +437,7 @@ class tag_CvQualifiedType(tag):
 class tag_MethodType(tag):
     OType = CPPMethodType
     __init__ = common_init(["basetype","returns"] + bool_keys("const"))
-    child = function_child
+    tag_handlers = function_handlers
 
 class tag_OperatorFunction(tag_Function):
     OType = CPPOperatorFunction
@@ -456,59 +462,52 @@ class tag_Enumeration(tag):
     OType = CPPEnumeration
     __init__ = common_init(["name","size",'context'])
 
-class tag_Ellipsis(tag):
-    def __init__(self,args):
-        self.r = cppellipsis
+    @tag_handler('EnumValue',tag)
+    def handle_enumval(self,data):
+        # TODO: store enum values
+        pass
 
 
 class tag_root(tag):
     def __init__(self,args):
         self.r = {}
 
-    def child(self,name,data):
-        if name in tagdefs and data:
-            self.r[data[0]] = data[1]
-
-
-tagdefs = {
-    "Class" : tag_Class,
-    "Struct" : tag_Class,
-    "Argument" : tag_Argument,
-    "Base" : tag_Base,
-    "Function" : tag_Function,
-    "PointerType" : tag_PointerType,
-    "FundamentalType" : tag_FundamentalType,
-    "FunctionType" : tag_FunctionType,
-    "Namespace" : tag_Namespace,
-    "Ellipsis" : tag_Ellipsis,
-    "Field" : tag_Field,
-    "Method" : tag_Method,
-    "Constructor" : tag_Constructor,
-    "OperatorMethod" : tag_OperatorMethod,
-    "ArrayType" : tag_ArrayType,
-    "ReferenceType" : tag_ReferenceType,
-    "CvQualifiedType" : tag_CvQualifiedType,
-    "MethodType" : tag_MethodType,
-    "OperatorFunction" : tag_OperatorFunction,
-    "Destructor" : tag_Destructor,
-    "Union" : tag_Union,
-    "OffsetType" : tag_OffsetType,
-    "GCC_XML" : tag_root,
-    "Typedef" : tag_TypeDef,
-    "Enumeration" : tag_Enumeration,
+    @tag_handler('Class',tag_Class)
+    @tag_handler('Struct',tag_Class)
+    @tag_handler('Function',tag_Function)
+    @tag_handler("PointerType",tag_PointerType)
+    @tag_handler("FundamentalType",tag_FundamentalType)
+    @tag_handler("FunctionType",tag_FunctionType)
+    @tag_handler("Namespace",tag_Namespace)
+    @tag_handler("Field",tag_Field)
+    @tag_handler("Method",tag_Method)
+    @tag_handler("Constructor",tag_Constructor)
+    @tag_handler("OperatorMethod",tag_OperatorMethod)
+    @tag_handler("ArrayType",tag_ArrayType)
+    @tag_handler("ReferenceType",tag_ReferenceType)
+    @tag_handler("CvQualifiedType",tag_CvQualifiedType)
+    @tag_handler("MethodType",tag_MethodType)
+    @tag_handler("OperatorFunction",tag_OperatorFunction)
+    @tag_handler("Destructor",tag_Destructor)
+    @tag_handler("Union",tag_Union)
+    @tag_handler("OffsetType",tag_OffsetType)
+    @tag_handler("Typedef",tag_TypeDef)
+    @tag_handler("Enumeration",tag_Enumeration)
+    def child(self,data):
+        self.r[data[0]] = data[1]
 
     # don't care about these (yet):
-    "Variable" : tag,
-    "Converter" : tag,
-    "EnumValue" : tag,
-    "File" : tag
-}
+    @tag_handler("Variable",tag)
+    @tag_handler("Converter",tag)
+    @tag_handler("File",tag)
+    def otherchild(self,data):
+        pass
 
 
 
 def getinterface(path):
     rootnamespace = None
-    items = parse(path,tagdefs)
+    items = parse(path,'GCC_XML',tag_root)
 
     # fill "members" using context, because the "members" list doesn't seem to list all members
     for item in items.itervalues():

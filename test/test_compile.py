@@ -49,6 +49,8 @@ class TestCompile(unittest.TestCase):
         }
     '''
 
+    cpp_file = None
+
     spec_file = '''<?xml version="1.0"?>
         <module name="testmodule" include="main.h">
             <doc>module doc string</doc>
@@ -74,6 +76,8 @@ class TestCompile(unittest.TestCase):
         try:
             write_file('main.h',self.header_file)
             write_file('spec.xml',self.spec_file)
+            if self.cpp_file:
+                write_file('main.cpp',self.cpp_file)
 
             pyinc = distutils.sysconfig.get_python_inc()
 
@@ -99,7 +103,10 @@ class TestCompile(unittest.TestCase):
 
     def compile(self):
         try:
-            obj = self.comp.compile([self.modname() + '.cpp'],debug=True)
+            files = [self.modname() + '.cpp']
+            if self.cpp_file:
+                files.append('main.cpp')
+            obj = self.comp.compile(files,debug=True)
             self.comp.link_shared_lib(obj,self.modname(),debug=True)
         except (distutils.ccompiler.CompileError,distutils.ccompiler.LinkError) as e:
             self.fail(str(e))
@@ -720,6 +727,54 @@ class TestTemplateAssoc(TestCompile):
         self.assertEqual(tm.getval(tm.Thing()),6)
 
 
+class TestSmartPtr(TestCompile):
+    header_file = header_file = TestConversion.header_file + '''
+        template<typename T> PyTypeObject *get_type();
+        template<typename T> T &get_base(PyObject *o);
+
+        template<typename T> class pyptr {
+            object _obj;
+            T *_ptr;
+        public:
+            template<typename REF> pyptr(T *ptr,REF r) : _obj(r), _ptr(ptr) {}
+            pyptr(const pyptr<T> &b) : _obj(b._obj), _ptr(b._ptr) {}
+            pyptr() : _obj(Py_None), _ptr(0) {}
+
+            T &operator*() { return *_ptr; }
+            const T &operator*() const { *_ptr; }
+            T *operator->() { return _ptr; }
+            const T *operator->() const { return _ptr; }
+
+            object obj() { return _obj; }
+        };
+
+        class Thing {
+        public:
+            int func() { return 6; }
+        };
+
+        int getval(pyptr<Thing> t) {
+            return t->func();
+        }
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h" template-assoc="true">
+            <smart-ptr>
+                <ptr-type>pyptr&lt;<type/>&gt;</ptr-type>
+                <from-pyobject>pyptr&lt;<type/>&gt;(&amp;<val/>,borrowed_ref(<pyobject/>))</from-pyobject>
+                <to-pyobject><val/>.obj().get_new_ref()</to-pyobject>
+            </smart-ptr>
+            <class type="Thing"/>
+            <def func="getval"/>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+        self.assertEqual(tm.getval(tm.Thing()),6)
+
+
 class TestSubscriptAttr(TestCompile):
     header_file = '''
         struct Nest1 {
@@ -794,6 +849,39 @@ class TestNoInit(TestCompile):
         c = tm.Concrete()
         self.assertEqual(c.method(),5)
         self.assertRaises(NotImplementedError,tm.Abstract.method,c)
+
+
+class TestOverloadedNew(TestCompile):
+    header_file = '''
+        #include <Python.h>
+
+        struct X {};
+
+        PyObject *create_x();
+    '''
+
+    cpp_file = '''
+        #include <new>
+
+        #include "main.h"
+        #include "testoverloadednew.h"
+
+        PyObject *create_x() {
+            return reinterpret_cast<PyObject*>(new obj_X());
+        }
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="X"/>
+            <def func="create_x"/>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+        x = tm.create_x()
+        gc.collect()
 
 
 if __name__ == '__main__':

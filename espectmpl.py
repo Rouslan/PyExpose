@@ -425,7 +425,7 @@ struct get_arg {{
     }}
 
     PyObject *operator()(const char *name,bool required);
-    void finished();
+    void finished(const char *names[]);
 }};
 
 PyObject *get_arg::operator()(const char *name,bool required) {{
@@ -454,7 +454,7 @@ PyObject *get_arg::operator()(const char *name,bool required) {{
     return 0;
 }}
 
-void get_arg::finished() {{
+void get_arg::finished(const char *names[]) {{
     // TODO: check for unused arguments
 }}
 
