@@ -309,6 +309,10 @@ class CPPEnumeration(CPPBasicType):
     def link(self,items):
         pass
 
+class CPPVariable(CPPSymbol):
+    __slots__ = 'name','type','init','context'
+    link = link_item('type')
+
 
 
 
@@ -467,6 +471,10 @@ class tag_Enumeration(tag):
         # TODO: store enum values
         pass
 
+class tag_Variable(tag):
+    OType = CPPVariable
+    __init__ = common_init(['name','type','context',('init',None,None)])
+
 
 class tag_root(tag):
     def __init__(self,args):
@@ -493,11 +501,11 @@ class tag_root(tag):
     @tag_handler("OffsetType",tag_OffsetType)
     @tag_handler("Typedef",tag_TypeDef)
     @tag_handler("Enumeration",tag_Enumeration)
+    @tag_handler("Variable",tag_Variable)
     def child(self,data):
         self.r[data[0]] = data[1]
 
     # don't care about these (yet):
-    @tag_handler("Variable",tag)
     @tag_handler("Converter",tag)
     @tag_handler("File",tag)
     def otherchild(self,data):

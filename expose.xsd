@@ -476,7 +476,7 @@ public:
         <xsd:annotation>
           <xsd:documentation>
             The name of the class as will be seen in python. If not specified,
-            the name will be taken from the C++ class, if the class name is a
+            the name will be taken from the C++ class if the class name is a
             legal Python identifier, otherwise an arbitrary name is chosen.
           </xsd:documentation>
         </xsd:annotation>

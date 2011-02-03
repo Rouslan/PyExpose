@@ -52,17 +52,22 @@ property_table = env.from_string('''<@
 
 destruct = env.from_string('''
 void obj_<% name %>_dealloc(obj_<% name %> *self) {
-== if features.managed_ref or (destructor and not new_init)
+=# UNMANAGEDREF doesn't need any extra clean-up
+== if features.managed_ref or features.managed_ptr or (destructor and not new_init)
     switch(self->mode) {
-
+    case CONTAINS:
+        self->base.<% destructor %>();
+        break;
 == if features.managed_ref
     case MANAGEDREF:
         reinterpret_cast<ref_<% name %>*>(self)->~ref_<% name %>();
         break;
 == endif
-    case CONTAINS:
-        self->base.<% destructor %>();
+== if features.managed_ptr
+    case MANAGEDPTR:
+        reinterpret_cast<ptr_<% name %>*>(self)->~ptr_<% name %>();
         break;
+== endif
     default: // suppress warnings
         break;
     }
@@ -116,6 +121,39 @@ struct ref_<% name %> {
         Py_DECREF(container);
     }
 };
+
+== endif
+== if features.managed_ptr
+struct ptr_<% name %> {
+    PyObject_HEAD
+    storage_mode mode;
+    <% type %> *base;
+
+    PY_MEM_NEW_DELETE
+
+    ptr_<% name %>(<% type %> *base) : mode(MANAGEDPTR), base(base) {
+        PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
+    }
+
+    ~ptr_<% name %>() {
+        delete base;
+    }
+};
+
+== endif
+== if features.unmanaged_ref
+struct uref_<% name %> {
+    PyObject_HEAD
+    storage_mode mode;
+    <% type %> &base;
+
+    PY_MEM_NEW_DELETE
+
+    uref_<% name %>(<% type %> &base) : mode(UNMANAGEDREF), base(base) {
+        PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
+    }
+};
+
 == endif
 
 struct obj_<% name %> {
@@ -151,17 +189,6 @@ template<> inline PyTypeObject *get_type<<% original_type %> >() {
     return get_obj_<% name %>Type();
 }
 
-==     if features.managed_ref or not new_init
-<% original_type %> &cast_base_<% name %>(PyObject *o);
-template<> inline <% original_type %> &cast_base<<% original_type %> >(PyObject *o) {
-    return cast_base_<% name %>(o);
-}
-==     else
-template<> inline <% original_type %> &cast_base<<% original_type %> >(PyObject *o) {
-    return reinterpret_cast<obj_<% name %>*>(o)->base;
-}
-==     endif
-
 <% original_type %> &get_base_<% name %>(PyObject *o<% ',bool safe=true' if bool_arg_get %>);
 template<> inline <% original_type %> &get_base<<% original_type %> >(PyObject *o) {
     return get_base_<% name %>(o);
@@ -170,17 +197,17 @@ template<> inline <% original_type %> &get_base<<% original_type %> >(PyObject *
 template<> struct wrapped_type<<% original_type %> > {
     typedef obj_<% name %> type;
 };
+
+==     if invariable
+template<> struct invariable_storage<<% original_type %> > {
+    enum {value = 1};
+};
+==     endif
 == endif
 ''')
 
 
 classtypedef = env.from_string('''
-<@ macro objsize() @><@
-    if features.managed_ref
-        @>sizeof(ref_<% name %>) > sizeof(obj_<% name %>) ? sizeof(ref_<% name %>) : <@
-    endif
-    @>sizeof(obj_<% name %>)<@ endmacro @>
-
 == if initcode
 int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
 ==     if derived
@@ -196,16 +223,31 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
 
     <% type %> *addr = &self->base;
 
-==     if features.managed_ref or (destructor and not new_init)
-    /* before we can call the constructor, the destructor needs to be called if
-       we already have an initialized object */
+=#     before we can call the constructor, the destructor needs to be called if
+=#     we already have an initialized object
+==     if features or (destructor and not new_init)
     switch(self->mode) {
-==         if features.managed_ref
+=#         The ref_X, ptr_X and uref_X all store an address to the contained
+=#         type, in the same place. We'll need to pick one that exists.
+=#         Even with MANAGEDPTR, we can't delete the pointer and switch to
+=#         CONTAINS because there may be another pointer with the same address.
+==         if features.managed_ref or features.managed_ptr or features.unmanaged_ptr
+==             if features.managed_ref
+==                 set addr = '&reinterpret_cast<ref_' + name + '*>(self)->base'
     case MANAGEDREF:
+==             endif
+==             if features.managed_ptr
+==                 set addr = 'reinterpret_cast<ptr_' + name + '*>(self)->base'
+    case MANAGEDPTR:
+==             endif
+==             if features.unmanaged_ref
+==                 set addr = '&reinterpret_cast<uref_' + name + '*>(self)->base'
+    case UNMANAGEDREF:
+==             endif
 ==             if destructor
         reinterpret_cast<ref_<% name %>*>(self)->base.<% destructor %>();
 ==             endif
-        addr = &reinterpret_cast<ref_<% name %>*>(self)->base;
+        addr = <% addr %>;
         break;
 ==         endif
 ==         if destructor
@@ -273,7 +315,7 @@ inline PyTypeObject *create_obj_<% name %>Type() {
     Py_DECREF(dict);
     if(UNLIKELY(!type)) return 0;
 
-    type->tp_basicsize = <% objsize() %>;
+    type->tp_basicsize = <% objsize %>;
     type->tp_flags |= Py_TPFLAGS_CHECKTYPES;
     type->tp_dictoffset = 0;
     type->tp_weaklistoffset = 0;
@@ -305,7 +347,7 @@ PyTypeObject obj_<% name %>Type = {
     PyObject_HEAD_INIT(0)
     0,                         /* ob_size */
     "<% module %>.<% name %>", /* tp_name */
-    <% objsize() %>, /* tp_basicsize */
+    <% objsize %>, /* tp_basicsize */
     0,                         /* tp_itemsize */
     <@ if destructref @>reinterpret_cast<destructor>(&obj_<% name %>_dealloc)<@ else @>0<@ endif @>, /* tp_dealloc */
     0,                         /* tp_print */
@@ -713,6 +755,18 @@ extern "C" SHARED(void) init<% module %>(void) {
     PyModule_AddObject(m,"<% c.name %>",reinterpret_cast<PyObject*>(&obj_<% c.name %>Type));
 ==     endif
 == endfor
+
+== for v in vars
+==     if loop.first
+    try {
+==     endif
+        PyModule_AddObject(m,"<% v.name %>",<% v.create %>);
+==     if loop.last
+    } catch(std::bad_alloc&) {
+        PyErr_NoMemory();
+    }
+==     endif
+== endfor
 }
 
 #pragma GCC visibility pop
@@ -722,15 +776,28 @@ cast_base = env.from_string('''
 <% type %> &cast_base_<% name %>(PyObject *o) {
 == if features.managed_ref or not new_init
     switch(reinterpret_cast<obj__Common*>(o)->mode) {
-==     if features.managed_ref
-    case MANAGEDREF:
-        return reinterpret_cast<ref_<% name %>*>(o)->base;
-==     endif
     case CONTAINS:
 ==     if uninstantiatable
         return reinterpret_cast<<% type %>&>(reinterpret_cast<obj_<% name %>*>(o)->base);
 ==     else
         return reinterpret_cast<obj_<% name %>*>(o)->base;
+==     endif
+=#     The ref_X, ptr_X and uref_X all store an address to the contained type,
+=#     in the same place. We'll need to pick one that exists.
+==     if features.managed_ref or features.managed_ptr or features.unmanaged_ref
+==         if features.managed_ref
+==             set addr = 'reinterpret_cast<ref_' + name + '*>(o)->base'
+    case MANAGEDREF:
+==         endif
+==         if features.managed_ptr
+==             set addr = '*reinterpret_cast<ptr_' + name + '*>(o)->base'
+    case MANAGEDPTR:
+==         endif
+==         if features.unmanaged_ref
+==             set addr = 'reinterpret_cast<uref_' + name + '*>(o)->base'
+    case UNMANAGEDREF:
+==         endif
+        return <% addr %>;
 ==     endif
     default:
         PyErr_SetString(PyExc_RuntimeError,not_init_msg);
@@ -791,16 +858,14 @@ header_start = env.from_string('''
    details of the exception. As such, it carries no information of its own. */
 struct py_error_set {};
 
-enum storage_mode {UNINITIALIZED = 0,CONTAINS,MANAGEDREF};
+enum storage_mode {UNINITIALIZED = 0,CONTAINS,MANAGEDREF,MANAGEDPTR,UNMANAGEDREF};
 
 == if template_assoc
+// The following templates are specialized for each exposed class
+
 template<typename T> inline PyTypeObject *get_type() {
     int dont_instantiate[sizeof(T) < 0 ? 1 : -1];
     return 0;
-}
-
-template<typename T> inline T &cast_base(PyObject *o) {
-    int dont_instantiate[sizeof(T) < 0 ? 1 : -1];
 }
 
 template<typename T> inline T &get_base(PyObject *o) {
@@ -810,6 +875,17 @@ template<typename T> inline T &get_base(PyObject *o) {
 template<typename T> struct wrapped_type {
     typedef void type;
 };
+
+/* When invariable_storage<T>::value is 1, the location of T inside of its
+   wrapped type will always be the same, thus an instance of T can be accessed
+   from a PyObject pointer using
+   reinterpret_cast<wrapped_type<T>::type*>(pointer)->base. However, the
+   instance will not necessarily be initialized. Call get_base at least once to
+   ensure that it is (once initialized, it can never be uninitialized). */
+template<typename T> struct invariable_storage {
+    enum {value = 0};
+};
+
 == endif
 ''')
 
@@ -1020,3 +1096,5 @@ virtmethod = env.from_string('''
     }
 }
 ''')
+
+new_uref = 'reinterpret_cast<PyObject*>(new uref_{0}({1}))'

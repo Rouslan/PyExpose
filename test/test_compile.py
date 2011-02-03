@@ -294,7 +294,6 @@ class TestManagedRef(TestCompile):
             B(int value) : othervalue(value), a(value * 2) {}
             ~B() { a.value = -1; }
             int get_value() const { return a.value; }
-            A &get_a() { return a; }
         };
     '''
 
@@ -884,5 +883,98 @@ class TestOverloadedNew(TestCompile):
         gc.collect()
 
 
+class TestInvariableStorage(TestCompile):
+    header_file = '''
+        struct A {
+            int value;
+        };
+
+        struct B {
+            int othervalue;
+            A a;
+        };
+
+        bool a_is_invariable();
+        bool b_is_invariable();
+
+        /* invariable_storage is not declared until the extension code is
+           generated */
+        #ifndef __GCCXML__
+        #include "testinvariablestorage.h"
+        bool a_is_invariable() { return invariable_storage<A>::value == 1; }
+        bool b_is_invariable() { return invariable_storage<B>::value == 1; }
+        #endif
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h" template-assoc="true">
+            <class type="A"/>
+            <class type="B">
+                <attr cmember="a"/>
+            </class>
+            <def func="a_is_invariable"/>
+            <def func="b_is_invariable"/>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+
+        self.assertEqual(tm.a_is_invariable(),False)
+        self.assertEqual(tm.b_is_invariable(),True)
+
+
+class TestVars(TestCompile):
+    header_file = '''
+        const double var2 = 24.0;
+
+        #define var3 "36"
+
+        struct Thing {
+            int var;
+            Thing() : var(48) {}
+        };
+
+        Thing var4;
+        Thing &var5 = var4;
+
+        int get_var4_int() { return var4.var; }
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <var name="var1" value="12"/>
+            <var value="var2"/>
+            <var value="var3"/>
+            <var value="var4"/>
+            <var value="var5" ref="false"/>
+
+            <class type="Thing">
+                <attr cmember="var"/>
+            </class>
+            <def func="get_var4_int"/>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+
+        self.assertEqual(tm.var1,12)
+        self.assertEqual(tm.var2,24.0)
+        self.assertEqual(tm.var3,"36")
+        self.assertEqual(tm.var4.var,48)
+        self.assertEqual(tm.var5.var,48)
+
+        tm.var4.var += 1
+        tm.var5.var -= 1
+
+        self.assertEqual(tm.var4.var,49)
+        self.assertEqual(tm.var5.var,47)
+
+        self.assertEqual(tm.get_var4_int(),49);
+
+
+
 if __name__ == '__main__':
     unittest.main()
+    #TestVars().debug()

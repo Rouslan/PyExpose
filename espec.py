@@ -1,4 +1,7 @@
 
+from future_builtins import filter, map, zip
+
+
 import re
 import itertools
 import os.path
@@ -16,9 +19,11 @@ import espectmpl as tmpl
 TEST_NS = "___gccxml_types_test_ns___"
 UNINITIALIZED_ERR_TYPE = "PyExc_RuntimeError"
 
-RET_COPY = 1
-RET_MANAGED_REF = 2
-RET_SELF = 3
+RET_MANAGED_REF = 1
+RET_MANAGED_PTR = 2
+RET_UNMANAGED_REF = 3
+RET_COPY = 1001
+RET_SELF = 1002
 
 GETTER = 1
 SETTER = 2
@@ -181,25 +186,18 @@ class Tab:
     def __str__(self):
         return self.amount * 4 * ' '
 
-    def __unicode__(self):
-        return self.amount * 4 * u' '
-
     def __repr__(self):
         return 'Tab({0})'.format(self.amount)
 
     # in-place addition/subtraction omitted to prevent modification when passed as an argument to a function
 
     def __add__(self,val):
-        if isinstance(val,unicode):
-            return self.__unicode__() + val
-        if isinstance(val,str):
+        if isinstance(val,basestring):
             return self.__str__() + val
         return Tab(self.amount + val)
 
     def __radd__(self,val):
-        if isinstance(val,unicode):
-            return val + self.__unicode__()
-        if isinstance(val,str):
+        if isinstance(val,basestring):
             return val + self.__str__()
         return Tab(self.amount + val)
 
@@ -207,7 +205,7 @@ class Tab:
         return Tab(self.amount - val)
 
     def line(self,x):
-        return self.__unicode__() + x + u'\n' if isinstance(x,unicode) else self.__str__() + x + '\n'
+        return self.__str__() + x + '\n'
 
 
 def mandatory_args(x):
@@ -233,6 +231,11 @@ def has_trivial_destructor(x):
         all(has_trivial_destructor(b.type) for b in x.bases)
 
 
+def bitproperty(bit):
+    def get(self): return self[bit]
+    def set(self,v): self[v] = v
+    return property(get,set)
+
 class ObjFeatures(object):
     """Specifies the way a class may be stored.
 
@@ -241,15 +244,22 @@ class ObjFeatures(object):
     managed_ptr -- A pointer is held and delete will be called upon destruction
     unmanaged_ref -- A reference is stored. The object's lifetime is not managed
 
-    Only managed_ref is implemented at the moment.
-
     """
-    managed_ref = False
-    managed_ptr = False
-    unmanaged_ref = False
+    value = 0
+
+    def __getitem__(self,k):
+        return bool(self.value & (1 << k))
+
+    def __setitem__(self,k,v):
+        if v: self.value |= 1 << k
+        else: self.value &= ~(1 << k)
+
+    managed_ref = bitproperty(RET_MANAGED_REF)
+    managed_ptr = bitproperty(RET_MANAGED_PTR)
+    unmanaged_ref = bitproperty(RET_UNMANAGED_REF)
 
     def __nonzero__(self):
-        return self.managed_ref or self.managed_ptr or self.unmanaged_ref
+        return self.value != 0
 
 
 class MultiInheritNode:
@@ -636,7 +646,7 @@ class TypedMethodDef(TypedDefDef):
         return super(TypedMethodDef,self).call_code(conv,ov)
 
     def odd_function(self,ov):
-        raise SpecificationError('The first parameter of "{0}" should be of type "{1}" or be a reference or pointer to it.'.format(ov.func.name,self.classdef.type.type_str()))
+        raise SpecificationError('The first parameter of "{0}" should be of type "{1}" or be a reference or pointer to it.'.format(ov.func.name,self.classdef.type.typestr()))
 
     def topy(self,conv,t,retsemantic):
         return conv.topy(t,retsemantic,'self')
@@ -1557,7 +1567,7 @@ class TypedClassDef:
         bases = []
         if not self.static_from_dynamic:
             if self.bases:
-                bases = map((lambda x: 'get_obj_{0}Type()'.format(x.name)), self.bases)
+                bases = ['get_obj_{0}Type()'.format(b.name) for b in self.bases]
             elif has_mi_subclass:
                 # common type needed for multiple inheritance
                 bases = ['&obj__CommonType']
@@ -1593,7 +1603,8 @@ class TypedClassDef:
             dynamic = self.dynamic,
             features = self.features,
             constructors = self.constructor_args(),
-            template_assoc = module.template_assoc),
+            template_assoc = module.template_assoc,
+            invariable = not self.variable_storage()),
 
         if virtmethods:
             print >> out.h, tmpl.subclass_meth.render(name=self.name)
@@ -1678,11 +1689,19 @@ class TypedClassDef:
                     e.info['method'] = d.name
                     raise
 
+        sizeof = 'sizeof(obj_{0})'
+        for f,pre in (
+                (self.features.managed_ref,'ref'),
+                (self.features.managed_ptr,'ptr'),
+                (self.features.unmanaged_ref,'uref')):
+            if f: sizeof = '(sizeof({0}_{{0}}) > {1} ? sizeof({0}_{{0}}) : {1})'.format(pre,sizeof)
+
         print >> out.cpp, tmpl.classtypedef.render(
             dynamic = self.dynamic,
             name = self.name,
             type = typestr,
             features = self.features,
+            objsize = sizeof.format(self.name),
             new_init = self.new_initializes,
             destructor = destructor,
             initcode = self.constructor and self.constructor.output(out.conv,typestr),
@@ -1896,7 +1915,8 @@ class ArgBranchNode:
 
 
 
-
+def deref_placeholder(x):
+    return '*({0})' if isinstance(x,gccxml.CPPPointerType) else '{0}'
 
 class Conversion:
     def __init__(self,tns):
@@ -2028,30 +2048,62 @@ class Conversion:
     def __topy_pointee(self,x):
         return self.__topy.get(strip_cvq(x.type))
 
-    def topy(self,t,retsemantic = None,container = None):
+    def topy(self,origt,retsemantic = None,container = None,temporary = True):
+        t = strip_cvq(origt)
+
+        # if the value is not a temporary, we can store a reference to it, even
+        # if the value itself is not a reference
+        if retsemantic == RET_UNMANAGED_REF and not temporary:
+            classdef = self.cppclasstopy.get(strip_refptr(t))
+            if classdef:
+                return tmpl.new_uref.format(classdef[0].name,deref_placeholder(t))
+
+
         r = self.__topy.get(t)
         if r: return r
 
-        if isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType)):
+        if isinstance(t,gccxml.CPPArrayType):
+            # array types are implicitly convertable to pointer types
+            r = self.__topy.get(cptr(cconst(t.type) if is_const(origt) else t.type))
+            if r: return r
+        elif isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType)):
             if retsemantic == RET_COPY:
-                if isinstance(t,gccxml.CPPReferenceType):
-                    r = self.__topy_pointee(t)
-                    if r: return r
-                else:
-                    r = self.__topy_pointee(t)
-                    if r: return r.format('*({0})')
-            elif retsemantic == RET_MANAGED_REF:
+                r = self.__topy_pointee(t)
+                if r:
+                    if isinstance(t,gccxml.CPPPointerType):
+                        r = r.format('*({0})')
+                    return r
+            else:
                 classdef = self.cppclasstopy.get(strip_cvq(t.type))
                 if classdef:
-                    return 'reinterpret_cast<PyObject*>(new ref_{0}({2},reinterpret_cast<PyObject*>({1})))'.format(
-                        classdef[0].name,
-                        container,
-                        '{0}' if isinstance(t,gccxml.CPPReferenceType) else '*({0})')
+                    if retsemantic == RET_MANAGED_REF:
+                        assert container
+                        return 'reinterpret_cast<PyObject*>(new ref_{0}({2},reinterpret_cast<PyObject*>({1})))'.format(
+                            classdef[0].name,
+                            container,
+                            deref_placeholder(t))
+                    elif retsemantic == RET_UNMANAGED_REF:
+                        return tmpl.new_uref.format(
+                            classdef[0].name,
+                            deref_placeholder(t))
+                    elif retsemantic == RET_MANAGED_PTR:
+                        return 'reinterpret_cast<PyObject*>(new ptr_{0}({1}))'.format(
+                            classdef[0].name,
+                            '{0}' if isinstance(t,gccxml.CPPPointerType) else '&({0})') # taking the address of a reference in order to call delete (eventually) is weird, but whatever
 
         raise SpecificationError('No conversion from "{0}" to "PyObject*" is registered'.format(t.typestr()))
 
+    def requires_ret_semantic(self,origt,feature,temporary=True):
+        t = strip_cvq(origt)
+        if (feature == RET_UNMANAGED_REF and not temporary) or (t not in self.__topy and isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType))):
+            retc = self.cppclasstopy.get(strip_cvq(strip_refptr(t)))
+            if retc:
+                retc[0].features[feature] = True
+                return True
+        return False
+
     def frompy(self,t):
-        '''Returns a tuple containing the conversion code string and the type (CPP_X_Type) that the code returns'''
+        """Returns a tuple containing the conversion code string and the type (CPP_X_Type) that the code returns"""
 
         assert isinstance(t,gccxml.CPPType)
 
@@ -2078,7 +2130,6 @@ class Conversion:
 
     def member_macro(self,t):
         return self.__pymember.get(t)
-
 
     def check_and_cast(self,t):
         st = strip_refptr(t)
@@ -2281,6 +2332,7 @@ class ModuleDef:
         self.topy = []
         self.frompy = []
         self.smartptrs = []
+        self.vars = {}
 
     def print_gccxml_input(self,out):
         # In addition to the include files, declare certain typedefs so they can
@@ -2295,6 +2347,9 @@ class ModuleDef:
 
         for s in self.smartptrs:
             s.gccxml_input(out,self.classes)
+
+        for v in self.vars.itervalues():
+            v.gccxml_input(out)
 
         for i,conv in enumerate(self.topy):
             print >> out, 'typedef {0} topy_type_{1};\n'.format(conv[0],i)
@@ -2360,29 +2415,36 @@ class ModuleDef:
             c.findbases(classes)
 
 
+        # Sort classes by heirarchy. Base classes need to be declared before derived classes.
+        classes = sorted(classes.itervalues(),key=TypedClassDef.basecount)
+
+        functions = [TypedDefDef(scope,f,tns) for f in self.functions.itervalues()]
+        vars = [TypedVarDef(scope,v,tns) for v in self.vars.itervalues()]
+
+
         # find all methods and functions that return objects that require special storage
-        for c in classes.itervalues():
+        for c in classes:
             for name,m in methods_that_return(c):
                 for ov in m.overloads:
-                    if ov.retsemantic == RET_MANAGED_REF and isinstance(ov.func.returns,(gccxml.CPPReferenceType,gccxml.CPPPointerType)):
-                        t = strip_cvq(ov.func.returns.type)
-                        retcdef = classes.get(t)
-                        if not retcdef:
-                            raise SpecificationError('return type of "{0}" is not an exposed type'.format(name))
-                        retcdef.features.managed_ref = True
+                    if ov.retsemantic in (RET_MANAGED_REF,RET_MANAGED_PTR,RET_UNMANAGED_REF):
+                        conv.requires_ret_semantic(ov.func.returns,ov.retsemantic)
 
             for v in c.vars:
                 if v.really_a_property(conv):
-                    gt = v.getter_type(conv)
-                    if isinstance(gt,gccxml.CPPReferenceType):
-                        cdef = classes.get(gt.type)
-                        if not cdef:
-                            raise SpecificationError('Attribute "{0}" does not refer to an exposed type'.format(v.name))
-                        cdef.features.managed_ref = True
+                    try:
+                        conv.requires_ret_semantic(v.getter_type(conv),RET_MANAGED_REF)
+                    except err.Error as e:
+                        e.info['attr'] = v.name
 
+        for f in functions:
+            for ov in f.overloads:
+                if ov.retsemantic in (RET_MANAGED_PTR,RET_UNMANAGED_REF):
+                    conv.requires_ret_semantic(ov.func.returns,ov.retsemantic)
 
-        # Sort classes by heirarchy. Base classes need to be declared before derived classes.
-        classes = sorted(classes.values(),key=TypedClassDef.basecount)
+        for v in vars:
+            if v.ref in (RET_MANAGED_PTR,RET_UNMANAGED_REF):
+                conv.requires_ret_semantic(v.type,v.ref,v.temporary)
+
 
         # any method that is redefined in a subclass needs to be re-exposed
         # (even virtual methods because they are always called with a
@@ -2410,7 +2472,7 @@ class ModuleDef:
                             d.methods.append(newm)
 
         # TODO: These functions result in the same machine code as long as the
-        # types have the same alignment. They can probably be replace by a
+        # types have the same alignment. They can probably be replaced by a
         # single function.
         for c in classes:
             print >> out.cpp, c.cast_base_func()
@@ -2422,10 +2484,11 @@ class ModuleDef:
             c.output(out,self)
 
         functable = []
-        for f in self.functions.itervalues():
-            tentry,body = TypedDefDef(scope,f,tns).output(conv)
+        for f in functions:
+            tentry,body = f.output(conv)
             print >> out.cpp, body
             functable.append(tentry)
+
 
         print >> out.cpp, tmpl.module.render(
             funclist = functable,
@@ -2437,14 +2500,50 @@ class ModuleDef:
                 'new_init' : c.new_initializes,
                 'no_init' : not c.constructor,
                 'base' : c.static_from_dynamic and c.bases[0].name}
-                    for c in classes)
+                    for c in classes),
+            vars = ({'name' : v.name,'create' : v.creation_code(conv)} for v in vars)
         )
 
         print >> out.h, tmpl.header_end
 
 
+class VarDef:
+    def __init__(self,value,name,ref):
+        self.value = value
+        self.name = name
+        self.ref = ref
+        self.uniquenum = get_unique_num()
 
-pykeywords = set((
+    def gccxml_input(self,outfile):
+        # This uses the GCC __typeof__ keyword. If a parser other than GCCXML is
+        # used, another means of getting the type of the expression will have to
+        # be used (such as getting the return type of an instantiation of
+        # template<typename T> T &dummy_func(T &); ).
+        print >> outfile, 'typedef __typeof__({0}) var_type_{1};\n'.format(self.value,self.uniquenum)
+
+    def get_type(self,tns):
+        return tns.find('var_type_{0}'.format(self.uniquenum))[0]
+
+class TypedVarDef:
+    def __init__(self,scope,vardef,tns):
+        self.value = vardef.value
+        self.name = vardef.name
+        self.ref = vardef.ref
+        self.type = vardef.get_type(tns)
+
+        try:
+            # no need to check if self.value is a legal C++ identifier. If it
+            # isn't, we simply wont find anything with that name.
+            self.temporary = not isinstance(scope.find(self.value)[0],gccxml.CPPVariable)
+        except SpecificationError:
+            self.temporary = True
+
+    def creation_code(self,conv):
+        return conv.topy(self.type,self.ref,temporary=self.temporary).format(self.value)
+
+
+
+pykeywords = frozenset((
     'and','as','assert','break','class','continue','def','del','elif','else',
     'except','exec','finally','for','from','global','if','import','in','is',
     'lambda','not','or','pass','print','raise','return','try','while','with',
@@ -2454,9 +2553,9 @@ def get_valid_py_ident(x,backup):
     if x:
         m = re.match(r'[a-zA-Z_]\w*',x)
         if not (m and m.end() == len(x)):
-            raise SpecificationError('"{0}" is not a valid Python identifier')
+            raise SpecificationError('"{0}" is not a valid Python identifier'.format(x))
         if x in pykeywords:
-            raise SpecificationError('"{0}" is a reserved identifier')
+            raise SpecificationError('"{0}" is a reserved identifier'.format(x))
         return x
     if backup in pykeywords:
         return backup + '_'
@@ -2711,12 +2810,14 @@ def get_ret_semantic(args):
         mapping = {
             'copy' : RET_COPY,
             'managedref' : RET_MANAGED_REF,
+            'managedptr' : RET_MANAGED_PTR,
+            'unmanagedref' : RET_UNMANAGED_REF,
             'self' : RET_SELF,
             'default' : None}
         try:
             rs = mapping[rs]
         except LookupError:
-            raise ParseError('return-semantic (if specified) must be one of the following: {0}'.format(', '.join(mapping.keys())))
+            raise ParseError('return-semantic (if specified) must be one of the following: {0}'.format(', '.join(mapping.iterkeys())))
     return rs
 
 
@@ -2809,6 +2910,28 @@ class tag_Class(tag):
         self.r.constructor = NoInit
 
 
+class tag_Var(tag):
+    def __init__(self,args):
+        val = args['value'].strip()
+
+        ref = args.get('ref')
+        if ref is not None:
+            mapping = {
+                'true' : RET_UNMANAGED_REF,
+                'false' : RET_COPY,
+                'copy' : RET_COPY,
+                'managedptr' : RET_MANAGED_PTR,
+                'unmanagedref' : RET_UNMANAGED_REF}
+            try:
+                ref = mapping[ref]
+            except LookupError:
+                raise ParseError('ref (if specified) must be one of the following: {0}'.format(', '.join(mapping.iterkeys())))
+        else:
+            ref = RET_UNMANAGED_REF
+
+        self.r = VarDef(val,get_valid_py_ident(args.get('name'),val),ref)
+
+
 class tag_Module(tag):
     def __init__(self,args):
         self.r = ModuleDef(args["name"],stripsplit(args["include"]),parse_bool(args,'template-assoc'))
@@ -2836,6 +2959,12 @@ class tag_Module(tag):
     @tag_handler('smart-ptr',tag_SmartPtr)
     def handle_smartptr(self,data):
         self.r.smartptrs.append(data)
+
+    @tag_handler('var',tag_Var)
+    def handle_var(self,data):
+        if data.name in self.r.vars:
+            raise SpecificationError('var "{0}" is defined more than once'.format(data.name))
+        self.r.vars[data.name] = data
 
 
 
