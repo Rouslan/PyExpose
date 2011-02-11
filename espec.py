@@ -70,6 +70,14 @@ coercion = [
 ]
 
 
+EXTRA_VARS_NONE = 0
+EXTRA_VARS_IDICT = 1
+EXTRA_VARS_WEAKLIST = 2
+EXTRA_VARS_BOTH = 3
+
+EXTRA_VARS_SUFFIXES = ['','_i','_w','_wi']
+
+
 class SpecificationError(err.Error):
     def __str__(self):
         return 'Specification Error: ' + super(SpecificationError,self).__str__()
@@ -260,6 +268,15 @@ class ObjFeatures(object):
 
     def __nonzero__(self):
         return self.value != 0
+
+    def count(self):
+        """returns the number of options set to True"""
+        c = 0
+        v = self.value
+        while v:
+            v &= v - 1
+            c += 1
+        return c
 
 
 class MultiInheritNode:
@@ -1046,7 +1063,7 @@ class _NoInit:
 NoInit = _NoInit()
 
 class ClassDef:
-    def __init__(self,name,type,new_initializes=False):
+    def __init__(self,name,type,new_initializes=False,instance_dict=True,weakref=True):
         self.name = name
         self.type = type
         self.new_initializes = new_initializes
@@ -1055,6 +1072,8 @@ class ClassDef:
         self.properties = []
         self.vars = []
         self.doc = None
+        self.instance_dict = instance_dict
+        self.weakref = weakref
         self.uniquenum = get_unique_num()
 
     @property
@@ -1136,6 +1155,8 @@ class TypedClassDef:
         self.uniquenum = classdef.uniquenum
         self.type = classdef.get_type(tns)
         self.new_initializes = classdef.new_initializes
+        self.instance_dict = classdef.instance_dict
+        self.weakref = classdef.weakref
         self.no_destruct = has_trivial_destructor(self.type)
 
         if not isinstance(self.type,gccxml.CPPClass):
@@ -1558,6 +1579,14 @@ class TypedClassDef:
                     if isinstance(m,gccxml.CPPConstructor) and not varargs(m)
                 for args in default_to_ov(m.args))
 
+    def multiple_modes(self):
+        return self.features.count() > 1 if self.uninstantiatable() else self.features or not self.new_initializes
+
+    def can_exist(self):
+        """Return True if an instance with this exact type (a derived type
+        doesn't count) can exist."""
+        return self.features or not self.uninstantiatable()
+
     @append_except
     def output(self,out,module):
         has_mi_subclass = self.has_multi_inherit_subclass()
@@ -1570,7 +1599,7 @@ class TypedClassDef:
                 bases = ['get_obj_{0}Type()'.format(b.name) for b in self.bases]
             elif has_mi_subclass:
                 # common type needed for multiple inheritance
-                bases = ['&obj__CommonType']
+                bases = ['&_obj_Internal{0}Type'.format(EXTRA_VARS_SUFFIXES[(self.weakref << 1) + self.instance_dict])]
 
         virtmethods = []
         typestr = self.type.typestr()
@@ -1593,10 +1622,30 @@ class TypedClassDef:
 
             typestr += '_virt_handler'
 
+
+        richcompare = self.rich_compare(out)
+        number = self.number(out)
+        mapping = self.mapping(out)
+        sequence = self.sequence(out)
+
+
+        destructor = None
+        d = self.type.getDestructor()
+        if (not (self.no_destruct or self.uninstantiatable())) and d:
+            # the destructor's name is not typestr when the type is a template instance
+            destructor = d.canon_name
+            print >> out.cpp, tmpl.destruct.render(
+                name = self.name,
+                destructor = destructor,
+                features = self.features,
+                new_init = self.new_initializes),
+
+
         print >> out.h, tmpl.classdef.render(
             name = self.name,
             type = typestr,
             original_type = self.type.typestr(),
+            destructor = destructor,
             uninstantiatable = self.uninstantiatable(),
             bool_arg_get = self.has_multi_inherit_subclass(),
             new_init = self.new_initializes,
@@ -1604,27 +1653,12 @@ class TypedClassDef:
             features = self.features,
             constructors = self.constructor_args(),
             template_assoc = module.template_assoc,
-            invariable = not self.variable_storage()),
+            invariable = not self.variable_storage(),
+            instance_dict = self.can_exist() and self.instance_dict,
+            weakref = self.can_exist() and self.weakref),
 
         if virtmethods:
             print >> out.h, tmpl.subclass_meth.render(name=self.name)
-
-        richcompare = self.rich_compare(out)
-        number = self.number(out)
-        mapping = self.mapping(out)
-        sequence = self.sequence(out)
-
-        destructref = False
-        destructor = None
-        d = self.type.getDestructor()
-        if (not (self.no_destruct or self.uninstantiatable())) and d:
-            destructor = d.canon_name
-            destructref = True
-            print >> out.cpp, tmpl.destruct.render(
-                name = self.name,
-                destructor = destructor,
-                features = self.features,
-                new_init = self.new_initializes),
 
 
         getsettable = []
@@ -1689,24 +1723,16 @@ class TypedClassDef:
                     e.info['method'] = d.name
                     raise
 
-        sizeof = 'sizeof(obj_{0})'
-        for f,pre in (
-                (self.features.managed_ref,'ref'),
-                (self.features.managed_ptr,'ptr'),
-                (self.features.unmanaged_ref,'uref')):
-            if f: sizeof = '(sizeof({0}_{{0}}) > {1} ? sizeof({0}_{{0}}) : {1})'.format(pre,sizeof)
 
         print >> out.cpp, tmpl.classtypedef.render(
             dynamic = self.dynamic,
             name = self.name,
             type = typestr,
             features = self.features,
-            objsize = sizeof.format(self.name),
             new_init = self.new_initializes,
             destructor = destructor,
             initcode = self.constructor and self.constructor.output(out.conv,typestr),
             module = module.name,
-            destructref = destructref,
             doc = self.doc,
             getsetref = getsetref,
             membersref = membersref,
@@ -1717,7 +1743,9 @@ class TypedClassDef:
             sequence = sequence,
             bases = bases,
             derived = [d.name for d in self.derived],
-            specialmethods = self.special_methods),
+            specialmethods = self.special_methods,
+            instance_dict = self.can_exist() and self.instance_dict,
+            weakref = self.can_exist() and self.weakref),
 
 
 def base_count(x):
@@ -2321,6 +2349,28 @@ class SmartPtr:
         return tns.find('smartptr_{0}_{1}'.format(class_.uniquenum,self.uniquenum))[0]
 
 
+def check_extra_vars(s_weakref,s_instance_dict,c,s_multi,bases_needed):
+    if c.weakref and not s_weakref:
+        raise SpecificationError('a class cannot omit weak reference support if any of its base classes include weak reference support')
+
+    if c.instance_dict and not s_instance_dict:
+        raise SpecificationError('a class cannot omit an instance dictionary if any of its base classes include an instance dictionary')
+
+    # these next two requirements are strange but an "instance lay-out conflict"
+    # error occurs otherwise, when importing the resulting module
+    if s_multi:
+        if c.weakref != s_weakref:
+            raise SpecificationError("a class that includes weak reference support and uses multiple-inheritance cannot have any base classes that don't include weak reference support")
+
+        if c.instance_dict != s_instance_dict:
+            raise SpecificationError("a class that includes an instance dictionary and uses multiple-inheritance cannot have any base classes that don't include an instance dictionary")
+
+    if c.multi_inherit:
+        bases_needed[(c.weakref << 1) + c.instance_dict] = True
+
+    for b in c.bases:
+        check_extra_vars(c.weakref,c.instance_dict,b,s_multi or c.multi_inherit,bases_needed)
+
 class ModuleDef:
     def __init__(self,name,includes=None,template_assoc=False):
         self.name = name
@@ -2471,6 +2521,20 @@ class ModuleDef:
                             newm.classdef = d
                             d.methods.append(newm)
 
+
+        bases_needed = [False] * 4
+        for c in classes:
+            check_extra_vars(True,True,c,False,bases_needed)
+
+        for combo,suffix in enumerate(EXTRA_VARS_SUFFIXES):
+            if bases_needed[combo]:
+                print >> out.cpp, tmpl.obj_internal.render(
+                    module=self.name,
+                    weakref=combo & 2,
+                    instance_dict=combo & 1,
+                    suffix=suffix)
+
+
         # TODO: These functions result in the same machine code as long as the
         # types have the same alignment. They can probably be replaced by a
         # single function.
@@ -2494,14 +2558,15 @@ class ModuleDef:
             funclist = functable,
             module = self.name,
             doc = self.doc,
-            classes = ({
+            classes = [{
                 'name' : c.name,
                 'dynamic' : c.dynamic,
                 'new_init' : c.new_initializes,
                 'no_init' : not c.constructor,
                 'base' : c.static_from_dynamic and c.bases[0].name}
-                    for c in classes),
-            vars = ({'name' : v.name,'create' : v.creation_code(conv)} for v in vars)
+                    for c in classes],
+            vars = ({'name' : v.name,'create' : v.creation_code(conv)} for v in vars),
+            internal_suffixes = [s for need,s in zip(bases_needed,EXTRA_VARS_SUFFIXES) if need]
         )
 
         print >> out.h, tmpl.header_end
@@ -2873,7 +2938,12 @@ class tag_Def(tag):
 class tag_Class(tag):
     def __init__(self,args):
         t = args['type']
-        self.r = ClassDef(get_valid_py_ident(args.get("name"),t),t,parse_bool(args,'new-initializes'))
+        self.r = ClassDef(
+            get_valid_py_ident(args.get("name"),t),
+            t,
+            parse_bool(args,'new-initializes'),
+            parse_bool(args,'instance-dict',True),
+            parse_bool(args,'weakrefs',True))
 
     @staticmethod
     def noinit_means_noinit():

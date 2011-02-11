@@ -9,6 +9,7 @@ import unittest
 import distutils.ccompiler
 import distutils.sysconfig
 import gc
+import weakref
 
 
 sys.path.insert(0,os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -116,10 +117,7 @@ class TestCompile(unittest.TestCase):
         if name != self.modname():
             os.rename(mname,self.modname()+ext)
 
-        try:
-            return __import__(self.modname())
-        except Exception as e:
-            self.fail(str(e))
+        return __import__(self.modname())
 
     def runTest(self):
         tm = self.compile()
@@ -974,7 +972,36 @@ class TestVars(TestCompile):
         self.assertEqual(tm.get_var4_int(),49);
 
 
+class TestWeakListAndDict(TestCompile):
+    header_file = '''
+        struct ThingA {};
+        struct ThingB {};
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="ThingA" weakrefs="false"/>
+            <class type="ThingB" instance-dict="false"/>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+
+        a = tm.ThingA()
+        b = tm.ThingB()
+
+        wb = weakref.ref(b)
+        self.assertRaises(TypeError,weakref.ref,a)
+
+        def battr(x):
+            x.hamburger = 'fluffy'
+
+        battr(a)
+        self.assertRaises(AttributeError,battr,b)
+
+
 
 if __name__ == '__main__':
     unittest.main()
-    #TestVars().debug()
+    #TestInheritance().debug()

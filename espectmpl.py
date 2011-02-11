@@ -76,6 +76,7 @@ void obj_<% name %>_dealloc(obj_<% name %> *self) {
 == endif
     self->ob_type->tp_free(reinterpret_cast<PyObject*>(self));
 }
+
 ''')
 
 getset_table = '''
@@ -99,88 +100,161 @@ PyMethodDef obj_{name}_methods[] = {{
 }};
 '''
 
+# The weaklist and instance dict variables are always placed below 'base' so
+# that the offset of 'base' is always the same as in inherited classes.
+# Although if all derived and inherited classes have the same combination of
+# these variables, they can be placed before 'base', which may be more space
+# efficient because the padding below would not be required.
 classdef = env.from_string('''
 extern PyTypeObject <% '*' if dynamic %>obj_<% name %>Type;
 inline PyTypeObject *get_obj_<% name %>Type() { return <% '&' if not dynamic %>obj_<% name %>Type; }
 
-== if features.managed_ref
-struct ref_<% name %> {
+== set common_base = (weakref or instance_dict) and features
+== if common_base
+/* we need multiple classes with the extra dictionaries at the exact same
+   offset, so we'll derive all the classes from the same type */
+struct _x_<% name %> {
     PyObject_HEAD
     storage_mode mode;
-    <% type %> &base;
-    PyObject *container;
+    union {
+==     if features.managed_ref
+        struct {
+            <% type %> *base;
+            PyObject *container;
+        } ref;
+==     endif
+==     if features.managed_ptr or features.unmanaged_ref
+        <% type %> *ptr;
+==     endif
+==     if not uninstantiatable
+        char base[sizeof(<% type %>)];
+==     endif
+        double x; // to force alignment
+    };
+==     if instance_dict
+    PyObject *idict;
+==     endif
+==     if weakref
+    PyObject *weaklist;
+==     endif
+
+protected:
+    _x_<% name %>() {}
+    ~_x_<% name %>() {}
+};
+== endif
+
+== if features.managed_ref
+struct ref_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
+==     if not common_base
+    PyObject_HEAD
+    storage_mode mode;
+    struct {
+        <% type %> *base;
+        PyObject *container;
+    } ref;
+==     endif
 
     PY_MEM_NEW_DELETE
 
-    ref_<% name %>(<% type %> &base,PyObject *container) : mode(MANAGEDREF), base(base), container(container) {
+    ref_<% name %>(<% type %> &base,PyObject *container) {
+        mode = MANAGEDREF;
+        ref.base = &base;
+        ref.container = container;
         Py_INCREF(container);
         PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
     }
 
     ~ref_<% name %>() {
-        Py_DECREF(container);
+        Py_DECREF(ref.container);
     }
 };
 
 == endif
 == if features.managed_ptr
-struct ptr_<% name %> {
+struct ptr_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
+==     if not common_base
     PyObject_HEAD
     storage_mode mode;
-    <% type %> *base;
+    <% type %> *ptr;
+==     endif
 
     PY_MEM_NEW_DELETE
 
-    ptr_<% name %>(<% type %> *base) : mode(MANAGEDPTR), base(base) {
+    ptr_<% name %>(<% type %> *base) {
+        mode = MANAGEDPTR;
+        ptr = base;
         PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
     }
 
     ~ptr_<% name %>() {
-        delete base;
+        delete ptr;
     }
 };
 
 == endif
 == if features.unmanaged_ref
-struct uref_<% name %> {
+struct uref_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
+==     if not common_base
     PyObject_HEAD
     storage_mode mode;
-    <% type %> &base;
+    <% type %> *ptr;
+==     endif
 
     PY_MEM_NEW_DELETE
 
-    uref_<% name %>(<% type %> &base) : mode(UNMANAGEDREF), base(base) {
+    uref_<% name %>(<% type %> &base) {
+        mode = UNMANAGEDREF;
+        ptr = &base;
         PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
     }
 };
 
 == endif
 
-struct obj_<% name %> {
+struct obj_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
+== if not common_base
     PyObject_HEAD
-== if features.managed_ref or not new_init
+==     if features or not new_init
     storage_mode mode;
-== endif
-== if uninstantiatable
+==     endif
+==     if uninstantiatable
     /* a dummy type whose offset in the struct should be the same as any derived
        type's */
     union {
         double a;
         void *b;
     } base;
-== else
+==     else
     <% type %> base;
+==         if instance_dict
+    PyObject *idict;
+==         endif
+==         if weakref
+    PyObject *weaklist;
+==         endif
+==     endif
+== endif
 
+== if not uninstantiatable
     PY_MEM_NEW_DELETE
 
 ==     for con in constructors
-    obj_<% name %>(<% con.args %>) : base(<% con.argvals %>) {
+    obj_<% name %>(<% con.args %>) <@ if not common_base @>: base(<% con.argvals %>) <@ endif @>{
+==         if common_base
+        new(&base) <% type %>(<% con.argvals %>);
+==         endif
         PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
-==         if features.managed_ref or not new_init
+==         if features or not new_init
         mode = CONTAINS;
 ==         endif
     }
 ==     endfor
+==     if common_base and destructor
+    ~obj_<% name %>() {
+        reinterpret_cast<<% type %>&>(base).<% destructor %>();
+    }
+==     endif
 == endif
 };
 == if template_assoc
@@ -206,7 +280,6 @@ template<> struct invariable_storage<<% original_type %> > {
 == endif
 ''')
 
-
 classtypedef = env.from_string('''
 == if initcode
 int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
@@ -221,7 +294,7 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
     }
 ==     endif
 
-    <% type %> *addr = &self->base;
+    <% type %> *addr = reinterpret_cast<<% type %>*>(&self->base);
 
 =#     before we can call the constructor, the destructor needs to be called if
 =#     we already have an initialized object
@@ -231,23 +304,23 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
 =#         type, in the same place. We'll need to pick one that exists.
 =#         Even with MANAGEDPTR, we can't delete the pointer and switch to
 =#         CONTAINS because there may be another pointer with the same address.
-==         if features.managed_ref or features.managed_ptr or features.unmanaged_ptr
+==         if features.managed_ref or features.managed_ptr or features.unmanaged_ref
 ==             if features.managed_ref
-==                 set addr = '&reinterpret_cast<ref_' + name + '*>(self)->base'
+==                 set addr = 'reinterpret_cast<ref_' ~ name ~ '*>(self)->ref.base'
     case MANAGEDREF:
 ==             endif
 ==             if features.managed_ptr
-==                 set addr = 'reinterpret_cast<ptr_' + name + '*>(self)->base'
+==                 set addr = 'reinterpret_cast<ptr_' ~ name ~ '*>(self)->ptr'
     case MANAGEDPTR:
 ==             endif
 ==             if features.unmanaged_ref
-==                 set addr = '&reinterpret_cast<uref_' + name + '*>(self)->base'
+==                 set addr = 'reinterpret_cast<uref_' ~ name ~ '*>(self)->ptr'
     case UNMANAGEDREF:
 ==             endif
-==             if destructor
-        reinterpret_cast<ref_<% name %>*>(self)->base.<% destructor %>();
-==             endif
         addr = <% addr %>;
+==             if destructor
+        addr-><% destructor %>();
+==             endif
         break;
 ==         endif
 ==         if destructor
@@ -256,6 +329,7 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
         break;
 ==         endif
     default:
+        assert(self->mode == UNINITIALIZED);
         self->mode = CONTAINS;
         break;
     }
@@ -315,11 +389,11 @@ inline PyTypeObject *create_obj_<% name %>Type() {
     Py_DECREF(dict);
     if(UNLIKELY(!type)) return 0;
 
-    type->tp_basicsize = <% objsize %>;
+    type->tp_basicsize = sizeof(obj_<% name %>);
     type->tp_flags |= Py_TPFLAGS_CHECKTYPES;
-    type->tp_dictoffset = 0;
-    type->tp_weaklistoffset = 0;
-<@ if destructref @>    type->tp_dealloc = reinterpret_cast<destructor>(&obj_<% name %>_dealloc);<@ endif @>
+    type->tp_dictoffset = <@if instance_dict @>offsetof(obj_<% name %>,idict)<@ else @>0<@ endif @>;
+    type->tp_weaklistoffset = <@if weakref @>offsetof(obj_<% name %>,weaklist)<@ else @>0<@ endif @>;
+<@ if destructor @>    type->tp_dealloc = reinterpret_cast<destructor>(&obj_<% name %>_dealloc);<@ endif @>
 <@ if '__cmp__' in specialmethods @>    type->tp_compare = reinterpret_cast<cmpfunc>(&obj_<% name %>___cmp__);<@ endif @>
 <@ if '__repr__' in specialmethods @>    type->tp_repr = reinterpret_cast<reprfunc>(&obj_<% name %>___repr__);<@ endif @>
 <@ if number @>    type->tp_as_number = &obj_<% name %>_number_methods;<@ endif @>
@@ -347,9 +421,9 @@ PyTypeObject obj_<% name %>Type = {
     PyObject_HEAD_INIT(0)
     0,                         /* ob_size */
     "<% module %>.<% name %>", /* tp_name */
-    <% objsize %>, /* tp_basicsize */
+    sizeof(obj_<% name %>), /* tp_basicsize */
     0,                         /* tp_itemsize */
-    <@ if destructref @>reinterpret_cast<destructor>(&obj_<% name %>_dealloc)<@ else @>0<@ endif @>, /* tp_dealloc */
+    <@ if destructor @>reinterpret_cast<destructor>(&obj_<% name %>_dealloc)<@ else @>0<@ endif @>, /* tp_dealloc */
     0,                         /* tp_print */
     0,                         /* tp_getattr */
     0,                         /* tp_setattr */
@@ -369,7 +443,7 @@ PyTypeObject obj_<% name %>Type = {
     0,                         /* tp_traverse */
     0,                         /* tp_clear */
     <@ if richcompare @>reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare)<@ else @>0<@ endif @>, /* tp_richcompare */
-    0,                         /* tp_weaklistoffset */
+    <@if weakref @>offsetof(obj_<% name %>,weaklist)<@ else @>0<@ endif @>, /* tp_weaklistoffset */
     <@ if '__iter__' in specialmethods @>reinterpret_cast<getiterfunc>(&obj_<% name %>___iter__)<@ else @>0<@ endif @>, /* tp_iter */
     <@ if 'next' in specialmethods @>reinterpret_cast<iternextfunc>(&obj_<% name %>_next)<@ else @>0<@ endif @>, /* tp_iternext */
     <@ if methodsref @>obj_<% name %>_methods<@ else @>0<@ endif @>, /* tp_methods */
@@ -379,7 +453,7 @@ PyTypeObject obj_<% name %>Type = {
     0,                         /* tp_dict */
     0,                         /* tp_descr_get */
     0,                         /* tp_descr_set */
-    0,                         /* tp_dictoffset */
+    <@if instance_dict @>offsetof(obj_<% name %>,idict)<@ else @>0<@ endif @>, /* tp_dictoffset */
     <@ if initcode @>reinterpret_cast<initproc>(&obj_<% name %>_init)<@ else @>0<@ endif @>, /* tp_init */
     0,                         /* tp_alloc */
     <@ if new_init or not initcode @>&obj_<% name %>_new<@ else @>0<@ endif @> /* tp_new */
@@ -663,20 +737,25 @@ void NoSuchOverload(PyObject *args) {{
     }}
 }}
 
+'''
 
-
-struct obj__Common {{
+obj_internal = env.from_string('''
+struct _obj_Internal<% suffix %> {
     PyObject_HEAD
     storage_mode mode;
-}};
+== if instance_dict
+    PyObject *idict;
+== endif
+== if weakref
+    PyObject *weaklist;
+== endif
+};
 
-/* trying to inherit from more than one type raises a TypeError if there isn't a
-   common base */
-PyTypeObject obj__CommonType = {{
+PyTypeObject _obj_Internal<% suffix %>Type = {
     PyObject_HEAD_INIT(0)
     0,                         /* ob_size */
-    "{module}._internal_class", /* tp_name */
-    sizeof(obj__Common),       /* tp_basicsize */
+    "<% module %>._internal_class<% suffix %>", /* tp_name */
+    sizeof(_obj_Internal<% suffix %>), /* tp_basicsize */
     0,                         /* tp_itemsize */
     0,                         /* tp_dealloc */
     0,                         /* tp_print */
@@ -698,7 +777,7 @@ PyTypeObject obj__CommonType = {{
     0,                         /* tp_traverse */
     0,                         /* tp_clear */
     0,                         /* tp_richcompare */
-    0,                         /* tp_weaklistoffset */
+    <@ if weakref @>offsetof(_obj_Internal<% suffix %>,weaklist)<@ else @>0<@ endif @>, /* tp_weaklistoffset */
     0,                         /* tp_iter */
     0,                         /* tp_iternext */
     0,                         /* tp_methods */
@@ -708,12 +787,12 @@ PyTypeObject obj__CommonType = {{
     0,                         /* tp_dict */
     0,                         /* tp_descr_get */
     0,                         /* tp_descr_set */
-    0,                         /* tp_dictoffset */
+    <@ if instance_dict @>offsetof(_obj_Internal<% suffix %>,idict)<@ else @>0<@ endif @>, /* tp_dictoffset */
     0,                         /* tp_init */
     0,                         /* tp_alloc */
     0                          /* tp_new */
-}};
-'''
+};
+''')
 
 
 module = env.from_string('''
@@ -726,9 +805,10 @@ PyMethodDef func_table[] = {
 
 
 extern "C" SHARED(void) init<% module %>(void) {
-    if(UNLIKELY(PyType_Ready(&obj__CommonType) < 0)) return;
+== for suf in internal_suffixes
+    if(UNLIKELY(PyType_Ready(&_obj_Internal<% suf %>Type) < 0)) return;
+== endfor
 
-== set classes = classes|list
 == for c in classes if not c.dynamic
 ==     if c.base
     obj_<% c.name %>Type.tp_base = get_obj_<% c.base %>Type();
@@ -742,8 +822,10 @@ extern "C" SHARED(void) init<% module %>(void) {
     PyObject *m = Py_InitModule3("<% module %>",func_table,<% doc|quote if doc else '0' %>);
     if(UNLIKELY(!m)) return;
 
-    Py_INCREF(&obj__CommonType);
-    PyModule_AddObject(m,"_internal_class",reinterpret_cast<PyObject*>(&obj__CommonType));
+== for suf in internal_suffixes
+    Py_INCREF(&_obj_Internal<% suf %>Type);
+    PyModule_AddObject(m,"_internal_class<% suf %>",reinterpret_cast<PyObject*>(&_obj_Internal<% suf %>Type));
+== endfor
 
 == for c in classes
 ==     if c.dynamic
@@ -774,30 +856,26 @@ extern "C" SHARED(void) init<% module %>(void) {
 
 cast_base = env.from_string('''
 <% type %> &cast_base_<% name %>(PyObject *o) {
-== if features.managed_ref or not new_init
-    switch(reinterpret_cast<obj__Common*>(o)->mode) {
+== if features or not new_init
+    switch(reinterpret_cast<obj_<% name %>*>(o)->mode) {
     case CONTAINS:
-==     if uninstantiatable
         return reinterpret_cast<<% type %>&>(reinterpret_cast<obj_<% name %>*>(o)->base);
-==     else
-        return reinterpret_cast<obj_<% name %>*>(o)->base;
-==     endif
 =#     The ref_X, ptr_X and uref_X all store an address to the contained type,
 =#     in the same place. We'll need to pick one that exists.
 ==     if features.managed_ref or features.managed_ptr or features.unmanaged_ref
 ==         if features.managed_ref
-==             set addr = 'reinterpret_cast<ref_' + name + '*>(o)->base'
+==             set addr = 'reinterpret_cast<ref_' ~ name ~ '*>(o)->ref.base'
     case MANAGEDREF:
 ==         endif
 ==         if features.managed_ptr
-==             set addr = '*reinterpret_cast<ptr_' + name + '*>(o)->base'
+==             set addr = 'reinterpret_cast<ptr_' ~ name ~ '*>(o)->ptr'
     case MANAGEDPTR:
 ==         endif
 ==         if features.unmanaged_ref
-==             set addr = 'reinterpret_cast<uref_' + name + '*>(o)->base'
+==             set addr = 'reinterpret_cast<uref_' ~ name ~ '*>(o)->ptr'
     case UNMANAGEDREF:
 ==         endif
-        return <% addr %>;
+        return *<% addr %>;
 ==     endif
     default:
         PyErr_SetString(PyExc_RuntimeError,not_init_msg);
