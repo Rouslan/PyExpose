@@ -307,11 +307,10 @@ class MultiInheritNode:
             other = self.main_type.name)
         return r
 
-    def downcast_func(self,features,template_assoc):
+    def downcast_func(self,features):
         r = tmpl.typecheck_start.render(
             name = self.main_type.name,
-            type = self.main_type.type.canon_name,
-            template_assoc = template_assoc)
+            type = self.main_type.type.canon_name)
 
         for d in self.derived_nodes:
             r += d.output(self)
@@ -1346,7 +1345,7 @@ class TypedClassDef:
 
         """
         if self.has_multi_inherit_subclass():
-            return self.heirarchy_chain().downcast_func(self.features,module.template_assoc)
+            return self.heirarchy_chain().downcast_func(self.features)
         else:
             return tmpl.get_base.format(
                 type = self.type.typestr(),
@@ -1652,7 +1651,6 @@ class TypedClassDef:
             dynamic = self.dynamic,
             features = self.features,
             constructors = self.constructor_args(),
-            template_assoc = module.template_assoc,
             invariable = not self.variable_storage(),
             instance_dict = self.can_exist() and self.instance_dict,
             weakref = self.can_exist() and self.weakref),
@@ -1973,18 +1971,18 @@ class Conversion:
         fd = "PyFloat_FromDouble({0})"
 
         self.__topy = {
-            self.bool : 'BoolToPy({0})',
+            self.bool : 'bool_to_py({0})',
             self.sshort : fl,
             self.ushort : fl,
             self.sint : fl,
-            self.uint : 'UIntToPy({0})',
+            self.uint : 'uint_to_py({0})',
             self.slong : fl,
             self.ulong : ful,
             self.float : fd,
             self.double : fd,
             self.long_double : 'PyFloat_FromDouble(static_cast<double>({0}))',
             self.pyobject : '{0}',
-            self.stdstring : 'StringToPy({0})',
+            self.stdstring : 'string_to_py({0})',
             self.cstring : 'PyString_FromString({0})'
         }
 
@@ -1999,19 +1997,19 @@ class Conversion:
         self.basic_types[TYPE_LONG if self.uint.size == self.ulong.size else TYPE_INT].add(self.slong)
 
 
-        tod = (False,'PyToDouble({0})')
+        tod = (False,'py_to_double({0})')
         # The first value of each tuple specifies whether the converted type is
         # a reference to the original value. If not, it cannot be passed by
         # non-const reference.
         self.__frompy = {
             self.bool : (False,'static_cast<bool>(PyObject_IsTrue({0}))'),
-            self.sshort : (False,'PyToShort({0})'),
-            self.ushort : (False,'PyToUShort({0})'),
-            self.sint : (False,'PyToInt({0})'),
-            self.uint : (False,'PyToUInt({0})'),
-            self.slong : (False,'PyToLong({0})'),
-            self.ulong : (False,'PyToULong({0})'),
-            self.float : (False,'static_cast<float>(PyToDouble({0}))'),
+            self.sshort : (False,'py_to_short({0})'),
+            self.ushort : (False,'py_to_ushort({0})'),
+            self.sint : (False,'py_to_int({0})'),
+            self.uint : (False,'py_to_uint({0})'),
+            self.slong : (False,'py_to_long({0})'),
+            self.ulong : (False,'py_to_ulong({0})'),
+            self.float : (False,'static_cast<float>(py_to_double({0}))'),
             self.double : tod,
             self.long_double : tod,
             self.cstring : (False,'PyString_AsString({0})')
@@ -2057,8 +2055,8 @@ class Conversion:
             self.basic_types[TYPE_LONG].add(self.slonglong)
             self.basic_types[TYPE_LONG].add(self.ulonglong)
 
-            self.__frompy[self.slonglong] = (False,'PyToLongLong({0})')
-            self.__frompy[self.ulonglong] = (False,'PyToULongLong({0})')
+            self.__frompy[self.slonglong] = (False,'py_to_longlong({0})')
+            self.__frompy[self.ulonglong] = (False,'py_to_ulonglong({0})')
 
             self.from_py_ssize_t[self.slonglong] = '{0}'
 
@@ -2372,10 +2370,9 @@ def check_extra_vars(s_weakref,s_instance_dict,c,s_multi,bases_needed):
         check_extra_vars(c.weakref,c.instance_dict,b,s_multi or c.multi_inherit,bases_needed)
 
 class ModuleDef:
-    def __init__(self,name,includes=None,template_assoc=False):
+    def __init__(self,name,includes=None):
         self.name = name
         self.includes = includes or []
-        self.template_assoc = template_assoc
         self.classes = []
         self.functions = {}
         self.doc = ''
@@ -2436,9 +2433,7 @@ class ModuleDef:
             includes = self._formatted_includes(),
             module = self.name)
 
-        print >> out.h, tmpl.header_start.render(
-            module = self.name,
-            template_assoc = self.template_assoc)
+        print >> out.h, tmpl.header_start.render(module = self.name)
 
 
         classes = {}
@@ -3004,7 +2999,7 @@ class tag_Var(tag):
 
 class tag_Module(tag):
     def __init__(self,args):
-        self.r = ModuleDef(args["name"],stripsplit(args["include"]),parse_bool(args,'template-assoc'))
+        self.r = ModuleDef(args["name"],stripsplit(args["include"]))
 
     @tag_handler('class',tag_Class)
     def handle_class(self,data):

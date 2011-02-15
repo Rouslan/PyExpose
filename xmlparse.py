@@ -66,7 +66,7 @@ class tag(object):
         return self.r
 
     def text(self,data):
-        if(data and not data.isspace()):
+        if data and not data.isspace():
             raise ParseError('Unexpected text')
 
 

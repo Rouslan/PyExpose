@@ -257,8 +257,8 @@ struct obj_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
 ==     endif
 == endif
 };
-== if template_assoc
 
+#ifdef PYEXPOSE_TEMPLATE_HELPERS
 template<> inline PyTypeObject *get_type<<% original_type %> >() {
     return get_obj_<% name %>Type();
 }
@@ -277,7 +277,7 @@ template<> struct invariable_storage<<% original_type %> > {
     enum {value = 1};
 };
 ==     endif
-== endif
+#endif
 ''')
 
 classtypedef = env.from_string('''
@@ -575,7 +575,7 @@ void get_arg::finished(const char *names[]) {{
 }}
 
 
-long PyToLong(PyObject *po) {{
+long py_to_long(PyObject *po) {{
     long r = PyInt_AsLong(po);
     if(UNLIKELY(r == -1 && PyErr_Occurred())) throw py_error_set();
     return r;
@@ -591,18 +591,18 @@ long narrow(long x,long max,long min) {{
 }}
 
 long PyToXInt(PyObject *po,long max,long min) {{
-    return narrow(PyToLong(po),max,min);
+    return narrow(py_to_long(po),max,min);
 }}
 
-short PyToShort(PyObject *po) {{
+short py_to_short(PyObject *po) {{
     return static_cast<short>(PyToXInt(po,SHRT_MAX,SHRT_MIN));
 }}
 
-unsigned short PyToUShort(PyObject *po) {{
+unsigned short py_to_ushort(PyObject *po) {{
     return static_cast<unsigned short>(PyToXInt(po,USHRT_MAX,0));
 }}
 
-unsigned long PyToULong(PyObject *po) {{
+unsigned long py_to_ulong(PyObject *po) {{
     unsigned long r = PyLong_AsUnsignedLong(po);
     if(UNLIKELY(PyErr_Occurred())) throw py_error_set();
     return r;
@@ -613,52 +613,52 @@ unsigned long PyToULong(PyObject *po) {{
    this unsuitable to compile on a different platform than the one where gccxml
    was called. A future version may fix this. */
 #if INT_MAX == LONG_MAX
-    #define PyToInt(po) PyToLong(po)
-    #define PyToUInt(po) PyToULong(po)
-    #define UIntToPy(x) PyLong_FromUnsignedLong(x)
+    #define py_to_int(po) py_to_long(po)
+    #define py_to_uint(po) py_to_ulong(po)
+    #define uint_to_py(x) PyLong_FromUnsignedLong(x)
 #else
-    #define UIntToPy(x) PyInt_FromLong(x)
+    #define uint_to_py(x) PyInt_FromLong(x)
 
     #if INT_MAX == SHRT_MAX
-        #define PyToInt(po) PyToShort(po)
-        #define PyToUInt(po) PyToUShort(po)
+        #define py_to_int(po) py_to_short(po)
+        #define py_to_uint(po) py_to_ushort(po)
 
     #else
-        int PyToInt(PyObject *po) {{
+        int py_to_int(PyObject *po) {{
             return static_cast<int>(PyToXInt(po,INT_MAX,INT_MIN));
         }}
 
-        unsigned int PyToUInt(PyObject *po) {{
+        unsigned int py_to_uint(PyObject *po) {{
             return static_cast<unsigned int>(PyToXInt(po,UINT_MAX,0));
         }}
     #endif
 #endif
 
 #ifdef HAVE_LONG_LONG
-    long long PyToLongLong(PyObject *po) {{
+    long long py_to_longlong(PyObject *po) {{
         long long r = PyLong_AsLongLong(po);
         if(UNLIKELY(PyErr_Occurred())) throw py_error_set();
         return r;
     }}
 
-    unsigned long long PyToULongLong(PyObject *po) {{
+    unsigned long long py_to_ulonglong(PyObject *po) {{
         unsigned long long r = PyLong_AsUnsignedLongLong(po);
         if(UNLIKELY(PyErr_Occurred())) throw py_error_set();
         return r;
     }}
 #endif
 
-double PyToDouble(PyObject *po) {{
+double py_to_double(PyObject *po) {{
     double r = PyFloat_AsDouble(po);
     if(UNLIKELY(PyErr_Occurred())) throw py_error_set();
     return r;
 }}
 
-inline PyObject *StringToPy(const std::string &s) {{
+inline PyObject *string_to_py(const std::string &s) {{
     return PyString_FromStringAndSize(s.c_str(),s.size());
 }}
 
-PyObject *BoolToPy(bool x) {{
+PyObject *bool_to_py(bool x) {{
     PyObject *r = x ? Py_True : Py_False;
     Py_INCREF(r);
     return r;
@@ -987,7 +987,11 @@ overload_func_call = env.from_string('''
 ''')
 
 typecheck_start = env.from_string('''
-<% type %> &get_base_<% name %>(PyObject *x,bool safe<% ' = true' if not template_assoc %>) {
+#ifdef PYEXPOSE_TEMPLATE_HELPERS
+<% type %> &get_base_<% name %>(PyObject *x,bool safe) {
+#else
+<% type %> &get_base_<% name %>(PyObject *x,bool safe=true) {
+#endif
 ''')
 
 # The
