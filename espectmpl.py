@@ -52,27 +52,40 @@ property_table = env.from_string('''<@
 
 destruct = env.from_string('''
 void obj_<% name %>_dealloc(obj_<% name %> *self) {
-=# UNMANAGEDREF doesn't need any extra clean-up
-== if features.managed_ref or features.managed_ptr or (destructor and not new_init)
+== if features or destructor or ((instance_dict or weakref) and not new_init)
     switch(self->mode) {
+==     if destructor or instance_dict or weakref
     case CONTAINS:
-        self->base.<% destructor %>();
+        self->~obj_<% name %>();
         break;
-== if features.managed_ref
+==     endif
+==     if MANAGED_REF in features
     case MANAGEDREF:
         reinterpret_cast<ref_<% name %>*>(self)->~ref_<% name %>();
         break;
-== endif
-== if features.managed_ptr
+==     endif
+==     if MANAGED_PTR in features
     case MANAGEDPTR:
         reinterpret_cast<ptr_<% name %>*>(self)->~ptr_<% name %>();
         break;
-== endif
-    default: // suppress warnings
+==     endif
+==     if UNMANAGED_REF in features and (instance_dict or weakref)
+    case UNMANAGEDREF:
+        reinterpret_cast<uref_<% name %>*>(self)->~ptr_<% name %>();
+        break;
+==     endif
+=#     TODO: this default case is not always needed
+    default:
+==     if instance_dict
+        Py_XDECREF(self->idict);
+==     endif
+==     if weakref
+        if(self->weaklist) PyObject_ClearWeakRefs(reinterpret_cast<PyObject*>(self));
+==     endif
         break;
     }
-== elif destructor
-    self->base.<% destructor %>();
+== elif instance_dict or weakref
+    self->~obj_<% name %>();
 == endif
     self->ob_type->tp_free(reinterpret_cast<PyObject*>(self));
 }
@@ -117,13 +130,13 @@ struct _x_<% name %> {
     PyObject_HEAD
     storage_mode mode;
     union {
-==     if features.managed_ref
+==     if MANAGED_REF in features
         struct {
             <% type %> *base;
             PyObject *container;
         } ref;
 ==     endif
-==     if features.managed_ptr or features.unmanaged_ref
+==     if MANAGED_PTR in features or UNMANAGED_REF in features
         <% type %> *ptr;
 ==     endif
 ==     if not uninstantiatable
@@ -139,13 +152,27 @@ struct _x_<% name %> {
 ==     endif
 
 protected:
-    _x_<% name %>() {}
-    ~_x_<% name %>() {}
+    _x_<% name %>() {
+==     if instance_dict
+        idict = 0;
+==     endif
+==     if weakref
+        weaklist = 0;
+==     endif
+    }
+    ~_x_<% name %>() {
+==     if instance_dict
+        Py_XDECREF(idict);
+==     endif
+==     if weakref
+        if(weaklist) PyObject_ClearWeakRefs(reinterpret_cast<PyObject*>(this));
+==     endif
+    }
 };
 == endif
 
-== if features.managed_ref
-struct ref_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
+== if MANAGED_REF in features
+struct ref_<% name %><@ if common_base @> : _x_<% name %><@ endif @> {
 ==     if not common_base
     PyObject_HEAD
     storage_mode mode;
@@ -171,8 +198,8 @@ struct ref_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
 };
 
 == endif
-== if features.managed_ptr
-struct ptr_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
+== if MANAGED_PTR in features
+struct ptr_<% name %><@ if common_base @> : _x_<% name %><@ endif @> {
 ==     if not common_base
     PyObject_HEAD
     storage_mode mode;
@@ -193,8 +220,8 @@ struct ptr_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
 };
 
 == endif
-== if features.unmanaged_ref
-struct uref_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
+== if UNMANAGED_REF in features
+struct uref_<% name %><@ if common_base @> : _x_<% name %><@ endif @> {
 ==     if not common_base
     PyObject_HEAD
     storage_mode mode;
@@ -212,10 +239,10 @@ struct uref_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
 
 == endif
 
-struct obj_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
+struct obj_<% name %><@ if common_base @> : _x_<% name %><@ endif @> {
 == if not common_base
     PyObject_HEAD
-==     if features or not new_init
+==     if mode_var
     storage_mode mode;
 ==     endif
 ==     if uninstantiatable
@@ -240,19 +267,30 @@ struct obj_<% name %><@ if common_base @> : public _x_<% name %><@ endif @> {
     PY_MEM_NEW_DELETE
 
 ==     for con in constructors
-    obj_<% name %>(<% con.args %>) <@ if not common_base @>: base(<% con.argvals %>) <@ endif @>{
+    obj_<% name %>(<% con.args %>) <@ if not common_base @>: base(<% con.argvals %>)<@ if instance_dict @>, idict(0)<@ endif @><@ if weakref @>, weaklist(0)<@ endif @> <@ endif @>{
 ==         if common_base
         new(&base) <% type %>(<% con.argvals %>);
 ==         endif
         PyObject_Init(reinterpret_cast<PyObject*>(this),get_obj_<% name %>Type());
-==         if features or not new_init
+==         if mode_var
         mode = CONTAINS;
 ==         endif
     }
 ==     endfor
-==     if common_base and destructor
+==     if (common_base and destructor) or ((instance_dict or weakref) and not common_base)
     ~obj_<% name %>() {
+==         if common_base
+==             if destructor
         reinterpret_cast<<% type %>&>(base).<% destructor %>();
+==             endif
+==         else
+==             if instance_dict
+        Py_XDECREF(idict);
+==             endif
+==             if weakref
+        if(weaklist) PyObject_ClearWeakRefs(reinterpret_cast<PyObject*>(this));
+==             endif
+==         endif
     }
 ==     endif
 == endif
@@ -272,11 +310,11 @@ template<> struct wrapped_type<<% original_type %> > {
     typedef obj_<% name %> type;
 };
 
-==     if invariable
+== if invariable
 template<> struct invariable_storage<<% original_type %> > {
     enum {value = 1};
 };
-==     endif
+== endif
 #endif
 ''')
 
@@ -286,7 +324,7 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
 ==     if derived
     if(UNLIKELY(
 ==         for d in derived
-        <@ if not loop.first @>|| <@ endif @>PyObject_IsInstance(reinterpret_cast<PyObject*>(self),reinterpret_cast<PyObject*>(get_obj_<% d %>Type()))
+        <@ if not loop.first @>|| <@ endif @>PyObject_TypeCheck(reinterpret_cast<PyObject*>(self),get_obj_<% d %>Type())
 ==         endfor
     )) {
         PyErr_SetString(PyExc_TypeError,init_on_derived_msg);
@@ -304,16 +342,16 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
 =#         type, in the same place. We'll need to pick one that exists.
 =#         Even with MANAGEDPTR, we can't delete the pointer and switch to
 =#         CONTAINS because there may be another pointer with the same address.
-==         if features.managed_ref or features.managed_ptr or features.unmanaged_ref
-==             if features.managed_ref
+==         if features
+==             if MANAGED_REF in features
 ==                 set addr = 'reinterpret_cast<ref_' ~ name ~ '*>(self)->ref.base'
     case MANAGEDREF:
 ==             endif
-==             if features.managed_ptr
+==             if MANAGED_PTR in features
 ==                 set addr = 'reinterpret_cast<ptr_' ~ name ~ '*>(self)->ptr'
     case MANAGEDPTR:
 ==             endif
-==             if features.unmanaged_ref
+==             if UNMANAGED_REF in features
 ==                 set addr = 'reinterpret_cast<uref_' ~ name ~ '*>(self)->ptr'
     case UNMANAGEDREF:
 ==             endif
@@ -347,11 +385,18 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
 == if new_init or not initcode
 PyObject *obj_<% name %>_new(PyTypeObject *type,PyObject *,PyObject *) {
 == if new_init
-    try {
-        obj_<% name %> *ptr = reinterpret_cast<obj_<% name %>*>(type->tp_alloc(type,0));
-        if(ptr) new(&ptr->base) <% type %>();
-        return reinterpret_cast<PyObject*>(ptr);
-    } EXCEPT_HANDLERS(0)
+    obj_<% name %> *ptr = reinterpret_cast<obj_<% name %>*>(type->tp_alloc(type,0));
+    if(ptr) {
+        try {
+            try {
+                new(&ptr->base) <% type %>();
+            } catch(...) {
+                Py_DECREF(ptr);
+            }
+        } EXCEPT_HANDLERS(0)
+        ptr->mode = CONTAINS;
+    }
+    return reinterpret_cast<PyObject*>(ptr);
 == else
     PyErr_SetString(PyExc_TypeError,"The <% name %> type cannot be instantiated");
     return 0;
@@ -502,8 +547,6 @@ module_start = '''
 #include <Python.h>
 #include <structmember.h>
 #include <exception>
-#include <string>
-#include <limits.h>
 #include <assert.h>
 {includes}
 #include "{module}.h"
@@ -575,11 +618,6 @@ void get_arg::finished(const char *names[]) {{
 }}
 
 
-long py_to_long(PyObject *po) {{
-    long r = PyInt_AsLong(po);
-    if(UNLIKELY(r == -1 && PyErr_Occurred())) throw py_error_set();
-    return r;
-}}
 
 long narrow(long x,long max,long min) {{
     if(UNLIKELY(x > max || x < min)) {{
@@ -590,121 +628,6 @@ long narrow(long x,long max,long min) {{
     return x;
 }}
 
-long PyToXInt(PyObject *po,long max,long min) {{
-    return narrow(py_to_long(po),max,min);
-}}
-
-short py_to_short(PyObject *po) {{
-    return static_cast<short>(PyToXInt(po,SHRT_MAX,SHRT_MIN));
-}}
-
-unsigned short py_to_ushort(PyObject *po) {{
-    return static_cast<unsigned short>(PyToXInt(po,USHRT_MAX,0));
-}}
-
-unsigned long py_to_ulong(PyObject *po) {{
-    unsigned long r = PyLong_AsUnsignedLong(po);
-    if(UNLIKELY(PyErr_Occurred())) throw py_error_set();
-    return r;
-}}
-
-/* Although the size of int is checked here, the code generated by expose.py
-   assumes the size of int is the same as it was when gccxml was called, making
-   this unsuitable to compile on a different platform than the one where gccxml
-   was called. A future version may fix this. */
-#if INT_MAX == LONG_MAX
-    #define py_to_int(po) py_to_long(po)
-    #define py_to_uint(po) py_to_ulong(po)
-    #define uint_to_py(x) PyLong_FromUnsignedLong(x)
-#else
-    #define uint_to_py(x) PyInt_FromLong(x)
-
-    #if INT_MAX == SHRT_MAX
-        #define py_to_int(po) py_to_short(po)
-        #define py_to_uint(po) py_to_ushort(po)
-
-    #else
-        int py_to_int(PyObject *po) {{
-            return static_cast<int>(PyToXInt(po,INT_MAX,INT_MIN));
-        }}
-
-        unsigned int py_to_uint(PyObject *po) {{
-            return static_cast<unsigned int>(PyToXInt(po,UINT_MAX,0));
-        }}
-    #endif
-#endif
-
-#ifdef HAVE_LONG_LONG
-    long long py_to_longlong(PyObject *po) {{
-        long long r = PyLong_AsLongLong(po);
-        if(UNLIKELY(PyErr_Occurred())) throw py_error_set();
-        return r;
-    }}
-
-    unsigned long long py_to_ulonglong(PyObject *po) {{
-        unsigned long long r = PyLong_AsUnsignedLongLong(po);
-        if(UNLIKELY(PyErr_Occurred())) throw py_error_set();
-        return r;
-    }}
-#endif
-
-double py_to_double(PyObject *po) {{
-    double r = PyFloat_AsDouble(po);
-    if(UNLIKELY(PyErr_Occurred())) throw py_error_set();
-    return r;
-}}
-
-inline PyObject *string_to_py(const std::string &s) {{
-    return PyString_FromStringAndSize(s.c_str(),s.size());
-}}
-
-PyObject *bool_to_py(bool x) {{
-    PyObject *r = x ? Py_True : Py_False;
-    Py_INCREF(r);
-    return r;
-}}
-
-unsigned char py_ssize_t_to_uchar(Py_ssize_t x) {{
-    return static_cast<unsigned char>(narrow(x,UCHAR_MAX,0));
-}}
-
-signed char py_ssize_t_to_schar(Py_ssize_t x) {{
-    return static_cast<signed char>(narrow(x,SCHAR_MAX,SCHAR_MIN));
-}}
-
-#if CHAR_MIN == 0
-    #define py_ssize_t_to_char(x) py_ssize_t_to_uchar(x)
-#else
-    #define py_ssize_t_to_char(x) py_ssize_t_to_schar(x)
-#endif
-
-unsigned short py_ssize_t_to_ushort(Py_ssize_t x) {{
-    return static_cast<unsigned short>(narrow(x,USHRT_MAX,0));
-}}
-
-short py_ssize_t_to_sshort(Py_ssize_t x) {{
-    return static_cast<short>(narrow(x,SHRT_MAX,SHRT_MIN));
-}}
-
-#if (PY_SIZE_MAX>>1) > INT_MAX
-    unsigned int py_ssize_t_to_uint(Py_ssize_t x) {{
-        return static_cast<unsigned int>(narrow(x,UINT_MAX,0));
-    }}
-
-    int py_ssize_t_to_sint(Py_ssize_t x) {{
-        return static_cast<int>(narrow(x,INT_MAX,INT_MIN));
-    }}
-#else
-    #define py_ssize_t_to_sint(x) x
-
-    unsigned int py_ssize_t_to_uint(Py_ssize_t x) {{
-        return static_cast<unsigned int>(narrow(x,INT_MAX,0));
-    }}
-#endif
-
-unsigned long py_ssize_t_to_ulong(Py_ssize_t x) {{
-    return static_cast<unsigned long>(narrow(x,LONG_MAX,0));
-}}
 
 
 void NoSuchOverload(PyObject *args) {{
@@ -862,16 +785,16 @@ cast_base = env.from_string('''
         return reinterpret_cast<<% type %>&>(reinterpret_cast<obj_<% name %>*>(o)->base);
 =#     The ref_X, ptr_X and uref_X all store an address to the contained type,
 =#     in the same place. We'll need to pick one that exists.
-==     if features.managed_ref or features.managed_ptr or features.unmanaged_ref
-==         if features.managed_ref
+==     if features
+==         if MANAGED_REF in features
 ==             set addr = 'reinterpret_cast<ref_' ~ name ~ '*>(o)->ref.base'
     case MANAGEDREF:
 ==         endif
-==         if features.managed_ptr
+==         if MANAGED_PTR in features
 ==             set addr = 'reinterpret_cast<ptr_' ~ name ~ '*>(o)->ptr'
     case MANAGEDPTR:
 ==         endif
-==         if features.unmanaged_ref
+==         if UNMANAGED_REF in features
 ==             set addr = 'reinterpret_cast<uref_' ~ name ~ '*>(o)->ptr'
     case UNMANAGEDREF:
 ==         endif
@@ -902,69 +825,11 @@ header_start = env.from_string('''
 #ifndef <% module %>_h
 #define <% module %>_h
 
-#ifdef __GNUC__
-    #define LIKELY(X) __builtin_expect(static_cast<bool>(X),1)
-    #define UNLIKELY(X) __builtin_expect(static_cast<bool>(X),0)
-#else
-    #define LIKELY(X) X
-    #define UNLIKELY(X) X
-#endif
-
-#if defined(_WIN32) || defined(__CYGWIN__) || defined(__BEOS__)
-    #define SHARED(RET) __declspec(dllexport) RET
-#elif defined(__GNUC__) && __GNUC__ >= 4
-    #define SHARED(RET) RET __attribute__((visibility("default")))
-#else
-    #define SHARED(RET) RET
-#endif
-
-
-#define PY_MEM_NEW_DELETE void *operator new(size_t s) {            \\
-        void *ptr = PyMem_Malloc(s);                                \\
-        if(!ptr) throw std::bad_alloc();                            \\
-        return ptr;                                                 \\
-    }                                                               \\
-                                                                    \\
-    void operator delete(void *ptr) {                               \\
-        PyMem_Free(ptr);                                            \\
-    }
+#include "pyexpose_common.h"
 
 
 #pragma GCC visibility push(hidden)
 
-/* when thrown, indicates that a PyErr_X function was already called with the
-   details of the exception. As such, it carries no information of its own. */
-struct py_error_set {};
-
-enum storage_mode {UNINITIALIZED = 0,CONTAINS,MANAGEDREF,MANAGEDPTR,UNMANAGEDREF};
-
-== if template_assoc
-// The following templates are specialized for each exposed class
-
-template<typename T> inline PyTypeObject *get_type() {
-    int dont_instantiate[sizeof(T) < 0 ? 1 : -1];
-    return 0;
-}
-
-template<typename T> inline T &get_base(PyObject *o) {
-    int dont_instantiate[sizeof(T) < 0 ? 1 : -1];
-}
-
-template<typename T> struct wrapped_type {
-    typedef void type;
-};
-
-/* When invariable_storage<T>::value is 1, the location of T inside of its
-   wrapped type will always be the same, thus an instance of T can be accessed
-   from a PyObject pointer using
-   reinterpret_cast<wrapped_type<T>::type*>(pointer)->base. However, the
-   instance will not necessarily be initialized. Call get_base at least once to
-   ensure that it is (once initialized, it can never be uninitialized). */
-template<typename T> struct invariable_storage {
-    enum {value = 0};
-};
-
-== endif
 ''')
 
 header_end = '''
@@ -1004,16 +869,16 @@ typecheck_start = env.from_string('''
 # subject to dead code removal by the compiler.
 typecheck_test = '''
     if(reinterpret_cast<long>(static_cast<{type}*>(reinterpret_cast<{othertype}*>(1))) != 1 &&
-            PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{other}Type())))
+            PyObject_TypeCheck(x,get_obj_{other}Type()))
         return cast_base_{other}(x);
 '''
 
 typecheck_else = '''
-    if(UNLIKELY(safe && !PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{name}Type())))) {{
+    if(UNLIKELY(safe && !PyObject_TypeCheck(x,get_obj_{name}Type()))) {{
         PyErr_SetString(PyExc_TypeError,"object is not an instance of {name}");
         throw py_error_set();
     }}
-    assert(PyObject_IsInstance(x,reinterpret_cast<PyObject*>(get_obj_{name}Type())));
+    assert(PyObject_TypeCheck(x,get_obj_{name}Type()));
     return cast_base_{name}(x);
 }}
 '''
@@ -1030,7 +895,7 @@ function = '''
 number_op = '''
 PyObject *obj_{cname}_{op}({args}) {{
     try {{
-        if(PyObject_IsInstance(a,reinterpret_cast<PyObject*>(get_obj_{cname}Type()))) {{
+        if(PyObject_TypeCheck(a,get_obj_{cname}Type())) {{
 {code}
         }} else {{
 {rcode}

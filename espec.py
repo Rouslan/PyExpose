@@ -25,6 +25,10 @@ RET_UNMANAGED_REF = 3
 RET_COPY = 1001
 RET_SELF = 1002
 
+tmpl.env.globals['MANAGED_REF'] = RET_MANAGED_REF
+tmpl.env.globals['MANAGED_PTR'] = RET_MANAGED_PTR
+tmpl.env.globals['UNMANAGED_REF'] = RET_UNMANAGED_REF
+
 GETTER = 1
 SETTER = 2
 
@@ -239,46 +243,6 @@ def has_trivial_destructor(x):
         all(has_trivial_destructor(b.type) for b in x.bases)
 
 
-def bitproperty(bit):
-    def get(self): return self[bit]
-    def set(self,v): self[v] = v
-    return property(get,set)
-
-class ObjFeatures(object):
-    """Specifies the way a class may be stored.
-
-    managed_ref -- A reference and the object that actually holds the object is
-        stored
-    managed_ptr -- A pointer is held and delete will be called upon destruction
-    unmanaged_ref -- A reference is stored. The object's lifetime is not managed
-
-    """
-    value = 0
-
-    def __getitem__(self,k):
-        return bool(self.value & (1 << k))
-
-    def __setitem__(self,k,v):
-        if v: self.value |= 1 << k
-        else: self.value &= ~(1 << k)
-
-    managed_ref = bitproperty(RET_MANAGED_REF)
-    managed_ptr = bitproperty(RET_MANAGED_PTR)
-    unmanaged_ref = bitproperty(RET_UNMANAGED_REF)
-
-    def __nonzero__(self):
-        return self.value != 0
-
-    def count(self):
-        """returns the number of options set to True"""
-        c = 0
-        v = self.value
-        while v:
-            v &= v - 1
-            c += 1
-        return c
-
-
 class MultiInheritNode:
     def __init__(self,first):
         self.classes = [first]
@@ -307,7 +271,7 @@ class MultiInheritNode:
             other = self.main_type.name)
         return r
 
-    def downcast_func(self,features):
+    def downcast_func(self):
         r = tmpl.typecheck_start.render(
             name = self.main_type.name,
             type = self.main_type.type.canon_name)
@@ -1154,8 +1118,8 @@ class TypedClassDef:
         self.uniquenum = classdef.uniquenum
         self.type = classdef.get_type(tns)
         self.new_initializes = classdef.new_initializes
-        self.instance_dict = classdef.instance_dict
-        self.weakref = classdef.weakref
+        self._instance_dict = classdef.instance_dict
+        self._weakref = classdef.weakref
         self.no_destruct = has_trivial_destructor(self.type)
 
         if not isinstance(self.type,gccxml.CPPClass):
@@ -1292,7 +1256,8 @@ class TypedClassDef:
 
         self.bases = []
         self.derived = []
-        self.features = ObjFeatures()
+        self.features = set()
+        self.needs_mode_var = False
 
     def basecount(self):
         return sum(1 + b.basecount() for b in self.bases)
@@ -1301,7 +1266,7 @@ class TypedClassDef:
     def dynamic(self):
         return len(self.bases) > 1
 
-    # a seperate property in case a dynamic declration is ever needed for a single/no-inheritance class
+    # a seperate property in case a dynamic declaration is ever needed for a single/no-inheritance class
     multi_inherit = dynamic
 
     @property
@@ -1313,7 +1278,7 @@ class TypedClassDef:
 
     def variable_storage(self):
         """Returns true if the memory layout for this object varies"""
-        return self.has_multi_inherit_subclass() or self.features
+        return self.has_multi_inherit_subclass() or self.indirect_features()
 
     def uninstantiatable(self):
         return (not self.constructor) and any(pure_virtual(m) for m in self.type.members)
@@ -1326,12 +1291,36 @@ class TypedClassDef:
                 self.bases.append(cd)
                 cd.derived.append(self)
 
+    def check_needs_mode_var(self):
+        """Checks if the mode variable will be required.
+
+        A mode variable is required if this class needs to be stored any way
+        other than the default (CONTAINS), if it can exist in an unitialized
+        state (UNITIALIZED), or if any base or derived class needs the variable.
+
+        Even with new-initializes="true", any class that has a constructor that
+        can throw an exception and a non-trivial destructor needs a mode
+        variable. If the constructor throws an exception, the allocated object
+        memory needs to be freed using Py_DECREF. Since Py_DECREF causes the
+        dealloc function to be called, the mode variable is required for that
+        function to know when it must not call the destructor.
+
+        """
+        if (not self.needs_mode_var) and (self.features or not (self.new_initializes and self.no_destruct)):
+            self.propogate_needs_mode_var()
+
+    def propogate_needs_mode_var(self):
+        self.needs_mode_var = True
+        for c in itertools.chain(self.derived,self.bases):
+            if not c.needs_mode_var:
+                c.propogate_needs_mode_var()
+
     def cast_base_func(self):
         return tmpl.cast_base.render(
             type = self.type.typestr(),
             name = self.name,
             uninstantiatable = self.uninstantiatable(),
-            features = self.features,
+            features = self.indirect_features(),
             new_init = self.new_initializes)
 
     def get_base_func(self,module):
@@ -1345,7 +1334,7 @@ class TypedClassDef:
 
         """
         if self.has_multi_inherit_subclass():
-            return self.heirarchy_chain().downcast_func(self.features)
+            return self.heirarchy_chain().downcast_func()
         else:
             return tmpl.get_base.format(
                 type = self.type.typestr(),
@@ -1578,13 +1567,20 @@ class TypedClassDef:
                     if isinstance(m,gccxml.CPPConstructor) and not varargs(m)
                 for args in default_to_ov(m.args))
 
-    def multiple_modes(self):
-        return self.features.count() > 1 if self.uninstantiatable() else self.features or not self.new_initializes
-
     def can_exist(self):
         """Return True if an instance with this exact type (a derived type
         doesn't count) can exist."""
         return self.features or not self.uninstantiatable()
+
+    def instance_dict(self):
+        return self.can_exist() and self._instance_dict
+
+    def weakref(self):
+        return self.can_exist() and self._weakref
+
+    def indirect_features(self):
+        """returns a union of features for this class and all derived classes"""
+        return reduce(set.union,(d.indirect_features() for d in self.derived),self.features)
 
     @append_except
     def output(self,out,module):
@@ -1598,7 +1594,7 @@ class TypedClassDef:
                 bases = ['get_obj_{0}Type()'.format(b.name) for b in self.bases]
             elif has_mi_subclass:
                 # common type needed for multiple inheritance
-                bases = ['&_obj_Internal{0}Type'.format(EXTRA_VARS_SUFFIXES[(self.weakref << 1) + self.instance_dict])]
+                bases = ['&_obj_Internal{0}Type'.format(EXTRA_VARS_SUFFIXES[(self._weakref << 1) + self._instance_dict])]
 
         virtmethods = []
         typestr = self.type.typestr()
@@ -1637,7 +1633,9 @@ class TypedClassDef:
                 name = self.name,
                 destructor = destructor,
                 features = self.features,
-                new_init = self.new_initializes),
+                new_init = self.new_initializes,
+                instance_dict = self.instance_dict(),
+                weakref = self.weakref()),
 
 
         print >> out.h, tmpl.classdef.render(
@@ -1652,8 +1650,9 @@ class TypedClassDef:
             features = self.features,
             constructors = self.constructor_args(),
             invariable = not self.variable_storage(),
-            instance_dict = self.can_exist() and self.instance_dict,
-            weakref = self.can_exist() and self.weakref),
+            instance_dict = self.instance_dict(),
+            weakref = self.weakref(),
+            mode_var = self.needs_mode_var),
 
         if virtmethods:
             print >> out.h, tmpl.subclass_meth.render(name=self.name)
@@ -1727,7 +1726,7 @@ class TypedClassDef:
             name = self.name,
             type = typestr,
             features = self.features,
-            new_init = self.new_initializes,
+            new_init = self.constructor and self.new_initializes,
             destructor = destructor,
             initcode = self.constructor and self.constructor.output(out.conv,typestr),
             module = module.name,
@@ -1742,8 +1741,8 @@ class TypedClassDef:
             bases = bases,
             derived = [d.name for d in self.derived],
             specialmethods = self.special_methods,
-            instance_dict = self.can_exist() and self.instance_dict,
-            weakref = self.can_exist() and self.weakref),
+            instance_dict = self.instance_dict(),
+            weakref = self.weakref()),
 
 
 def base_count(x):
@@ -2124,7 +2123,7 @@ class Conversion:
         if (feature == RET_UNMANAGED_REF and not temporary) or (t not in self.__topy and isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType))):
             retc = self.cppclasstopy.get(strip_cvq(strip_refptr(t)))
             if retc:
-                retc[0].features[feature] = True
+                retc[0].features.add(feature)
                 return True
         return False
 
@@ -2348,26 +2347,26 @@ class SmartPtr:
 
 
 def check_extra_vars(s_weakref,s_instance_dict,c,s_multi,bases_needed):
-    if c.weakref and not s_weakref:
+    if c._weakref and not s_weakref:
         raise SpecificationError('a class cannot omit weak reference support if any of its base classes include weak reference support')
 
-    if c.instance_dict and not s_instance_dict:
+    if c._instance_dict and not s_instance_dict:
         raise SpecificationError('a class cannot omit an instance dictionary if any of its base classes include an instance dictionary')
 
     # these next two requirements are strange but an "instance lay-out conflict"
     # error occurs otherwise, when importing the resulting module
     if s_multi:
-        if c.weakref != s_weakref:
+        if c._weakref != s_weakref:
             raise SpecificationError("a class that includes weak reference support and uses multiple-inheritance cannot have any base classes that don't include weak reference support")
 
-        if c.instance_dict != s_instance_dict:
+        if c._instance_dict != s_instance_dict:
             raise SpecificationError("a class that includes an instance dictionary and uses multiple-inheritance cannot have any base classes that don't include an instance dictionary")
 
     if c.multi_inherit:
-        bases_needed[(c.weakref << 1) + c.instance_dict] = True
+        bases_needed[(c._weakref << 1) + c._instance_dict] = True
 
     for b in c.bases:
-        check_extra_vars(c.weakref,c.instance_dict,b,s_multi or c.multi_inherit,bases_needed)
+        check_extra_vars(c._weakref,c._instance_dict,b,s_multi or c.multi_inherit,bases_needed)
 
 class ModuleDef:
     def __init__(self,name,includes=None):
@@ -2491,10 +2490,14 @@ class ModuleDef:
                 conv.requires_ret_semantic(v.type,v.ref,v.temporary)
 
 
-        # any method that is redefined in a subclass needs to be re-exposed
-        # (even virtual methods because they are always called with a
-        # type-qualifier).
+        bases_needed = [False] * 4
+
         for c in classes:
+            c.check_needs_mode_var()
+
+            # any method that is redefined in a subclass needs to be re-exposed
+            # (even virtual methods because they are always called with a
+            # type-qualifier).
             for m in c.methods:
                 for d in c.derived:
                     if not any(m.name == dm.name for dm in d.methods):
@@ -2516,10 +2519,8 @@ class ModuleDef:
                             newm.classdef = d
                             d.methods.append(newm)
 
-
-        bases_needed = [False] * 4
-        for c in classes:
             check_extra_vars(True,True,c,False,bases_needed)
+
 
         for combo,suffix in enumerate(EXTRA_VARS_SUFFIXES):
             if bases_needed[combo]:

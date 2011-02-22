@@ -12,7 +12,8 @@ import gc
 import weakref
 
 
-sys.path.insert(0,os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0,PROJECT_DIR)
 
 
 import expose
@@ -84,12 +85,13 @@ class TestCompile(unittest.TestCase):
 
             spec = espec.getspec('spec.xml')
             spec.name = self.modname() # give the new module a unique name
-            expose.generate_intermediate(spec,'gccxml.interm','.',None,'g++','-I'+pyinc)
+            expose.generate_intermediate(spec,'gccxml.interm','.',None,'g++','-I{0} -I{1}'.format(pyinc,PROJECT_DIR))
             expose.generate_module(spec,'gccxml.interm','.')
 
             self.comp = distutils.ccompiler.new_compiler()
             distutils.sysconfig.customize_compiler(self.comp)
             self.comp.add_include_dir(pyinc)
+            self.comp.add_include_dir(PROJECT_DIR)
             self.comp.add_library('stdc++')
 
             # add the current directory to the path so the module that will be generated, can be loaded
@@ -102,11 +104,13 @@ class TestCompile(unittest.TestCase):
         os.chdir(self.olddir)
         shutil.rmtree(self.dir)
 
-    def compile(self):
+    def compile(self,templates=False):
         try:
             files = [self.modname() + '.cpp']
             if self.cpp_file:
                 files.append('main.cpp')
+            if templates:
+                self.comp.define_macro('PYEXPOSE_TEMPLATE_HELPERS',1)
             obj = self.comp.compile(files,debug=True)
             self.comp.link_shared_lib(obj,self.modname(),debug=True)
         except (distutils.ccompiler.CompileError,distutils.ccompiler.LinkError) as e:
@@ -711,7 +715,7 @@ class TestTemplateAssoc(TestCompile):
     '''
 
     spec_file = '''<?xml version="1.0"?>
-        <module name="testmodule" include="main.h" template-assoc="true">
+        <module name="testmodule" include="main.h">
             <from-pyobject type="pyptr&lt;Thing&gt;">pyptr&lt;Thing&gt;(borrowed_ref(<val/>))</from-pyobject>
             <to-pyobject type="pyptr&lt;Thing&gt;"><val/>.get_new_ref()</to-pyobject>
             <class type="Thing"/>
@@ -720,7 +724,7 @@ class TestTemplateAssoc(TestCompile):
     '''
 
     def runTest(self):
-        tm = self.compile()
+        tm = self.compile(True)
         self.assertEqual(tm.getval(tm.Thing()),6)
 
 
@@ -756,7 +760,7 @@ class TestSmartPtr(TestCompile):
     '''
 
     spec_file = '''<?xml version="1.0"?>
-        <module name="testmodule" include="main.h" template-assoc="true">
+        <module name="testmodule" include="main.h">
             <smart-ptr>
                 <ptr-type>pyptr&lt;<type/>&gt;</ptr-type>
                 <from-pyobject>pyptr&lt;<type/>&gt;(&amp;<val/>,borrowed_ref(<pyobject/>))</from-pyobject>
@@ -768,7 +772,7 @@ class TestSmartPtr(TestCompile):
     '''
 
     def runTest(self):
-        tm = self.compile()
+        tm = self.compile(True)
         self.assertEqual(tm.getval(tm.Thing()),6)
 
 
@@ -905,7 +909,7 @@ class TestInvariableStorage(TestCompile):
     '''
 
     spec_file = '''<?xml version="1.0"?>
-        <module name="testmodule" include="main.h" template-assoc="true">
+        <module name="testmodule" include="main.h">
             <class type="A"/>
             <class type="B">
                 <attr cmember="a"/>
@@ -916,7 +920,7 @@ class TestInvariableStorage(TestCompile):
     '''
 
     def runTest(self):
-        tm = self.compile()
+        tm = self.compile(True)
 
         self.assertEqual(tm.a_is_invariable(),False)
         self.assertEqual(tm.b_is_invariable(),True)
@@ -999,6 +1003,32 @@ class TestWeakListAndDict(TestCompile):
 
         battr(a)
         self.assertRaises(AttributeError,battr,b)
+
+
+class TestObjectH(TestCompile):
+    header_file = '''
+        #include "pyobject.h"
+
+        void swap_1_and_3(py::object list) {
+            py::object temp = list[1];
+            list[1] = list[3];
+            list[3] = temp;
+        }
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <from-pyobject type="py::object">py::object(py::borrowed_ref(<val/>))</from-pyobject>
+            <def func="swap_1_and_3"/>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile(True)
+
+        x = ['alpha','beta','gamma','delta']
+        tm.swap_1_and_3(x)
+        self.assertEqual(x,['alpha','delta','gamma','beta'])
 
 
 

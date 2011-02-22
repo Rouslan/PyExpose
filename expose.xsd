@@ -84,45 +84,6 @@
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
-
-      <xsd:attribute name="template-assoc" type="xsd:boolean">
-        <xsd:annotation>
-          <xsd:documentation>
-            <p>If true, the template functions <code>get_type()</code>,
-            <code>cast_base(PyObject *o)</code> and <code>get_base(PyObject
-            *o)</code> are defined in the header file.
-            <code>get_type&lt;T&gt;</code> returns the <code>PyTypeObject</code>
-            that wraps T. It is declared inline and should be the same as
-            accessing the variable directly. <code>cast_base&lt;T&gt;(o)</code>
-            gets a reference to the wrapped type with regard to how the wrapped
-            type is stored. <var>o</var> must be a pointer to the appropriate
-            wrapper (not a subclass). <code>get_base&lt;T&gt;(o)</code> is the
-            same as <code>cast_base</code> except it checks if <var>o</var> is
-            an instance of the wrapper or a derived type, and throws an
-            exception if it isn't.</p>
-
-            <p>These functions are designed to aid in writing a smart pointer
-            class. The following is a basic example:</p>
-            <pre><![CDATA[
-template<typename T> class pyptr {
-    PyObject *_ptr;
-    T &_base;
-public:
-    pyptr(PyObject *ptr) : _ptr(ptr), _base(get_base<T>(ptr)) {
-        Py_INCREF(ptr);
-    }
-    ~pyptr() {
-        Py_DECREF(_ptr);
-    }
-    T &operator*() { return _base; }
-    const T &operator*() const { return _base; }
-    T *operator->() { return &_base; }
-    const T *operator->() const { return &_base; }
-};
-            ]]></pre>
-          </xsd:documentation>
-        </xsd:annotation>
-      </xsd:attribute>
     </xsd:complexType>
   </xsd:element>
 
