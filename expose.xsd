@@ -1,28 +1,25 @@
 <?xml version="1.0"?>
-<?xml-stylesheet type="text/xsl" href="wiki.xsl"?>
 <xsd:schema
-    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-    xmlns="http://www.w3.org/1999/xhtml"
-    xmlns:html="http://www.w3.org/1999/xhtml">
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema">
   <xsd:annotation>
-    <xsd:documentation>
-      Example:
-      <pre><![CDATA[
-<?xml version="1.0"?>
-<module name="modulename" include="vector">
-  <doc>module doc string</doc>
+    <xsd:documentation><![CDATA[
+Example: ::
 
-  <class name="DVector" type="std::vector&lt;double&gt;">
-    <doc>class doc string</doc>
-    <init overload=""/>
-    <init overload="size_t,const double&amp;"/>
-    <property name="size" get="size" set="resize"/>
-    <def func="push_back"/>
-    <def name="__sequence__getitem__" func="at" return-semantic="copy"/>
-    <def name="__sequence__setitem__" assign-to="at"/>
-  </class>
-</module>
-]]></pre>
+    <?xml version="1.0"?>
+    <module name="modulename" include="vector">
+      <doc>module doc string</doc>
+
+      <class name="DVector" type="std::vector&lt;double&gt;">
+        <doc>class doc string</doc>
+        <init overload=""/>
+        <init overload="size_t,const double&amp;"/>
+        <property name="size" get="size" set="resize"/>
+        <def func="push_back"/>
+        <def name="__sequence__getitem__" func="at" return-semantic="copy"/>
+        <def name="__sequence__setitem__" assign-to="at"/>
+      </class>
+    </module>
+]]>
     </xsd:documentation>
   </xsd:annotation>
 
@@ -44,6 +41,10 @@
 
 
   <xsd:simpleType name="symbol">
+    <xsd:restriction base="xsd:string"/>
+  </xsd:simpleType>
+
+  <xsd:simpleType name="expression">
     <xsd:restriction base="xsd:string"/>
   </xsd:simpleType>
 
@@ -70,8 +71,7 @@
       <xsd:attribute name="name" type="ident" use="required">
         <xsd:annotation>
           <xsd:documentation>
-            The name of the module. This will be the name by which the module is
-            imported.
+The name of the module. This will be the name by which the module is imported.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -79,8 +79,8 @@
       <xsd:attribute name="include" type="includelist" use="required">
         <xsd:annotation>
           <xsd:documentation>
-            A comma seperated list of include files to scan for the types and
-            functions to expose.
+A comma seperated list of include files to scan for the types and functions to
+expose.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -90,150 +90,156 @@
 
   <xsd:element name="def">
     <xsd:annotation>
-      <xsd:documentation>
-        <p>Specifies a method when inside &lt;class&gt;, specifies a function
-        when inside &lt;module&gt;.</p>
+      <xsd:documentation><![CDATA[
+Specifies a method when inside <class>, specifies a function
+when inside <module>.
 
-        <p>Special methods can be defined by using the equivalent Python method
-        name:</p>
-        <table>
-          <tr><th>Python</th><th>C++</th></tr>
-          <tr><td>__new__</td><td>tp_new</td></tr>
-          <tr><td>__repr__</td><td>tp_repr</td></tr>
-          <tr><td>__str__</td><td>tp_str</td></tr>
-          <tr><td>__lt__</td><td>tp_richcompare</td></tr>
-          <tr><td>__le__</td><td>tp_richcompare</td></tr>
-          <tr><td>__eq__</td><td>tp_richcompare</td></tr>
-          <tr><td>__ne__</td><td>tp_richcompare</td></tr>
-          <tr><td>__gt__</td><td>tp_richcompare</td></tr>
-          <tr><td>__ge__</td><td>tp_richcompare</td></tr>
-          <tr><td>__cmp__</td><td>tp_compare</td></tr>
-          <tr><td>__hash__</td><td>tp_hash</td></tr>
-          <tr><td>__nonzero__</td><td>tp_as_number->nb_nonzero</td></tr>
-          <tr><td>__getattr__</td><td>tp_getattro</td></tr>
-          <tr><td>__setattr__</td><td>tp_setattro</td></tr>
-          <tr><td>__get__</td><td>tp_descr_get</td></tr>
-          <tr><td>__set__</td><td>tp_descr_set</td></tr>
-          <tr><td>__call__</td><td>tp_call</td></tr>
-          <tr><td>__iter__</td><td>tp_iter</td></tr>
-          <tr><td>next</td><td>tp_iternext</td></tr>
-          <tr><td>__contains__</td><td>tp_as_sequence->sq_contains</td></tr>
-          <tr><td>__add__</td><td>tp_as_number->nb_add</td></tr>
-          <tr><td>__radd__</td><td>tp_as_number->nb_add (arguments reversed)</td></tr>
-          <tr><td>__sub__</td><td>tp_as_number->nb_subtract</td></tr>
-          <tr><td>__rsub__</td><td>tp_as_number->nb_subtract (arguments reversed)</td></tr>
-          <tr><td>__mul__</td><td>tp_as_number->nb_multiply</td></tr>
-          <tr><td>__rmul__</td><td>tp_as_number->nb_multiply (arguments reversed)</td></tr>
-          <tr><td>__floordiv__</td><td>tp_as_number->nb_floor_divide</td></tr>
-          <tr><td>__rfloordiv__</td><td>tp_as_number->nb_floor_divide (arguments reversed)</td></tr>
-          <tr><td>__mod__</td><td>tp_as_number->nb_remainder</td></tr>
-          <tr><td>__rmod__</td><td>tp_as_number->nb_remainder (arguments reversed)</td></tr>
-          <tr><td>__divmod__</td><td>tp_as_number->nb_divmod</td></tr>
-          <tr><td>__rdivmod__</td><td>tp_as_number->nb_divmod (arguments reversed)</td></tr>
-          <tr><td>__pow__</td><td>tp_as_number->nb_power</td></tr>
-          <tr><td>__rpow__</td><td>tp_as_number->nb_power (arguments reversed)</td></tr>
-          <tr><td>__lshift__</td><td>tp_as_number->nb_lshift</td></tr>
-          <tr><td>__rlshift__</td><td>tp_as_number->nb_lshift (arguments reversed)</td></tr>
-          <tr><td>__rshift__</td><td>tp_as_number->nb_rshift</td></tr>
-          <tr><td>__rrshift__</td><td>tp_as_number->nb_rshift (arguments reversed)</td></tr>
-          <tr><td>__and__</td><td>tp_as_number->nb_and</td></tr>
-          <tr><td>__rand__</td><td>tp_as_number->nb_and (arguments reversed)</td></tr>
-          <tr><td>__xor__</td><td>tp_as_number->nb_xor</td></tr>
-          <tr><td>__rxor__</td><td>tp_as_number->nb_xor (arguments reversed)</td></tr>
-          <tr><td>__or__</td><td>tp_as_number->nb_or</td></tr>
-          <tr><td>__ror__</td><td>tp_as_number->nb_or (arguments reversed)</td></tr>
-          <tr><td>__div__</td><td>tp_as_number->nb_divide</td></tr>
-          <tr><td>__rdiv__</td><td>tp_as_number->nb_divide (arguments reversed)</td></tr>
-          <tr><td>__truediv__</td><td>tp_as_number->nb_true_divide</td></tr>
-          <tr><td>__rtruediv__</td><td>tp_as_number->nb_true_divide (arguments reversed)</td></tr>
-          <tr><td>__iadd__</td><td>tp_as_number->nb_inplace_add</td></tr>
-          <tr><td>__isub__</td><td>tp_as_number->nb_inplace_subtract</td></tr>
-          <tr><td>__imul__</td><td>tp_as_number->nb_inplace_multiply</td></tr>
-          <tr><td>__idiv__</td><td>tp_as_number->nb_inplace_divide</td></tr>
-          <tr><td>__itruediv__</td><td>tp_as_number->nb_inplace_true_divide</td></tr>
-          <tr><td>__ifloordiv__</td><td>tp_as_number->nb_inplace_floor_divide</td></tr>
-          <tr><td>__imod__</td><td>tp_as_number->nb_inplace_remainder</td></tr>
-          <tr><td>__ipow__</td><td>tp_as_number->nb_inplace_power</td></tr>
-          <tr><td>__ilshift__</td><td>tp_as_number->nb_inplace_lshift</td></tr>
-          <tr><td>__irshift__</td><td>tp_as_number->nb_inplace_rshift</td></tr>
-          <tr><td>__iand__</td><td>tp_as_number->nb_inplace_and</td></tr>
-          <tr><td>__ixor__</td><td>tp_as_number->nb_inplace_xor</td></tr>
-          <tr><td>__ior__</td><td>tp_as_number->nb_inplace_or</td></tr>
-          <tr><td>__neg__</td><td>tp_as_number->nb_negative</td></tr>
-          <tr><td>__pos__</td><td>tp_as_number->nb_positive</td></tr>
-          <tr><td>__abs__</td><td>tp_as_number->nb_absolute</td></tr>
-          <tr><td>__invert__</td><td>tp_as_number->nb_invert</td></tr>
-          <tr><td>__int__</td><td>tp_as_number->nb_int</td></tr>
-          <tr><td>__long__</td><td>tp_as_number->nb_long</td></tr>
-          <tr><td>__float__</td><td>tp_as_number->nb_float</td></tr>
-          <tr><td>__oct__</td><td>tp_as_number->nb_oct</td></tr>
-          <tr><td>__hex__</td><td>tp_as_number->nb_hex</td></tr>
-          <tr><td>__index__</td><td>tp_as_number->nb_index</td></tr>
-          <tr><td>__coerce__</td><td>tp_as_number->nb_coerce</td></tr>
-        </table>
+Special methods can be defined by using the equivalent Python method
+name:
 
-        <p>The following two cannot be used because they correspond to the
-        constructor and destructor. To specify the constructor, use
-        the &lt;init&gt; tag.</p>
-        <table>
-          <tr><th>Python</th><th>C++</th></tr>
-          <tr><td>__init__</td><td>tp_init</td></tr>
-          <tr><td>__del__</td><td>tp_dealloc</td></tr>
-        </table>
+=============== ================================================================
+Python          C++
+=============== ================================================================
+__new__         tp_new
+__repr__        tp_repr
+__str__         tp_str
+__lt__          tp_richcompare
+__le__          tp_richcompare
+__eq__          tp_richcompare
+__ne__          tp_richcompare
+__gt__          tp_richcompare
+__ge__          tp_richcompare
+__cmp__         tp_compare
+__hash__        tp_hash
+__nonzero__     tp_as_number->nb_nonzero
+__getattr__     tp_getattro
+__setattr__     tp_setattro
+__get__         tp_descr_get
+__set__         tp_descr_set
+__call__        tp_call
+__iter__        tp_iter
+next            tp_iternext
+__contains__    tp_as_sequence->sq_contains
+__add__         tp_as_number->nb_add
+__radd__        tp_as_number->nb_add (arguments reversed)
+__sub__         tp_as_number->nb_subtract
+__rsub__        tp_as_number->nb_subtract (arguments reversed)
+__mul__         tp_as_number->nb_multiply
+__rmul__        tp_as_number->nb_multiply (arguments reversed)
+__floordiv__    tp_as_number->nb_floor_divide
+__rfloordiv__   tp_as_number->nb_floor_divide (arguments reversed)
+__mod__         tp_as_number->nb_remainder
+__rmod__        tp_as_number->nb_remainder (arguments reversed)
+__divmod__      tp_as_number->nb_divmod
+__rdivmod__     tp_as_number->nb_divmod (arguments reversed)
+__pow__         tp_as_number->nb_power
+__rpow__        tp_as_number->nb_power (arguments reversed)
+__lshift__      tp_as_number->nb_lshift
+__rlshift__     tp_as_number->nb_lshift (arguments reversed)
+__rshift__      tp_as_number->nb_rshift
+__rrshift__     tp_as_number->nb_rshift (arguments reversed)
+__and__         tp_as_number->nb_and
+__rand__        tp_as_number->nb_and (arguments reversed)
+__xor__         tp_as_number->nb_xor
+__rxor__        tp_as_number->nb_xor (arguments reversed)
+__or__          tp_as_number->nb_or
+__ror__         tp_as_number->nb_or (arguments reversed)
+__div__         tp_as_number->nb_divide
+__rdiv__        tp_as_number->nb_divide (arguments reversed)
+__truediv__     tp_as_number->nb_true_divide
+__rtruediv__    tp_as_number->nb_true_divide (arguments reversed)
+__iadd__        tp_as_number->nb_inplace_add
+__isub__        tp_as_number->nb_inplace_subtract
+__imul__        tp_as_number->nb_inplace_multiply
+__idiv__        tp_as_number->nb_inplace_divide
+__itruediv__    tp_as_number->nb_inplace_true_divide
+__ifloordiv__   tp_as_number->nb_inplace_floor_divide
+__imod__        tp_as_number->nb_inplace_remainder
+__ipow__        tp_as_number->nb_inplace_power
+__ilshift__     tp_as_number->nb_inplace_lshift
+__irshift__     tp_as_number->nb_inplace_rshift
+__iand__        tp_as_number->nb_inplace_and
+__ixor__        tp_as_number->nb_inplace_xor
+__ior__         tp_as_number->nb_inplace_or
+__neg__         tp_as_number->nb_negative
+__pos__         tp_as_number->nb_positive
+__abs__         tp_as_number->nb_absolute
+__invert__      tp_as_number->nb_invert
+__int__         tp_as_number->nb_int
+__long__        tp_as_number->nb_long
+__float__       tp_as_number->nb_float
+__oct__         tp_as_number->nb_oct
+__hex__         tp_as_number->nb_hex
+__index__       tp_as_number->nb_index
+__coerce__      tp_as_number->nb_coerce
+=============== ================================================================
 
-        <p>For functions that dont have a distinct equivalent in Python, the
-        following names are provided:</p>
-        <table>
-          <tr><th>Name</th><th>C++</th></tr>
-          <tr><td>__concat__</td><td>tp_as_sequence->sq_concat</td></tr>
-          <tr><td>__iconcat__</td><td>tp_as_sequence->sq_inplace_concat</td></tr>
-          <tr><td>__repeat__</td><td>tp_as_sequence->sq_repeat</td></tr>
-          <tr><td>__irepeat__</td><td>tp_as_sequence->sq_inplace_repeat</td></tr>
-          <tr><td>__mapping__len__</td><td>tp_as_mapping->mp_length</td></tr>
-          <tr><td>__sequence__len__</td><td>tp_as_sequence->sq_length</td></tr>
-          <tr><td>__mapping__getitem__</td><td>tp_as_mapping->mp_subscript</td></tr>
-          <tr><td>__sequence__getitem__</td><td>tp_as_sequence->sq_item</td></tr>
-          <tr><td>__mapping__setitem__</td><td>tp_as_mapping->mp_ass_subscript</td></tr>
-          <tr><td>__sequence__setitem__</td><td>tp_as_sequence->sq_ass_item</td></tr>
-        </table>
+The following two cannot be used because they correspond to the constructor and
+destructor. To specify the constructor, use the <init> tag.
 
-        <p>Operator methods can also be specified by their operators. The
-        following are equivalent:</p>
-        <table>
-          <tr><td>&lt;</td><td>__lt__</td></tr>
-          <tr><td>&lt;=</td><td>__le__</td></tr>
-          <tr><td>==</td><td>__eq__</td></tr>
-          <tr><td>!=</td><td>__ne__</td></tr>
-          <tr><td>&gt;</td><td>__gt__</td></tr>
-          <tr><td>&gt;=</td><td>__ge__</td></tr>
-          <tr><td>()</td><td>__call__</td></tr>
-          <tr><td>+</td><td>__add__</td></tr>
-          <tr><td>+=</td><td>__iadd__</td></tr>
-          <tr><td>-</td><td>__sub__</td></tr>
-          <tr><td>-=</td><td>__isub__</td></tr>
-          <tr><td>*</td><td>__mul__</td></tr>
-          <tr><td>*=</td><td>__imul__</td></tr>
-          <tr><td>**</td><td>__pow__</td></tr>
-          <tr><td>**=</td><td>__ipow__</td></tr>
-          <tr><td>/</td><td>__div__</td></tr>
-          <tr><td>/=</td><td>__idiv__</td></tr>
-          <tr><td>//</td><td>__floordiv__</td></tr>
-          <tr><td>//=</td><td>__ifloordiv__</td></tr>
-          <tr><td>&lt;&lt;</td><td>__lshift__</td></tr>
-          <tr><td>&lt;&lt;=</td><td>__ilshift__</td></tr>
-          <tr><td>&gt;&gt;</td><td>__rshift__</td></tr>
-          <tr><td>&gt;&gt;=</td><td>__irshift__</td></tr>
-          <tr><td>&amp;</td><td>__and__</td></tr>
-          <tr><td>&amp;=</td><td>__iand__</td></tr>
-          <tr><td>^</td><td>__xor__</td></tr>
-          <tr><td>^</td><td>__ixor__</td></tr>
-          <tr><td>|</td><td>__or__</td></tr>
-          <tr><td>|=</td><td>__ior__</td></tr>
-          <tr><td>~</td><td>__invert__</td></tr>
-        </table>
+=============== =================
+Python          C++
+=============== =================
+__init__        tp_init
+__del__         tp_dealloc
+=============== =================
 
-        <p>One of <var>func</var> or <var>assign-to</var> needs to be defined,
-        but not both.</p>
+For functions that dont have a distinct equivalent in Python, the following
+names are provided:
+
+========================= ======================================
+Name                      C++
+========================= ======================================
+__concat__                tp_as_sequence->sq_concat
+__iconcat__               tp_as_sequence->sq_inplace_concat
+__repeat__                tp_as_sequence->sq_repeat
+__irepeat__               tp_as_sequence->sq_inplace_repeat
+__mapping__len__          tp_as_mapping->mp_length
+__sequence__len__         tp_as_sequence->sq_length
+__mapping__getitem__      tp_as_mapping->mp_subscript
+__sequence__getitem__     tp_as_sequence->sq_item
+__mapping__setitem__      tp_as_mapping->mp_ass_subscript
+__sequence__setitem__     tp_as_sequence->sq_ass_item
+========================= ======================================
+
+Operator methods can also be specified by their operators. The following are
+equivalent:
+
+============= ================
+<             __lt__
+<=            __le__
+==            __eq__
+!=            __ne__
+>             __gt__
+>=            __ge__
+()            __call__
+\+            __add__
++=            __iadd__
+\-            __sub__
+-=            __isub__
+\*            __mul__
+\*=           __imul__
+\**           __pow__
+\**=          __ipow__
+/             __div__
+/=            __idiv__
+//            __floordiv__
+//=           __ifloordiv__
+<<            __lshift__
+<<=           __ilshift__
+>>            __rshift__
+>>=           __irshift__
+&             __and__
+&=            __iand__
+^             __xor__
+^=            __ixor__
+\|            __or__
+\|=           __ior__
+~             __invert__
+============= ================
+
+One of ``func`` or ``assign-to`` needs to be defined, but not both.
+]]>
       </xsd:documentation>
     </xsd:annotation>
     <xsd:complexType>
@@ -245,8 +251,8 @@
       <xsd:attribute name="name" type="ident">
         <xsd:annotation>
           <xsd:documentation>
-            The name of the function/method as will be seen in python. If not
-            specified, the name will taken from the C++ function/method.
+The name of the function/method as will be seen in python. If not specified, the
+name will taken from the C++ function/method.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -254,20 +260,18 @@
       <xsd:attribute name="func" type="symbol">
         <xsd:annotation>
           <xsd:documentation>
-            <p>The C++ function/method that implements this.</p>
+The C++ function/method that implements this.
 
-            <p>When specifying a method, whether the resulting Python method is
-            static is determined by whether the C++ method is static. This can
-            be overridden using the <var>static</var> attribute. A method may
-            also be implemented using a C++ function, in which case the function
-            must accept the class's type as the first argument, unless the
-            <var>static</var> attribute is specified (to prevent mistakes,
-            specifying a function that doesn't accept the class type as its
-            first argument, without specifying <var>static</var>, is considered
-            an error).</p>
+When specifying a method, whether the resulting Python method is static is
+determined by whether the C++ method is static. This can be overridden using the
+``static`` attribute. A method may also be implemented using a C++ function, in
+which case the function must accept the class's type as the first argument,
+unless the ``static`` attribute is specified (to prevent mistakes, specifying a
+function that doesn't accept the class type as its first argument, without
+specifying ``static``, is considered an error).
 
-            <p>The __rop__ methods will also accept C++ functions that accept
-            the class type as the second argument.</p>
+The __rop__ methods will also accept C++ functions that accept the class type as
+the second argument.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -275,7 +279,7 @@
       <xsd:attribute name="assign-to" type="symbol">
         <xsd:annotation>
           <xsd:documentation>
-            Like func, except the return value is assigned to.
+Like func, except the return value is assigned to.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -283,12 +287,11 @@
       <xsd:attribute name="overload" type="arglist">
         <xsd:annotation>
           <xsd:documentation>
-            The list of arguments the C++ function/method takes. This is to
-            select a specific function/method when the function/method is
-            overloaded. The arguments are seperated by commas just like in the
-            function/method. The types can be specified with or without
-            typedefs, as long as the underlying types are the same as that of
-            the function/method.
+The list of arguments the C++ function/method takes. This is to select a
+specific function/method when the function/method is overloaded. The arguments
+are seperated by commas just like in the function/method. The types can be
+specified with or without typedefs, as long as the underlying types are the same
+as that of the function/method.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -296,17 +299,16 @@
       <xsd:attribute name="return-semantic" type="retsemantictype">
         <xsd:annotation>
           <xsd:documentation>
-            <p>Specifies how a pointer or reference return value is to be
-            handled. If the function returns by value, this attribute is
-            meaningless. The options are "default", "copy", "managedref" and
-            "self". "default" is the same as ommitting this attribute. "copy"
-            means the value will be dereferenced and copied. "managedref" means
-            the returned Python object will keep a reference and a pointer to
-            the class, in order to keep the class alive while the reference
-            exists. "self" means ignore the return value and return what would
-            be the "self" argument in Python.</p>
+Specifies how a pointer or reference return value is to be handled. If the
+function returns by value, this attribute is meaningless. The options are
+"default", "copy", "managedref" and "self". "default" is the same as ommitting
+this attribute. "copy" means the value will be dereferenced and copied.
+"managedref" means the returned Python object will keep a reference and a
+pointer to the class, in order to keep the class alive while the reference
+exists. "self" means ignore the return value and return what would be the "self"
+argument in Python.
 
-            <p>For __iop__ methods, the default is "self".</p>
+For __iop__ methods, the default is "self".
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -314,8 +316,8 @@
       <xsd:attribute name="static" type="xsd:boolean" default="false">
         <xsd:annotation>
           <xsd:documentation>
-            <p>For methods only, specifies whether the method will be static. This
-            is determined automatically when <var>func</var> is a method.</p>
+For methods only, specifies whether the method will be static. This is
+determined automatically when ``func`` is a method.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -323,11 +325,10 @@
       <xsd:attribute name="arity" type="xsd:nonNegativeInteger">
         <xsd:annotation>
           <xsd:documentation>
-            <p>Filters the overloaded functions/methods specified by
-            <var>func</var> to ones that have this many arguments. This is so
-            operators with different meaning but the same name (e.g. negation
-            and subtraction), can be conveniently selected. Specifying both
-            <var>arity</var> and <var>overload</var> is redundant.</p>
+Filters the overloaded functions/methods specified by ``func`` to ones that have
+this many arguments. This is so operators with different meaning but the same
+name (e.g. negation and subtraction), can be conveniently selected. Specifying
+both ``arity`` and ``overload`` is redundant.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -335,10 +336,9 @@
       <xsd:attribute name="bridge-virtual" type="xsd:boolean" default="true">
         <xsd:annotation>
           <xsd:documentation>
-            For virtual methods, if true (the default), the method will be
-            overridable in Python code. An attribute lookup must be performed to
-            determine if the method is overridden, so setting this to false
-            avoids a small amount of overhead.
+For virtual methods, if true (the default), the method will be overridable in
+Python code. An attribute lookup must be performed to determine if the method is
+overridden, so setting this to false avoids a small amount of overhead.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -356,10 +356,9 @@
   <xsd:element name="no-init">
     <xsd:annotation>
       <xsd:documentation>
-        <p>Specifies that the class will not have an __init__ method. Unless
-        <var>new-initializes</var> is specified, the class cannot be
-        instantiated directly in Python code. Attempting to do so will raise a
-        TypeError.</p>
+Specifies that the class will not have an __init__ method. Unless
+``new-initializes`` is specified, the class cannot be instantiated directly in
+Python code. Attempting to do so will raise a TypeError.
       </xsd:documentation>
     </xsd:annotation>
     <xsd:complexType/>
@@ -394,7 +393,7 @@
   <xsd:element name="attr">
     <xsd:annotation>
       <xsd:documentation>
-        Expose a member variable as a Python attribute.
+Expose a member variable as a Python attribute.
       </xsd:documentation>
     </xsd:annotation>
     <xsd:complexType>
@@ -402,8 +401,8 @@
       <xsd:attribute name="name" type="ident">
         <xsd:annotation>
           <xsd:documentation>
-            The name of the member as will be seen in python. If not specified,
-            the name will be taken from the C++ member.
+The name of the member as will be seen in python. If not specified, the name
+will be taken from the C++ member.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -411,7 +410,7 @@
       <xsd:attribute name="cmember" type="symbol" use="required">
         <xsd:annotation>
           <xsd:documentation>
-            The member variable of the C++ class to expose.
+The member variable of the C++ class to expose.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -436,9 +435,9 @@
       <xsd:attribute name="name" type="ident">
         <xsd:annotation>
           <xsd:documentation>
-            The name of the class as will be seen in python. If not specified,
-            the name will be taken from the C++ class if the class name is a
-            legal Python identifier, otherwise an arbitrary name is chosen.
+The name of the class as will be seen in python. If not specified, the name will
+be taken from the C++ class if the class name is a legal Python identifier,
+otherwise an arbitrary name is chosen.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -446,30 +445,44 @@
       <xsd:attribute name="type" type="symbol" use="required">
         <xsd:annotation>
           <xsd:documentation>
-            <p>The C++ class to expose to python. The class may be an
-            instantiation of a template, but cannot be the template itself (e.g.
-            you can use std::vector&lt;int&gt;, but not std::vector).</p>
+The C++ class to expose to python. The class may be an instantiation of a
+template, but cannot be the template itself (e.g. you can use
+std::vector&lt;int&gt;, but not std::vector).
 
-            <p>Note that if you specify an instantiation of a template using a
-            typedef but the instantiation is not used anywhere else, PyExpose
-            might not find it. The solution is to either specify the template
-            instantiation directly, or add
-            '<code>template class MyClass&lt;args&gt;;</code>'
-            to the code PyExpose looks at.</p>
+Note that if you specify an instantiation of a template using a typedef but the
+instantiation is not used anywhere else, PyExpose might not find it. The
+solution is to either specify the template instantiation directly, or add
+'``template class MyClass&lt;args&gt;;``' to the code PyExpose looks at.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="new-initializes" type="xsd:boolean">
+      <xsd:attribute name="new-initializes" type="xsd:boolean" default="false">
         <xsd:annotation>
           <xsd:documentation>
-            <p>If true, the wrapped type will be initialized using the default
-            constructor upon object creation (when <code>type.__new__</code> is
-            called), before <code>__init__</code> is called. This allows an
-            object to always be in a usable state. Without this attribute, an
-            object for which <code>__init__</code> was not called, raises an
-            excpetion when any of its methods (include property getters and
-            setters) are called.</p>
+If true, the wrapped type will be initialized using the default constructor upon
+object creation (when ``type.__new__`` is called), before ``__init__`` is
+called. This allows an object to always be in a usable state. Without this
+attribute, an object for which ``__init__`` was not called, raises an excpetion
+when any of its methods (include property getters and setters) are called.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="instance-dict" type="xsd:boolean" default="true">
+        <xsd:annotation>
+          <xsd:documentation>
+Specifies whether to include an instance dictionary (__dict__). The default is
+"true".
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="instance-dict" type="xsd:boolean" default="true">
+        <xsd:annotation>
+          <xsd:documentation>
+Specifies whether to support weak references (__weakref__). The default is
+"true".
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -480,7 +493,7 @@
   <xsd:element name="doc">
     <xsd:annotation>
       <xsd:documentation>
-        A documentation string that will be exposed to Python.
+A documentation string that will be exposed to Python.
       </xsd:documentation>
     </xsd:annotation>
     <xsd:simpleType>
@@ -494,7 +507,7 @@
   <xsd:element name="to-pyobject">
     <xsd:annotation>
       <xsd:documentation>
-        <p>Specifies how to convert a particular type to <code>PyObject*</code>.</p>
+Specifies how to convert a particular type to ``PyObject*``.
       </xsd:documentation>
     </xsd:annotation>
     <xsd:complexType mixed="true">
@@ -505,7 +518,7 @@
       <xsd:attribute name="type" type="symbol">
         <xsd:annotation>
           <xsd:documentation>
-            The type the conversion applies to.
+The type the conversion applies to.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -516,7 +529,7 @@
   <xsd:element name="from-pyobject">
     <xsd:annotation>
       <xsd:documentation>
-        <p>Specifies how to convert <code>PyObject*</code> to a particular type.</p>
+Specifies how to convert ``PyObject*`` to a particular type.
       </xsd:documentation>
     </xsd:annotation>
     <xsd:complexType mixed="true">
@@ -527,7 +540,7 @@
       <xsd:attribute name="type" type="symbol">
         <xsd:annotation>
           <xsd:documentation>
-            The type the conversion applies to.
+The C++ type the conversion applies to.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -537,10 +550,70 @@
   <xsd:element name="val">
     <xsd:annotation>
       <xsd:documentation>
-        This tag gets replaced by the expression that needs to be converted.
+This tag gets replaced by the expression that needs to be converted.
       </xsd:documentation>
     </xsd:annotation>
     <xsd:complexType/>
+  </xsd:element>
+
+  <xsd:element name="var">
+    <xsd:annotation>
+      <xsd:documentation>
+Specifies a variable
+      </xsd:documentation>
+    </xsd:annotation>
+    <xsd:complexType>
+      <xsd:attribute name="name" type="ident">
+        <xsd:annotation>
+          <xsd:documentation>
+The name of the variable. If not specified, the name is taken from ``value``,
+which must be a legal Python identifier.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="value" type="expression" use="required">
+        <xsd:annotation>
+          <xsd:documentation>
+The value of the variable. This can be any C++ expression and may include
+macros.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="ref">
+        <xsd:annotation>
+          <xsd:documentation>
+Specifies whether to pass ``value`` by value or by reference.
+
+The following are allowed:
+
+================ ===============================================================
+true             Pass by reference. This is the default. If the value cannot be
+                 taken by reference (for example: if it's the result of a
+                 function that returns by copy), it's taken by copy instead.
+false            Pass by copy
+copy             Same as "false"
+managedptr       If ``value`` evaluates to a pointer, the pointer is kept and
+                 ``delete`` is called on it when the Python object is destroyed.
+unmanagedref     Same as "true"
+================ ===============================================================
+          </xsd:documentation>
+        </xsd:annotation>
+
+        <xsd:simpleType>
+          <xsd:union memberTypes="xsd:boolean">
+            <xsd:simpleType>
+              <xsd:restriction base="xsd:string">
+                <xsd:enumeration value="copy"/>
+                <xsd:enumeration value="managedptr"/>
+                <xsd:enumeration value="unmanagedref"/>
+              </xsd:restriction>
+            </xsd:simpleType>
+          </xsd:union>
+        </xsd:simpleType>
+      </xsd:attribute>
+    </xsd:complexType>
   </xsd:element>
 
 </xsd:schema>

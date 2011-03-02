@@ -66,6 +66,8 @@ class TestCompile(unittest.TestCase):
         </module>
     '''
 
+    templates = False
+
     @classmethod
     def modname(cls):
         return cls.__name__.lower()
@@ -76,16 +78,20 @@ class TestCompile(unittest.TestCase):
         os.chdir(self.dir)
 
         try:
+            pyinc = distutils.sysconfig.get_python_inc()
+
             write_file('main.h',self.header_file)
             write_file('spec.xml',self.spec_file)
             if self.cpp_file:
                 write_file('main.cpp',self.cpp_file)
 
-            pyinc = distutils.sysconfig.get_python_inc()
+            gccxml_flags = '-I{0} -I{1}'.format(pyinc,PROJECT_DIR)
+            if self.templates:
+                gccxml_flags += ' -DPYEXPOSE_TEMPLATE_HELPERS=1'
 
             spec = espec.getspec('spec.xml')
             spec.name = self.modname() # give the new module a unique name
-            expose.generate_intermediate(spec,'gccxml.interm','.',None,'g++','-I{0} -I{1}'.format(pyinc,PROJECT_DIR))
+            expose.generate_intermediate(spec,'gccxml.interm','.',None,'g++',gccxml_flags)
             expose.generate_module(spec,'gccxml.interm','.')
 
             self.comp = distutils.ccompiler.new_compiler()
@@ -93,6 +99,9 @@ class TestCompile(unittest.TestCase):
             self.comp.add_include_dir(pyinc)
             self.comp.add_include_dir(PROJECT_DIR)
             self.comp.add_library('stdc++')
+
+            if self.templates:
+                self.comp.define_macro('PYEXPOSE_TEMPLATE_HELPERS',1)
 
             # add the current directory to the path so the module that will be generated, can be loaded
             sys.path.insert(0,self.dir)
@@ -104,13 +113,11 @@ class TestCompile(unittest.TestCase):
         os.chdir(self.olddir)
         shutil.rmtree(self.dir)
 
-    def compile(self,templates=False):
+    def compile(self):
         try:
             files = [self.modname() + '.cpp']
             if self.cpp_file:
                 files.append('main.cpp')
-            if templates:
-                self.comp.define_macro('PYEXPOSE_TEMPLATE_HELPERS',1)
             obj = self.comp.compile(files,debug=True)
             self.comp.link_shared_lib(obj,self.modname(),debug=True)
         except (distutils.ccompiler.CompileError,distutils.ccompiler.LinkError) as e:
@@ -723,8 +730,10 @@ class TestTemplateAssoc(TestCompile):
         </module>
     '''
 
+    templates = True
+
     def runTest(self):
-        tm = self.compile(True)
+        tm = self.compile()
         self.assertEqual(tm.getval(tm.Thing()),6)
 
 
@@ -771,8 +780,10 @@ class TestSmartPtr(TestCompile):
         </module>
     '''
 
+    templates = True
+
     def runTest(self):
-        tm = self.compile(True)
+        tm = self.compile()
         self.assertEqual(tm.getval(tm.Thing()),6)
 
 
@@ -919,8 +930,10 @@ class TestInvariableStorage(TestCompile):
         </module>
     '''
 
+    templates = True
+
     def runTest(self):
-        tm = self.compile(True)
+        tm = self.compile()
 
         self.assertEqual(tm.a_is_invariable(),False)
         self.assertEqual(tm.b_is_invariable(),True)
@@ -1023,12 +1036,106 @@ class TestObjectH(TestCompile):
         </module>
     '''
 
+    templates = True
+
     def runTest(self):
-        tm = self.compile(True)
+        tm = self.compile()
 
         x = ['alpha','beta','gamma','delta']
         tm.swap_1_and_3(x)
         self.assertEqual(x,['alpha','delta','gamma','beta'])
+
+
+class TestGC(TestCompile):
+    header_file = '''
+        class WithGC {
+        public:
+            PyObject *member;
+            WithGC() : member(0) {}
+            ~WithGC() {
+                Py_XDECREF(member);
+            }
+        };
+
+        class Without {
+        public:
+            PyObject *member;
+            Without() : member(0) {}
+            ~Without() {
+                Py_XDECREF(member);
+            }
+        };
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="WithGC" use-gc="true">
+                <attr cmember="member"/>
+            </class>
+            <class type="Without" use-gc="false">
+                <attr cmember="member"/>
+            </class>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+
+        # with GC support
+        w = tm.WithGC()
+        w2 = tm.WithGC()
+
+        wr = weakref.ref(w)
+        w2r = weakref.ref(w2)
+
+        w.member = w2
+        w2.member = w
+
+        self.assertTrue(wr())
+        self.assertTrue(w2r())
+
+        w = None
+        w2 = None
+
+        gc.collect()
+
+        self.assertTrue(wr() is None)
+        self.assertTrue(w2r() is None)
+
+
+        # without GC support
+        wo = tm.Without()
+        wo2 = tm.Without()
+
+        wor = weakref.ref(wo)
+        wo2r = weakref.ref(wo2)
+
+        wo.member = wo2
+        wo2.member = wo
+
+        self.assertTrue(wor())
+        self.assertTrue(wo2r())
+
+        wo = None
+        wo2 = None
+
+        gc.collect()
+
+        # a reference cycle should prevent these from being destroyed
+        self.assertTrue(wor())
+        self.assertTrue(wo2r())
+
+        # now break the cycle
+        wo2 = wo2r()
+        wor().member = None
+        wo2.member = None
+        wo2 = None
+
+        gc.collect()
+
+        self.assertTrue(wr() is None)
+        self.assertTrue(w2r() is None)
+
 
 
 

@@ -26,14 +26,25 @@
 
 
 #define PY_MEM_NEW_DELETE void *operator new(size_t s) {            \
-        void *ptr = PyObject_MALLOC(s);                             \
+        void *ptr = PyObject_Malloc(s);                             \
         if(!ptr) throw std::bad_alloc();                            \
         return ptr;                                                 \
     }                                                               \
                                                                     \
     void operator delete(void *ptr) {                               \
-        PyObject_FREE(ptr);                                            \
+        PyObject_Free(ptr);                                         \
     }
+
+#define PY_MEM_GC_NEW_DELETE void *operator new(size_t s) {         \
+        void *ptr = _PyObject_GC_Malloc(s);                         \
+        if(!ptr) throw std::bad_alloc();                            \
+        return ptr;                                                 \
+    }                                                               \
+                                                                    \
+    void operator delete(void *ptr) {                               \
+        PyObject_GC_Del(ptr);                                       \
+    }
+
 
 
 #pragma GCC visibility push(hidden)

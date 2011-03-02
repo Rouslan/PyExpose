@@ -182,7 +182,7 @@ struct ref_<% name %><@ if common_base @> : _x_<% name %><@ endif @> {
     } ref;
 ==     endif
 
-    PY_MEM_NEW_DELETE
+    PY_MEM_<@ if gc @>GC_<@ endif @>NEW_DELETE
 
     ref_<% name %>(<% type %> &base,PyObject *container) {
         mode = MANAGEDREF;
@@ -206,7 +206,7 @@ struct ptr_<% name %><@ if common_base @> : _x_<% name %><@ endif @> {
     <% type %> *ptr;
 ==     endif
 
-    PY_MEM_NEW_DELETE
+    PY_MEM_<@ if gc @>GC_<@ endif @>NEW_DELETE
 
     ptr_<% name %>(<% type %> *base) {
         mode = MANAGEDPTR;
@@ -228,7 +228,7 @@ struct uref_<% name %><@ if common_base @> : _x_<% name %><@ endif @> {
     <% type %> *ptr;
 ==     endif
 
-    PY_MEM_NEW_DELETE
+    PY_MEM_<@ if gc @>GC_<@ endif @>NEW_DELETE
 
     uref_<% name %>(<% type %> &base) {
         mode = UNMANAGEDREF;
@@ -264,7 +264,7 @@ struct obj_<% name %><@ if common_base @> : _x_<% name %><@ endif @> {
 == endif
 
 == if not uninstantiatable
-    PY_MEM_NEW_DELETE
+    PY_MEM_<@ if gc @>GC_<@ endif @>NEW_DELETE
 
 ==     for con in constructors
     obj_<% name %>(<% con.args %>) <@ if not common_base @>: base(<% con.argvals %>)<@ if instance_dict @>, idict(0)<@ endif @><@ if weakref @>, weaklist(0)<@ endif @> <@ endif @>{
@@ -435,7 +435,7 @@ inline PyTypeObject *create_obj_<% name %>Type() {
     if(UNLIKELY(!type)) return 0;
 
     type->tp_basicsize = sizeof(obj_<% name %>);
-    type->tp_flags |= Py_TPFLAGS_CHECKTYPES;
+    type->tp_flags |= Py_TPFLAGS_CHECKTYPES<@ if gc @>|Py_TPFLAGS_HAVE_GC<@ endif @>;
     type->tp_dictoffset = <@if instance_dict @>offsetof(obj_<% name %>,idict)<@ else @>0<@ endif @>;
     type->tp_weaklistoffset = <@if weakref @>offsetof(obj_<% name %>,weaklist)<@ else @>0<@ endif @>;
 <@ if destructor @>    type->tp_dealloc = reinterpret_cast<destructor>(&obj_<% name %>_dealloc);<@ endif @>
@@ -458,6 +458,10 @@ inline PyTypeObject *create_obj_<% name %>Type() {
 <@ if 'next' in specialmethods @>    type->tp_iter = reinterpret_cast<iternextfunc>(&obj_<% name %>_next);<@ endif @>
 <@ if initcode @>    type->tp_init = reinterpret_cast<initproc>(&obj_<% name %>_init);<@ endif @>
 <@ if new_init or not initcode @>    type->tp_new = &obj_<% name %>_new;<@ endif @>
+==     if gc
+    type->tp_traverse = reinterpret_cast<traverseproc>(&obj_<% name %>_traverse);
+    type->tp_clear = reinterpret_cast<inquiry>(&obj_<% name %>_clear);
+==     endif
 
     return type;
 }
@@ -483,10 +487,10 @@ PyTypeObject obj_<% name %>Type = {
     <@ if '__getattr__' in specialmethods @>reinterpret_cast<getattrofunc>(&obj_<% name %>___getattr__)<@ else @>0<@ endif @>, /* tp_getattro */
     <@ if '__setattr__' in specialmethods @>reinterpret_cast<setattrofunc>(&obj_<% name %>___setattr__)<@ else @>0<@ endif @>, /* tp_setattro */
     0,                         /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE|Py_TPFLAGS_CHECKTYPES, /* tp_flags */
+    Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE|Py_TPFLAGS_CHECKTYPES<@ if gc @>|Py_TPFLAGS_HAVE_GC<@ endif @>, /* tp_flags */
     <@ if doc @><% doc|quote %><@ else @>0<@ endif @>, /* tp_doc */
-    0,                         /* tp_traverse */
-    0,                         /* tp_clear */
+    <@ if gc @>reinterpret_cast<traverseproc>(&obj_<% name %>_traverse)<@ else @>0<@ endif @>, /* tp_traverse */
+    <@ if gc @>reinterpret_cast<inquiry>(&obj_<% name %>_clear)<@ else @>0<@ endif @>, /* tp_clear */
     <@ if richcompare @>reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare)<@ else @>0<@ endif @>, /* tp_richcompare */
     <@if weakref @>offsetof(obj_<% name %>,weaklist)<@ else @>0<@ endif @>, /* tp_weaklistoffset */
     <@ if '__iter__' in specialmethods @>reinterpret_cast<getiterfunc>(&obj_<% name %>___iter__)<@ else @>0<@ endif @>, /* tp_iter */
@@ -1027,7 +1031,7 @@ inline PyObject *<% name %>_virt_handler::self() const {
 virtmethod = env.from_string('''
 <% ret %> <% cname %>_virt_handler::<% func %>(<% args %>)<% ' const' if const %> {
     PyObject *f = PyObject_GetAttrString(self(),"<% name %>");
-    if(!f) throw py_error_set(); // TODO: throw better exception
+    if(!f) throw py_error_set();
     if(PyCFunction_Check(f) && PyCFunction_GET_FUNCTION(f) == reinterpret_cast<PyCFunction>(&obj_<% cname %>_method_<% name %>)) {
 == if pure
         PyErr_SetString(PyExc_NotImplementedError,not_implemented_msg);
@@ -1036,7 +1040,7 @@ virtmethod = env.from_string('''
 == endif
     } else {
         PyObject *ret = PyObject_CallFunctionObjArgs(f,<% pyargvals %>NULL);
-        if(!ret) throw py_error_set(); // TODO: throw better exception
+        if(!ret) throw py_error_set();
         <@ if ret != 'void' @><% rettype %> cret = <% retfrompy %>;<@ endif @>
         Py_DECREF(ret);
         <@ if ret != 'void' @>return cret;<@ endif @>
@@ -1045,3 +1049,62 @@ virtmethod = env.from_string('''
 ''')
 
 new_uref = 'reinterpret_cast<PyObject*>(new uref_{0}({1}))'
+
+gc_traverse_clear = env.from_string('''
+int obj_<% name %>_traverse(obj_<% name %> *self,visitproc visit,void *arg) {
+    int ret;
+== if instance_dict
+    if(self->idict) {
+        ret = visit(self->idict,arg);
+        if(ret) return ret;
+    }
+== endif
+== if traverse
+==     if not new_init
+    if(self->mode) {
+==     endif
+    <% getbase %>;
+==     for a in traverse
+    if(<% a %>) {
+        ret = visit(<% a %>,arg);
+        if(ret) return ret;
+    }
+==     endfor
+==     if not new_init
+    }
+==     endif
+== endif
+    return 0;
+}
+
+int obj_<% name %>_clear(obj_<% name %> *self) {
+== if instance_dict
+    if(self->idict) {
+        PyObject *tmp = self->idict;
+        self->idict = 0;
+        Py_DECREF(tmp);
+    }
+== endif
+== if clear
+==     if not new_init
+    if(self->mode) {
+==     endif
+    <% getbase %>;
+==     for clr in clear
+<% clr %>
+==     endfor
+==     if not new_init
+    }
+==     endif
+== endif
+    return 0;
+}
+''')
+
+clear_pyobject = '''
+    if({0}) {{
+        PyObject *tmp = {0};
+        {0} = 0;
+        Py_DECREF(tmp);
+    }}
+'''

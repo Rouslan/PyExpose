@@ -1026,7 +1026,7 @@ class _NoInit:
 NoInit = _NoInit()
 
 class ClassDef:
-    def __init__(self,name,type,new_initializes=False,instance_dict=True,weakref=True):
+    def __init__(self,name,type,new_initializes=False,instance_dict=True,weakref=True,use_gc=True,gc_include=None,gc_ignore=None):
         self.name = name
         self.type = type
         self.new_initializes = new_initializes
@@ -1037,6 +1037,9 @@ class ClassDef:
         self.doc = None
         self.instance_dict = instance_dict
         self.weakref = weakref
+        self.use_gc = use_gc
+        self.gc_include = gc_include
+        self.gc_ignore = gc_ignore
         self.uniquenum = get_unique_num()
 
     @property
@@ -1109,11 +1112,20 @@ def default_to_ov(args):
     yield newargs
 
 
+def compile_wildcard_list(x):
+    if x:
+        parts = x.split()
+        if parts:
+            return re.compile('({0})$'.format('|'.join('.*'.join(map(re.escape,part.split('*'))) for part in parts))).match
+
+    return lambda x: False
+
+
 class TypedClassDef:
     what = 'class'
 
     @append_except
-    def __init__(self,scope,classdef,tns):
+    def __init__(self,scope,classdef,tns,conv):
         self.name = classdef.name
         self.uniquenum = classdef.uniquenum
         self.type = classdef.get_type(tns)
@@ -1258,6 +1270,35 @@ class TypedClassDef:
         self.derived = []
         self.features = set()
         self.needs_mode_var = False
+        self._use_gc = False
+        self.gc_vars = []
+
+        # TODO: it would probably be better if a warning was emitted for names
+        # that don't match any fields
+        if classdef.use_gc:
+            fields = [m for m in self.type.members if isinstance(m,gccxml.CPPField)]
+            accept = compile_wildcard_list(classdef.gc_include)
+            reject = compile_wildcard_list(classdef.gc_ignore)
+            for f in fields:
+                if accept(f.name):
+                    if not (f.type in conv.gcvarhandlers):
+                        raise SpecificationError('There is no rule specifying how to garbage-collect an instance of "{0}". Please add one using "gc-handler".'.format(f.type))
+                    if f.access != gccxml.ACCESS_PUBLIC:
+                        raise SpecificationError('"{0}" cannot be accessed for garbage collection because it is not public')
+                    self.gc_vars.append(f)
+                elif f.type in conv.gcvarhandlers and not reject(f.name):
+                    # members that are not explicitly accepted or rejected are
+                    # accepted if they are public
+                    if f.access == gccxml.ACCESS_PUBLIC:
+                        self.gc_vars.append(f)
+                    else:
+                        err.emit_warning(SpecificationError(
+                            ('"{0}" may need garbage collection but cannot be '+
+                            'accessed because it is not public. Add "{0}" to ' +
+                            'gc-ignore to prevent this warning.').format(f.name)))
+
+            if self.gc_vars or self._instance_dict:
+                self._use_gc = True
 
     def basecount(self):
         return sum(1 + b.basecount() for b in self.bases)
@@ -1573,10 +1614,13 @@ class TypedClassDef:
         return self.features or not self.uninstantiatable()
 
     def instance_dict(self):
-        return self.can_exist() and self._instance_dict
+        return self._instance_dict and self.can_exist()
 
     def weakref(self):
-        return self.can_exist() and self._weakref
+        return self._weakref and self.can_exist()
+
+    def use_gc(self):
+        return self._use_gc and self.can_exist()
 
     def indirect_features(self):
         """returns a union of features for this class and all derived classes"""
@@ -1594,7 +1638,7 @@ class TypedClassDef:
                 bases = ['get_obj_{0}Type()'.format(b.name) for b in self.bases]
             elif has_mi_subclass:
                 # common type needed for multiple inheritance
-                bases = ['&_obj_Internal{0}Type'.format(EXTRA_VARS_SUFFIXES[(self._weakref << 1) + self._instance_dict])]
+                bases = ['&_obj_Internal{0}Type'.format(EXTRA_VARS_SUFFIXES[(self._weakref << 1) | self._instance_dict])]
 
         virtmethods = []
         typestr = self.type.typestr()
@@ -1652,7 +1696,8 @@ class TypedClassDef:
             invariable = not self.variable_storage(),
             instance_dict = self.instance_dict(),
             weakref = self.weakref(),
-            mode_var = self.needs_mode_var),
+            mode_var = self.needs_mode_var,
+            gc = self.use_gc()),
 
         if virtmethods:
             print >> out.h, tmpl.subclass_meth.render(name=self.name)
@@ -1721,6 +1766,28 @@ class TypedClassDef:
                     raise
 
 
+        if self.use_gc():
+            traverse = []
+            clear = []
+            getbase = None
+
+            if self.gc_vars:
+                getbase = '    {0} &base = {1};'.format(typestr,self.cast_base_expr().format('reinterpret_cast<PyObject*>(self)'))
+                for v in self.gc_vars:
+                    t,c = out.conv.gcvarhandlers[v.type]
+                    qname = 'base.'+v.name
+                    traverse.append(t.format(qname))
+                    clear.append(c.format(qname))
+
+            print >> out.cpp, tmpl.gc_traverse_clear.render(
+                name = self.name,
+                instance_dict = bool(self._instance_dict),
+                new_init = self.new_initializes,
+                getbase = getbase,
+                traverse = traverse,
+                clear = clear)
+
+
         print >> out.cpp, tmpl.classtypedef.render(
             dynamic = self.dynamic,
             name = self.name,
@@ -1742,7 +1809,8 @@ class TypedClassDef:
             derived = [d.name for d in self.derived],
             specialmethods = self.special_methods,
             instance_dict = self.instance_dict(),
-            weakref = self.weakref()),
+            weakref = self.weakref(),
+            gc = self.use_gc()),
 
 
 def base_count(x):
@@ -2069,6 +2137,10 @@ class Conversion:
             self.integers.add(self.ulonglong)
 
         self.cppclasstopy = {}
+
+        self.gcvarhandlers = {
+            self.pyobject : ('{0}',tmpl.clear_pyobject)
+        }
 
     def __topy_pointee(self,x):
         return self.__topy.get(strip_cvq(x.type))
@@ -2438,7 +2510,7 @@ class ModuleDef:
         classes = {}
 
         for cdef in self.classes:
-            c = TypedClassDef(scope,cdef,tns)
+            c = TypedClassDef(scope,cdef,tns,conv)
             classes[c.type] = c
 
             # these assume the class has copy constructors
@@ -2935,11 +3007,14 @@ class tag_Class(tag):
     def __init__(self,args):
         t = args['type']
         self.r = ClassDef(
-            get_valid_py_ident(args.get("name"),t),
+            get_valid_py_ident(args.get('name'),t),
             t,
             parse_bool(args,'new-initializes'),
             parse_bool(args,'instance-dict',True),
-            parse_bool(args,'weakrefs',True))
+            parse_bool(args,'weakrefs',True),
+            parse_bool(args,'use-gc',True),
+            args.get('gc-include'),
+            args.get('gc-ignore'))
 
     @staticmethod
     def noinit_means_noinit():
