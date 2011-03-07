@@ -460,6 +460,8 @@ inline PyTypeObject *create_obj_<% name %>Type() {
 <@ if new_init or not initcode @>    type->tp_new = &obj_<% name %>_new;<@ endif @>
 ==     if gc
     type->tp_traverse = reinterpret_cast<traverseproc>(&obj_<% name %>_traverse);
+==     endif
+==     if gc_clear
     type->tp_clear = reinterpret_cast<inquiry>(&obj_<% name %>_clear);
 ==     endif
 
@@ -490,7 +492,7 @@ PyTypeObject obj_<% name %>Type = {
     Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE|Py_TPFLAGS_CHECKTYPES<@ if gc @>|Py_TPFLAGS_HAVE_GC<@ endif @>, /* tp_flags */
     <@ if doc @><% doc|quote %><@ else @>0<@ endif @>, /* tp_doc */
     <@ if gc @>reinterpret_cast<traverseproc>(&obj_<% name %>_traverse)<@ else @>0<@ endif @>, /* tp_traverse */
-    <@ if gc @>reinterpret_cast<inquiry>(&obj_<% name %>_clear)<@ else @>0<@ endif @>, /* tp_clear */
+    <@ if gc_clear @>reinterpret_cast<inquiry>(&obj_<% name %>_clear)<@ else @>0<@ endif @>, /* tp_clear */
     <@ if richcompare @>reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare)<@ else @>0<@ endif @>, /* tp_richcompare */
     <@if weakref @>offsetof(obj_<% name %>,weaklist)<@ else @>0<@ endif @>, /* tp_weaklistoffset */
     <@ if '__iter__' in specialmethods @>reinterpret_cast<getiterfunc>(&obj_<% name %>___iter__)<@ else @>0<@ endif @>, /* tp_iter */
@@ -1050,56 +1052,26 @@ virtmethod = env.from_string('''
 
 new_uref = 'reinterpret_cast<PyObject*>(new uref_{0}({1}))'
 
-gc_traverse_clear = env.from_string('''
-int obj_<% name %>_traverse(obj_<% name %> *self,visitproc visit,void *arg) {
-    int ret;
-== if instance_dict
-    if(self->idict) {
-        ret = visit(self->idict,arg);
-        if(ret) return ret;
-    }
-== endif
-== if traverse
-==     if not new_init
-    if(self->mode) {
-==     endif
-    <% getbase %>;
-==     for a in traverse
-    if(<% a %>) {
-        ret = visit(<% a %>,arg);
-        if(ret) return ret;
-    }
-==     endfor
-==     if not new_init
-    }
-==     endif
-== endif
+traverse_shell = '''
+int obj_{0}_traverse(obj_{0} *self,visitproc visit,void *arg) {{
+{1}
     return 0;
-}
+}}
+'''
 
-int obj_<% name %>_clear(obj_<% name %> *self) {
-== if instance_dict
-    if(self->idict) {
-        PyObject *tmp = self->idict;
-        self->idict = 0;
-        Py_DECREF(tmp);
-    }
-== endif
-== if clear
-==     if not new_init
-    if(self->mode) {
-==     endif
-    <% getbase %>;
-==     for clr in clear
-<% clr %>
-==     endfor
-==     if not new_init
-    }
-==     endif
-== endif
+clear_shell = '''
+int obj_{0}_clear(obj_{0} *self) {{
+{1}
     return 0;
-}
-''')
+}}
+'''
+
+traverse_pyobject = '''
+    if({0}) {{
+        int ret = visit({0},arg);
+        if(ret) return ret;
+    }}
+'''
 
 clear_pyobject = '''
     if({0}) {{

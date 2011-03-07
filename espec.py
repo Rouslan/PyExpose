@@ -1276,29 +1276,36 @@ class TypedClassDef:
         # TODO: it would probably be better if a warning was emitted for names
         # that don't match any fields
         if classdef.use_gc:
-            fields = [m for m in self.type.members if isinstance(m,gccxml.CPPField)]
-            accept = compile_wildcard_list(classdef.gc_include)
-            reject = compile_wildcard_list(classdef.gc_ignore)
-            for f in fields:
-                if accept(f.name):
-                    if not (f.type in conv.gcvarhandlers):
-                        raise SpecificationError('There is no rule specifying how to garbage-collect an instance of "{0}". Please add one using "gc-handler".'.format(f.type))
-                    if f.access != gccxml.ACCESS_PUBLIC:
-                        raise SpecificationError('"{0}" cannot be accessed for garbage collection because it is not public')
-                    self.gc_vars.append(f)
-                elif f.type in conv.gcvarhandlers and not reject(f.name):
-                    # members that are not explicitly accepted or rejected are
-                    # accepted if they are public
-                    if f.access == gccxml.ACCESS_PUBLIC:
-                        self.gc_vars.append(f)
-                    else:
-                        err.emit_warning(SpecificationError(
-                            ('"{0}" may need garbage collection but cannot be '+
-                            'accessed because it is not public. Add "{0}" to ' +
-                            'gc-ignore to prevent this warning.').format(f.name)))
-
-            if self.gc_vars or self._instance_dict:
+            if self._instance_dict:
                 self._use_gc = True
+
+            if self.type in conv.gcvarhandlers:
+                self.gc_vars.append(('base',self.type))
+                self._use_gc = True
+            else:
+                fields = [m for m in self.type.members if isinstance(m,gccxml.CPPField)]
+                accept = compile_wildcard_list(classdef.gc_include)
+                reject = compile_wildcard_list(classdef.gc_ignore)
+                for f in fields:
+                    if accept(f.name):
+                        if not (f.type in conv.gcvarhandlers):
+                            raise SpecificationError('There is no rule specifying how to garbage-collect an instance of "{0}". Please add one using "gc-handler".'.format(f.type))
+                        if f.access != gccxml.ACCESS_PUBLIC:
+                            raise SpecificationError('"{0}" cannot be accessed for garbage collection because it is not public')
+                        self.gc_vars.append(('base.'+f.name,f.type))
+                    elif f.type in conv.gcvarhandlers and not reject(f.name):
+                        # members that are not explicitly accepted or rejected are
+                        # accepted if they are public
+                        if f.access == gccxml.ACCESS_PUBLIC:
+                            self.gc_vars.append(('base.'+f.name,f.type))
+                        else:
+                            err.emit_warning(SpecificationError(
+                                ('"{0}" may need garbage collection but cannot be '+
+                                'accessed because it is not public. Add "{0}" to ' +
+                                'gc-ignore to prevent this warning.').format(f.name)))
+
+                if self.gc_vars:
+                    self._use_gc = True
 
     def basecount(self):
         return sum(1 + b.basecount() for b in self.bases)
@@ -1626,6 +1633,62 @@ class TypedClassDef:
         """returns a union of features for this class and all derived classes"""
         return reduce(set.union,(d.indirect_features() for d in self.derived),self.features)
 
+    def gc_code(self,out):
+        use_t = False
+        use_c = False
+
+        if self.use_gc():
+            t_body = ''
+            c_body = ''
+
+            if self._instance_dict:
+                t_body += tmpl.traverse_pyobject.format('self->idict')
+
+            traverse = []
+            clear = []
+            getbase = None
+
+            if self.gc_vars:
+                getbase = '    {0} &base = {1};\n'.format(self.type.typestr(),self.cast_base_expr().format('reinterpret_cast<PyObject*>(self)'))
+                for name,type in self.gc_vars:
+                    t,c = out.conv.gcvarhandlers[type]
+                    traverse.append(t.format(name))
+                    if c:
+                        clear.append(c.format(name))
+
+                if not self.new_initializes:
+                    t_body += '    if(self->mode) {\n'
+
+                t_body += getbase
+                t_body += ''.join(traverse)
+
+                if not self.new_initializes:
+                    t_body += '    }\n'
+
+
+            if self._instance_dict:
+                c_body += tmpl.clear_pyobject.format('self->idict')
+
+            if clear:
+                if not self.new_initializes:
+                    c_body += '    if(self->mode) {\n'
+
+                c_body += getbase
+                c_body += ''.join(clear)
+
+                if not self.new_initializes:
+                    c_body += '    }\n'
+
+
+            use_t = True
+            print >> out.cpp, tmpl.traverse_shell.format(self.name,t_body)
+            if c_body:
+                use_c = True
+                print >> out.cpp, tmpl.clear_shell.format(self.name,c_body)
+
+        return use_t,use_c
+
+
     @append_except
     def output(self,out,module):
         has_mi_subclass = self.has_multi_inherit_subclass()
@@ -1766,26 +1829,7 @@ class TypedClassDef:
                     raise
 
 
-        if self.use_gc():
-            traverse = []
-            clear = []
-            getbase = None
-
-            if self.gc_vars:
-                getbase = '    {0} &base = {1};'.format(typestr,self.cast_base_expr().format('reinterpret_cast<PyObject*>(self)'))
-                for v in self.gc_vars:
-                    t,c = out.conv.gcvarhandlers[v.type]
-                    qname = 'base.'+v.name
-                    traverse.append(t.format(qname))
-                    clear.append(c.format(qname))
-
-            print >> out.cpp, tmpl.gc_traverse_clear.render(
-                name = self.name,
-                instance_dict = bool(self._instance_dict),
-                new_init = self.new_initializes,
-                getbase = getbase,
-                traverse = traverse,
-                clear = clear)
+        gc,clear = self.gc_code(out)
 
 
         print >> out.cpp, tmpl.classtypedef.render(
@@ -1810,7 +1854,8 @@ class TypedClassDef:
             specialmethods = self.special_methods,
             instance_dict = self.instance_dict(),
             weakref = self.weakref(),
-            gc = self.use_gc()),
+            gc = gc,
+            gc_clear = clear),
 
 
 def base_count(x):
@@ -2079,6 +2124,7 @@ class Conversion:
             self.float : (False,'static_cast<float>(py_to_double({0}))'),
             self.double : tod,
             self.long_double : tod,
+            self.pyobject : (True,'{0}'),
             self.cstring : (False,'PyString_AsString({0})')
         }
 
@@ -2139,7 +2185,7 @@ class Conversion:
         self.cppclasstopy = {}
 
         self.gcvarhandlers = {
-            self.pyobject : ('{0}',tmpl.clear_pyobject)
+            self.pyobject : (tmpl.traverse_pyobject,tmpl.clear_pyobject)
         }
 
     def __topy_pointee(self,x):
@@ -2451,6 +2497,7 @@ class ModuleDef:
         self.frompy = []
         self.smartptrs = []
         self.vars = {}
+        self.gchandlers = []
 
     def print_gccxml_input(self,out):
         # In addition to the include files, declare certain typedefs so they can
@@ -2475,6 +2522,9 @@ class ModuleDef:
         for i,conv in enumerate(self.frompy):
             print >> out, 'typedef {0} frompy_type_{1};\n'.format(conv[0],i)
 
+        for i,handler in enumerate(self.gchandlers):
+            print >> out, 'typedef {0} gchandler_type_{1};\n'.format(handler[0],i)
+
         print >> out, '}\n'
 
         for c in self.classes:
@@ -2494,6 +2544,9 @@ class ModuleDef:
 
         for i,from_ in enumerate(self.frompy):
             conv.add_conv(tns.find('frompy_type_{0}'.format(i))[0],from_=(False,from_[1]))
+
+        for i,handler in enumerate(self.gchandlers):
+            conv.gcvarhandlers[tns.find('gchandler_type_{0}'.format(i))[0]] = handler[1:]
 
         out = Output(
             open(os.path.join(path, self.name + '.cpp'),'w'),
@@ -3018,7 +3071,7 @@ class tag_Class(tag):
 
     @staticmethod
     def noinit_means_noinit():
-        raise SpecificationError("You can't have both no-init and init")
+        raise SpecificationError("You can't have both <no-init> and <init>")
 
     @tag_handler('init',tag_Init)
     def handle_init(self,data):
@@ -3073,6 +3126,26 @@ class tag_Var(tag):
         self.r = VarDef(val,get_valid_py_ident(args.get('name'),val),ref)
 
 
+class tag_GCHandler(tag):
+    def __init__(self,args):
+        self.type = args['type']
+        self.traverse = None
+        self.clear = None
+
+    @tag_handler('traverse',tag_ToFromPyObject)
+    def handle_traverse(self,data):
+        self.traverse = data
+
+    @tag_handler('clear',tag_ToFromPyObject)
+    def handle_clear(self,data):
+        self.clear = data
+
+    def end(self):
+        if self.traverse is None:
+            raise SpecificationError('<traverse> must be defined for <gc-handler>')
+        return self.type,self.traverse,self.clear
+
+
 class tag_Module(tag):
     def __init__(self,args):
         self.r = ModuleDef(args["name"],stripsplit(args["include"]))
@@ -3106,6 +3179,10 @@ class tag_Module(tag):
         if data.name in self.r.vars:
             raise SpecificationError('var "{0}" is defined more than once'.format(data.name))
         self.r.vars[data.name] = data
+
+    @tag_handler('gc-handler',tag_GCHandler)
+    def handle_gchandler(self,data):
+        self.r.gchandlers.append(data)
 
 
 

@@ -1137,6 +1137,78 @@ class TestGC(TestCompile):
         self.assertTrue(w2r() is None)
 
 
+class TestGCHandler(TestCompile):
+    header_file = '''
+        // a class with special handling
+        class Thing {
+            PyObject *obj;
+        public:
+            void clear() { Py_CLEAR(obj); }
+
+            Thing() : obj(NULL) {}
+            ~Thing() { clear(); }
+
+            PyObject *get_obj() {
+                Py_XINCREF(obj);
+                return obj;
+            }
+            void set_obj(PyObject *_obj) {
+                PyObject *tmp = obj;
+                obj = _obj;
+                Py_XINCREF(obj);
+                Py_XDECREF(tmp);
+            }
+        };
+
+        // a class that has a member with special handling
+        class Container {
+        public:
+            Thing obj;
+
+            PyObject *get_obj() { return obj.get_obj(); }
+            void set_obj(PyObject *_obj) { obj.set_obj(_obj); }
+        };
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="Thing" use-gc="true">
+                <property name="member" get="get_obj" set="set_obj"/>
+            </class>
+            <class type="Container" use-gc="true">
+                <property name="member" get="get_obj" set="set_obj"/>
+            </class>
+            <gc-handler type="Thing">
+                <traverse>Py_VISIT(<val/>.get_obj());</traverse>
+                <clear><val/>.clear();</clear>
+            </gc-handler>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+
+        for C in [tm.Thing,tm.Container]:
+            obj = C()
+            obj2 = C()
+
+            objr = weakref.ref(obj)
+            obj2r = weakref.ref(obj2)
+
+            obj.member = obj2
+            obj2.member = obj
+
+            self.assertTrue(objr())
+            self.assertTrue(obj2r())
+
+            obj = None
+            obj2 = None
+
+            gc.collect()
+
+            self.assertTrue(objr() is None)
+            self.assertTrue(obj2r() is None)
+
 
 
 if __name__ == '__main__':
