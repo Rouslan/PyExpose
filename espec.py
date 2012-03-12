@@ -9,6 +9,7 @@ import copy
 import sys
 import textwrap
 import functools
+import operator
 
 from xmlparse import *
 import err
@@ -89,6 +90,12 @@ class SpecificationError(err.Error):
 
 
 
+class Scope(object):
+    """A work-around for the absence of the 'nonlocal' keyword in Python 2.X"""
+    def __init__(self,**args):
+        self.__dict__.update(args)
+
+
 def getDestructor(self):
     for m in self.members:
         if isinstance(m,gccxml.CPPDestructor):
@@ -110,48 +117,117 @@ def compatible_args(f,given):
     return f
 
 
-class LevelBaseTraverser:
-    """An iterator where the first item is a list containing the supplied class
-    (CPPClass) and each subsequent item is a list of the immediate base classes
-    of the classes in the previous list."""
 
-    def __init__(self,c,access = gccxml.ACCESS_PUBLIC):
-        self.nodes =  [c]
+def always_true(x):
+    return True
+
+def simple_member_lookup(x,name,test = always_true):
+    return (real_type(m) for m in x.members if getattr(m,"canon_name",None) == name and test(m))
+
+def min_access(m,min_access):
+    if getattr(m,'access',sys.maxint) >= min_access:
+        return m
+
+    m = copy.copy(m)
+    m.access = min_access
+
+
+class BaseCacheItem:
+    def __init__(self,had_virtual,data):
+        self.had_virtual = had_virtual
+        self.data = data
+
+class BaseMembers(object):
+    """Call a function on all direct and inherited members of a class.
+
+    This class will pass an instance of itself to 'generate'. generate is
+    expected to return a list. generate can compute a value using c, members()
+    and base_members(). members() will return a generator that emits all direct
+    members of c. base_members() returns a generator that emits a concatinated
+    sequence of the lists produced by calling generate on each base class.
+
+    Each member will have the correct access specifier
+    (public/protected/private) with regard to the access specifier of the
+    inheritance. e.g. for 'class A : private B { ... };' every member of B will
+    be private.
+
+    Each unique class is only visited once. If a class occurs more than once in
+    an inheritance hierarchy, it's previous computed (by 'generate') value is
+    reused, unless the inheritance is virtual. Only the first occurance of a
+    virtually inherited class yields a value.
+
+    """
+    def __init__(self,c,generate,access = gccxml.ACCESS_PUBLIC,cache = None):
+        self.c = c
+        self.generate = generate
         self.access = access
+        self.cache = {} if cache is None else cache
 
-    def __iter__(self):
-        return self
+    def members(self):
+        return (min_access(real_type(m),self.access) for m in self.c.members)
 
-    def next(self):
-        if not self.nodes:
-            raise StopIteration()
+    def base_members(self):
+        for b in self.c.bases:
+            ci = self.cache.get(b.type)
+            if ci is None:
+                ci = BaseCacheItem(
+                    b.virtual,
+                    self.generate(
+                        BaseMembers(
+                            b.type,
+                            self.generate,
+                            max(self.access,b.access),
+                            self.cache)))
 
-        temp = self.nodes
-        self.nodes = [b.type for b in itertools.chain.from_iterable(n.bases for n in temp) if self.access >= b.access]
-        return temp
+                self.cache[b.type] = ci
+            elif b.virtual:
+                if ci.had_virtual:
+                    # the members of virtual base classes are only counted once
+                    continue
+
+                ci.had_virtual = True
+
+            yield b,ci.data
+
+    def just_base_members(self):
+        return reduce(operator.concat,(data for b,data in self.base_members()),[])
+
+    def __call__(self):
+        return self.generate(self)
+
+
+def inherited_member_lookup(c,name,test = always_true,access = gccxml.ACCESS_PUBLIC):
+    """Look up a class member name the same way C++ does"""
+
+    def generate(bm):
+        return list(m for m in bm.members() if getattr(m,"canon_name",None) == name and test(m)) or \
+            bm.just_base_members()
+
+    return BaseMembers(c,generate,access)()
+
 
 def real_type(x):
     return real_type(x.type) if isinstance(x,gccxml.CPPTypeDef) else x
 
 def _namespace_find(self,x,test):
     parts = x.split('::',1)
-    levels = LevelBaseTraverser(self) if isinstance(self,gccxml.CPPClass) else [[self]]
-    for l in levels:
-        matches = [real_type(m) for m in itertools.chain.from_iterable(i.members for i in l) if hasattr(m,"canon_name") and m.canon_name == parts[0] and test(m)]
+    matches = list(self.lookup(parts[0],test))
+    if matches:
+        if len(parts) == 2:
+            if not isinstance(matches[0],(gccxml.CPPClass,gccxml.CPPNamespace)):
+                raise SpecificationError('"{0}" is not a namespace, struct, class or union'.format(parts[0]))
 
-        if matches:
-            if len(parts) == 2:
-                if not isinstance(matches[0],(gccxml.CPPClass,gccxml.CPPNamespace)):
-                    raise SpecificationError('"{0}" is not a namespace, struct, class or union'.format(parts[0]))
+            assert len(matches) == 1
+            return _namespace_find(matches[0],parts[1],test)
 
-                assert len(matches) == 1
-                return _namespace_find(matches[0],parts[1],test)
-
-            return matches
+        return matches
     return []
 
-def namespace_find(self,x,test=None):
-    if test is None: test = lambda x: True
+def raise_not_found_error(x):
+    raise SpecificationError('could not find "{0}"'.format(x))
+
+def namespace_find(self,x,test = always_true):
+    """Find symbol x in this object's scope"""
     if x.startswith('::'): # explicit global namespace
         while self.context: self = self.context
         r = _namespace_find(self,x[2:],test)
@@ -163,12 +239,44 @@ def namespace_find(self,x,test=None):
             if r: return r
             self = self.context
 
-    raise SpecificationError('could not find "{0}"'.format(x))
+    raise_not_found_error(x)
+
+def class_find_member(self,x):
+    """Find member x of this class."""
+    parts = x.rsplit('::')
+
+    if len(parts) == 2:
+        context = self.find(parts[0])
+        nonlocal = Scope(found=False)
+
+        def generate(bm):
+            if bm.c == context:
+                nonlocal.found = True
+                return inherited_member_lookup(bm.c,name=parts[1],access=bm.access)
+
+            return bm.just_base_members()
+
+        matches = BaseMembers(c,generate)()
+
+        if not nonlocal.found:
+            raise SpecificationError('"{0}" is not a base class of "{1}"'.format(parts[0],self.typestr()))
+
+    else:
+        matches = inherited_member_lookup(self,x)
+
+    if matches: return matches
+    raise_not_found_error(x)
 
 
 gccxml.CPPClass.find = namespace_find
+gccxml.CPPClass.lookup = inherited_member_lookup
+gccxml.CPPClass.find_member = class_find_member
+
 gccxml.CPPNamespace.find = namespace_find
+gccxml.CPPNamespace.lookup = simple_member_lookup
+
 gccxml.CPPUnion.find = namespace_find
+gccxml.CPPUnion.lookup = simple_member_lookup
 
 
 def get_unique_num():
@@ -201,7 +309,8 @@ class Tab:
     def __repr__(self):
         return 'Tab({0})'.format(self.amount)
 
-    # in-place addition/subtraction omitted to prevent modification when passed as an argument to a function
+    # in-place addition/subtraction omitted to prevent modification when passed
+    # as an argument to a function
 
     def __add__(self,val):
         if isinstance(val,basestring):
@@ -423,7 +532,7 @@ def choose_overload(ov,options,tns):
             break
 
     raise SpecificationError(
-        'No overload matches the given arguments. The options are:' +
+        'No overload matches the given arguments. The candidates are:' +
         ''.join('\n({0})'.format(','.join(map(str,f.args))) for f in options))
 
 
@@ -447,7 +556,7 @@ class TypedDefDef(object):
         self.overloads = []
 
         for ov in defdef.overloads:
-            extratest = None
+            extratest = always_true
             if ov.arity is not None:
                 extratest = lambda x: mandatory_args(x) <= ov.arity <= len(x.args)
             cf = scope.find(ov.func,extratest)
@@ -582,7 +691,7 @@ def is_virtual(x):
     return isinstance(x,gccxml.CPPMethod) and x.virtual
 
 def is_static(x):
-    return isinstance(x,gccxml.CPPMethod) and x.virtual
+    return isinstance(x,gccxml.CPPMethod) and x.static
 
 class TypedMethodDef(TypedDefDef):
     what = 'method'
@@ -1025,6 +1134,12 @@ class _NoInit:
 
 NoInit = _NoInit()
 
+class QualifiedField(object):
+    def __init__(self,name,type,offset):
+        self.name = name
+        self.type = type
+        self.offset = offset
+
 class ClassDef:
     def __init__(self,name,type,new_initializes=False,instance_dict=True,weakref=True,use_gc=True,gc_include=None,gc_ignore=None):
         self.name = name
@@ -1051,14 +1166,43 @@ class ClassDef:
         # and arguments specified by typedef in templates
         print >> outfile, 'typedef {0} class_type_{1};\n'.format(self.type,self.uniquenum)
 
+        fields = []
+        if self.gc_include: fields.extend(self.gc_include)
+        if self.gc_ignore: fields.extend(self.gc_ignore)
+        for i,f in enumerate(fields):
+            print >> outfile, field_offset_and_type.format(self.uniquenum,i,f)
+
         for m in self.methods.itervalues():
             m.gccxml_input(outfile)
 
         if self.constructor:
             self.constructor.gccxml_input(outfile)
 
-    def get_type(self,tns):
-        return tns.find('class_type_{0}'.format(self.uniquenum))[0]
+    def _get_field(self,tns,i):
+        o = tns.find('class_{0}_field_offset_{1}'.format(self.uniquenum,i))[0]
+        assert isinstance(o,gccxml.CPPVariable) and o.init.isdigit()
+        o = int(o.init)
+
+        t = tns.find('class_{0}_field_type_{1}'.format(self.uniquenum,i))[0]
+        return QualifiedField(f,t,o)
+
+    def get_types(self,tns):
+        ct = tns.find('class_type_{0}'.format(self.uniquenum))[0]
+
+        i = 0
+        include = []
+        ignore = []
+        if self.gc_include:
+            for f in self.gc_include:
+                include.append(self._get_field(i))
+                i += 1
+
+        if self.gc_ignore:
+            for f in self.gc_ignore:
+                ignore.append(self._get_field(i))
+                i += 1
+
+        return ct,include,ignore
 
 
 def splitdefdef23code(defdef,conv,vars,ind=Tab(2)):
@@ -1112,26 +1256,142 @@ def default_to_ov(args):
     yield newargs
 
 
-def compile_wildcard_list(x):
-    if x:
-        parts = x.split()
-        if parts:
-            return re.compile('({0})$'.format('|'.join('.*'.join(map(re.escape,part.split('*'))) for part in parts))).match
+def subname(a,b):
+    return '{0}::{1}'.format(a,b)
 
-    return lambda x: False
+GC_IGNORE = 1
+GC_INCLUDE = 2
+GC_FUNCTION = 3 # means the field is covered by <gc-include>
+
+def recursive_qf_fields(fields):
+    for f in fields:
+        yield f
+        for sub_f in recursive_qf_fields(f.components):
+            yield sub_f
+
+class QualifiedFieldHandling(object):
+    def __init__(self,name,type,access,offset,base_handler=None,handle_gc=None):
+        self.name = name
+        self.type = type
+        self.access = access
+        self.offset = offset
+        self.handle_gc = None
+        self.base_handler = None
+        self.components = []
+
+    def derived(self,name,offset,base_handler=None):
+        return QualifiedFieldHandling(subname(name,self.name),self.type,self.access,self.offset+offset,base_handler)
+
+    @property
+    def end_offset(self):
+        return self.offset + self.type.size
+
+    @staticmethod
+    def from_field(field,handle_gc=None):
+        return QualifiedFieldHandling(field.name,field.type,None,field.offset,None,handle_gc)
+
+class TypeMismatch(err.Error):
+    pass
+
+class RedundantSpecification(err.Error):
+    pass
+
+def check_base_handler(fields,f,handle):
+    """Check if the base handler is still usable and remove it if not.
+
+    If a field is ignored that was included in an exposed base class, the base
+    class' GC handler functions cannot be re-used in this class.
+
+    """
+    b_handler = f.base_handler
+
+    if b_handler:
+        if f.handle_gc == GC_FUNCTION:
+            if handle == GC_IGNORE:
+                emit_warning(SpecificationError(
+                    ('"{0}" is a member of a base class that uses '+
+                    '<gc-handler>. Ignoring it here has no effect.')
+                    .format(f.name)))
+            elif handle == GC_INCLUDE:
+                emit_warning(SpecificationError(
+                    ('"{0}" is a member of a base class that uses '+
+                    '<gc-handler>. If the member is handled by the base class,'+
+                    'including it here will cause it to be handled twice.')
+                    .format(f.name)))
+        elif handle == GC_IGNORE and f.handle_gc == GC_INCLUDE:
+            for field in recursive_qf_fields(fields):
+                if field.base_handler == handler:
+                    field.base_handler = None
+
+def qf_handle(fields,target,handle):
+    assert handle
+
+    for i,f in enumerate(fields):
+        if target.offset < f.offset:
+            raise TypeMismatch('"{0}" does not correspond to a defined field'.format(target.name))
+
+        if f.offset == target.offset:
+            if target.type.size < f.type.size:
+                qf_handle(f.components,target,handle)
+                break
+
+            if i+1 == len(fields) or target.end_offset <= fields[i+1].offset:
+                if f.type != target.type:
+                    # TODO: don't emit this warning for proper union members
+                    emit_warning(TypeMismatch('Field "{0}" is of type "{1}" but is cast as "{2}"'.format(f.name,f.typestr(),target.type.typestr())))
+                check_base_handler(fields,f,handle)
+                if f.handle_gc == handle:
+                    emit_warning(RedundantSpecification(('Field "{0}" was already included' if handle else 'Field "{0}" was already ignored').format(f.name)))
+                f.handle_gc = handle
+                break
+
+            raise TypeMismatch('"{0}" overlaps two or more defined fields'.format(target.name))
+        
+        if target.end_offset <= f.end_offset:
+            qf_handle(f.components,target,handle)
+            break
+    else:
+        # this might mean we are dealing with a variable-sized type
+        emit_warning(TypeMismatch('"{0}" is farther than any defined field'.format(target.name)))
+        fields.append(QualifiedFieldHandling.from_field(target))
+
+
+def qualified_fields(c,classdefs):
+    def generate(bm):
+        fields = list(QualifiedFieldHandling(m.canon_name,m.type,m.access,m.offset) for m in bm.members() if isinstance(m,gccxml.CPPField) and not m.static)
+        for b,subfields in bm.base_members():
+            typed = classdefs.get(b.type)
+            if typed:
+                typed = typed[0]
+                subfields = typed.gc_fields
+            
+            fields.extend(m.derived(b.type.name,b.offset,typed) for m in subfields)
+        return sorted(fields,key=(lambda x: x.offset))
+
+    return BaseMembers(c,generate)()
+
+
+def find_field(c,field):
+    m = c.find_member(field)
+    if not isinstance(m[0],gccxml.CPPField):
+        raise SpecificationError('"{0}" is not a member variable'.format(field))
+
+    if len(m) > 1:
+        raise SpecificationError('"{0}" is ambiguous in this context')
 
 
 class TypedClassDef:
     what = 'class'
 
     @append_except
-    def __init__(self,scope,classdef,tns,conv):
+    def __init__(self,scope,classdef,tns):
         self.name = classdef.name
         self.uniquenum = classdef.uniquenum
-        self.type = classdef.get_type(tns)
+        self.type,self.gc_include,self.gc_ignore = classdef.get_types(tns)
         self.new_initializes = classdef.new_initializes
         self._instance_dict = classdef.instance_dict
         self._weakref = classdef.weakref
+        self._use_gc = classdef.use_gc
         self.no_destruct = has_trivial_destructor(self.type)
 
         if not isinstance(self.type,gccxml.CPPClass):
@@ -1270,42 +1530,7 @@ class TypedClassDef:
         self.derived = []
         self.features = set()
         self.needs_mode_var = False
-        self._use_gc = False
-        self.gc_vars = []
-
-        # TODO: it would probably be better if a warning was emitted for names
-        # that don't match any fields
-        if classdef.use_gc:
-            if self._instance_dict:
-                self._use_gc = True
-
-            if self.type in conv.gcvarhandlers:
-                self.gc_vars.append(('base',self.type))
-                self._use_gc = True
-            else:
-                fields = [m for m in self.type.members if isinstance(m,gccxml.CPPField)]
-                accept = compile_wildcard_list(classdef.gc_include)
-                reject = compile_wildcard_list(classdef.gc_ignore)
-                for f in fields:
-                    if accept(f.name):
-                        if not (f.type in conv.gcvarhandlers):
-                            raise SpecificationError('There is no rule specifying how to garbage-collect an instance of "{0}". Please add one using "gc-handler".'.format(f.type))
-                        if f.access != gccxml.ACCESS_PUBLIC:
-                            raise SpecificationError('"{0}" cannot be accessed for garbage collection because it is not public')
-                        self.gc_vars.append(('base.'+f.name,f.type))
-                    elif f.type in conv.gcvarhandlers and not reject(f.name):
-                        # members that are not explicitly accepted or rejected are
-                        # accepted if they are public
-                        if f.access == gccxml.ACCESS_PUBLIC:
-                            self.gc_vars.append(('base.'+f.name,f.type))
-                        else:
-                            err.emit_warning(SpecificationError(
-                                ('"{0}" may need garbage collection but cannot be '+
-                                'accessed because it is not public. Add "{0}" to ' +
-                                'gc-ignore to prevent this warning.').format(f.name)))
-
-                if self.gc_vars:
-                    self._use_gc = True
+        self.gc_fields = None # this is computed later
 
     def basecount(self):
         return sum(1 + b.basecount() for b in self.bases)
@@ -1314,7 +1539,8 @@ class TypedClassDef:
     def dynamic(self):
         return len(self.bases) > 1
 
-    # a seperate property in case a dynamic declaration is ever needed for a single/no-inheritance class
+    # a seperate property in case a dynamic declaration is ever needed for a
+    # single/no-inheritance class
     multi_inherit = dynamic
 
     @property
@@ -1626,65 +1852,122 @@ class TypedClassDef:
     def weakref(self):
         return self._weakref and self.can_exist()
 
-    def use_gc(self):
-        return self._use_gc and self.can_exist()
-
     def indirect_features(self):
         """returns a union of features for this class and all derived classes"""
         return reduce(set.union,(d.indirect_features() for d in self.derived),self.features)
 
+    def use_gc(self):
+        return self._use_gc and self.can_exist()
+
     def gc_code(self,out):
+        """Generate the garbage collection code if needed.
+
+        This function also populates self.gc_fields which is needed by all
+        derived classes.
+
+        """
         use_t = False
         use_c = False
 
+        gc_vars = []
+        self.gc_fields = []
+
         if self.use_gc():
-            t_body = ''
-            c_body = ''
+            self.gc_fields = qualified_fields(self.type,out.conv.cppclasstopy)
 
-            if self._instance_dict:
-                t_body += tmpl.traverse_pyobject.format('self->idict')
+            if self.type in out.conv.gcvarhandlers:
+                gc_vars.append(('base',self.type))
+                if self.gc_include:
+                    err.emit_warning(SpecificationError('gc-include is ignored because <gc-handler> is defined for this type'))
+                if self.gc_ignore:
+                    err.emit_warning(SpecificationError('gc-ignore is ignored because <gc-handler> is defined for this type'))
+                
+                for f in recursive_qf_fields(self.gc_fields):
+                    f.handle_gc = GC_FUNCTION
+                    f.base_handler = self
+                    
+            else:
+                for f in self.gc_include: qf_handle(self.gc_fields,True,f)
+                for f in self.gc_ignore: qf_handle(self.gc_fields,False,f)
+  
+                for f in recursive_qf_fields(self.gc_fields):
+                    if f.base_handler:
+                        gc_vars.append(('static_cast<{0}&>(base)'.format(f.base_handler.type.type_str()),f.base_handler.type))
+                    if f.handle_gc == GC_INCLUDE:
+                        if not (f.type in conv.gcvarhandlers):
+                            raise SpecificationError('There is no rule specifying how to garbage-collect an instance of "{0}". Please add one using <gc-handler>.'.format(f.type))
+                        if any(sub_f.handle_gc == GC_INCLUDE for sub_f in recursive_qf_fields(f.components)):
+                            emit_warning(RedundantSpecification('both "{0}" and one of its fields/items ("{1}") are marked as requiring garbage collection'.format(f.name,sub_f.name)))
+                        #if f.access != gccxml.ACCESS_PUBLIC:
+                        #    raise SpecificationError('"{0}" cannot be accessed for garbage collection because it is not public')
+                        gc_vars.append(('base.'+f.name,f.type))
+                    elif f.handle_gc == GC_FUNCTION:
+                        base_handlers.add(f.base_handler)
+                    elif (not f.handle_gc) and f.type in out.conv.gcvarhandlers:
+                        # Members that are not explicitly accepted or rejected
+                        # are accepted if they are public.
 
-            traverse = []
-            clear = []
-            getbase = None
-
-            if self.gc_vars:
-                getbase = '    {0} &base = {1};\n'.format(self.type.typestr(),self.cast_base_expr().format('reinterpret_cast<PyObject*>(self)'))
-                for name,type in self.gc_vars:
-                    t,c = out.conv.gcvarhandlers[type]
-                    traverse.append(t.format(name))
-                    if c:
-                        clear.append(c.format(name))
-
-                if not self.new_initializes:
-                    t_body += '    if(self->mode) {\n'
-
-                t_body += getbase
-                t_body += ''.join(traverse)
-
-                if not self.new_initializes:
-                    t_body += '    }\n'
+                        # We don't have to worry about this being a sub-field of
+                        # an accepted field because sub-fields are only added
+                        # when specified explicitly (ie: bool(f.handle_gc) is
+                        # True).
+                        if f.access == gccxml.ACCESS_PUBLIC:
+                            gc_vars.append(('base.'+f.name,f.type))
+                        else:
+                            err.emit_warning(SpecificationError(
+                                ('"{0}" may need garbage collection but cannot be '+
+                                'accessed because it is not public. Add "{0}" to ' +
+                                'gc-ignore to prevent this warning.').format(f.name)))
 
 
-            if self._instance_dict:
-                c_body += tmpl.clear_pyobject.format('self->idict')
+            if self._instance_dict or gc_vars:
+                t_body = ''
+                c_body = ''
 
-            if clear:
-                if not self.new_initializes:
-                    c_body += '    if(self->mode) {\n'
+                if self._instance_dict:
+                    t_body += tmpl.traverse_pyobject.format('self->idict')
 
-                c_body += getbase
-                c_body += ''.join(clear)
+                traverse = []
+                clear = []
+                getbase = None
 
-                if not self.new_initializes:
-                    c_body += '    }\n'
+                if gc_vars:
+                    getbase = '    {0} &base = {1};\n'.format(self.type.typestr(),self.cast_base_expr().format('reinterpret_cast<PyObject*>(self)'))
+                    for name,type in gc_vars:
+                        t,c = out.conv.gcvarhandlers[type]
+                        traverse.append(t.format(name))
+                        if c:
+                            clear.append(c.format(name))
+
+                    if not self.new_initializes:
+                        t_body += '    if(self->mode) {\n'
+
+                    t_body += getbase
+                    t_body += ''.join(traverse)
+
+                    if not self.new_initializes:
+                        t_body += '    }\n'
 
 
-            use_t = True
-            print >> out.cpp, tmpl.traverse_shell.format(self.name,t_body)
-            if c_body:
-                use_c = True
-                print >> out.cpp, tmpl.clear_shell.format(self.name,c_body)
+                if self._instance_dict:
+                    c_body += tmpl.clear_pyobject.format('self->idict')
+
+                if clear:
+                    if not self.new_initializes:
+                        c_body += '    if(self->mode) {\n'
+
+                    c_body += getbase
+                    c_body += ''.join(clear)
+
+                    if not self.new_initializes:
+                        c_body += '    }\n'
+
+
+                use_t = True
+                print >> out.cpp, tmpl.traverse_shell.format(self.name,t_body)
+                if c_body:
+                    use_c = True
+                    print >> out.cpp, tmpl.clear_shell.format(self.name,c_body)
 
         return use_t,use_c
 
@@ -1713,7 +1996,7 @@ class TypedClassDef:
         if virtmethods:
             print >> out.h, tmpl.subclass.render(
                 name = self.name,
-                type = self.type.typestr(),
+                type = typestr,
                 constructors = self.constructor_args(),
                 methods = ({
                     'name' : m.canon_name,
@@ -2563,7 +2846,7 @@ class ModuleDef:
         classes = {}
 
         for cdef in self.classes:
-            c = TypedClassDef(scope,cdef,tns,conv)
+            c = TypedClassDef(scope,cdef,tns)
             classes[c.type] = c
 
             # these assume the class has copy constructors
@@ -3056,6 +3339,10 @@ class tag_Def(tag):
         self.r.doc = data
 
 
+def parse_gc_list(args,name):
+    gc = args.get(name)
+    return gc and map(str.trim,gc.split(';'))
+
 class tag_Class(tag):
     def __init__(self,args):
         t = args['type']
@@ -3066,8 +3353,8 @@ class tag_Class(tag):
             parse_bool(args,'instance-dict',True),
             parse_bool(args,'weakrefs',True),
             parse_bool(args,'use-gc',True),
-            args.get('gc-include'),
-            args.get('gc-ignore'))
+            parse_gc_list(args,'gc-include'),
+            parse_gc_list(args,'gc-ignore'))
 
     @staticmethod
     def noinit_means_noinit():

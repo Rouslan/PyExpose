@@ -1080,3 +1080,8 @@ clear_pyobject = '''
         Py_DECREF(tmp);
     }}
 '''
+
+field_offset_and_type = '''
+const unsigned long class_{0}_field_offset_{1} = __builtin_offsetof(class_type_{0},{2});
+typedef __typeof__(reinterpret_cast<class_type_{0}*>(1)->{2}) class_{0}_field_type_{1};
+'''

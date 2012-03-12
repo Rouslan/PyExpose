@@ -66,6 +66,7 @@ Example: ::
         <xsd:element ref="doc"/>
         <xsd:element ref="to-pyobject"/>
         <xsd:element ref="from-pyobject"/>
+        <xsd:element ref="gc-handler"/>
       </xsd:choice>
 
       <xsd:attribute name="name" type="ident" use="required">
@@ -184,7 +185,7 @@ __init__        tp_init
 __del__         tp_dealloc
 =============== =================
 
-For functions that dont have a distinct equivalent in Python, the following
+For functions that don't have a distinct equivalent in Python, the following
 names are provided:
 
 ========================= ======================================
@@ -356,7 +357,7 @@ overridden, so setting this to false avoids a small amount of overhead.
   <xsd:element name="no-init">
     <xsd:annotation>
       <xsd:documentation>
-Specifies that the class will not have an __init__ method. Unless
+Specifies that the class will not have an ``__init__`` method. Unless
 ``new-initializes`` is specified, the class cannot be instantiated directly in
 Python code. Attempting to do so will raise a TypeError.
       </xsd:documentation>
@@ -447,7 +448,7 @@ otherwise an arbitrary name is chosen.
           <xsd:documentation>
 The C++ class to expose to python. The class may be an instantiation of a
 template, but cannot be the template itself (e.g. you can use
-std::vector&lt;int&gt;, but not std::vector).
+``std::vector&lt;int&gt;``, but ``not std::vector``).
 
 Note that if you specify an instantiation of a template using a typedef but the
 instantiation is not used anywhere else, PyExpose might not find it. The
@@ -472,7 +473,7 @@ when any of its methods (include property getters and setters) are called.
       <xsd:attribute name="instance-dict" type="xsd:boolean" default="true">
         <xsd:annotation>
           <xsd:documentation>
-Specifies whether to include an instance dictionary (__dict__). The default is
+Specifies whether to include an instance dictionary (``__dict__``). The default is
 "true".
           </xsd:documentation>
         </xsd:annotation>
@@ -481,8 +482,47 @@ Specifies whether to include an instance dictionary (__dict__). The default is
       <xsd:attribute name="instance-dict" type="xsd:boolean" default="true">
         <xsd:annotation>
           <xsd:documentation>
-Specifies whether to support weak references (__weakref__). The default is
+Specifies whether to support weak references (``__weakref__``). The default is
 "true".
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="use-gc" type="xsd:boolean" default="true">
+        <xsd:annotation>
+          <xsd:documentation>
+Specifies whether to support cyclyc garbage collection. If true, the "traverse"
+and "clear" functions are generated for this class, handling the instance
+dictionary and any fields of type ``PyObject*`` or a type specified by
+``&lt;gc-handler&gt;``. Fields can be omitted from the traverse and clear
+functions using ``gc-ignore``.
+
+Only first-level fields are included by default. For example, if the class has fields
+that are structs or arrays, the struct's fields and array's items will not be
+included automatically. They can however be included by listing them in
+``gc-include``.
+
+The default is "true".
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="gc-include" type="xsd:string">
+        <xsd:annotation>
+          <xsd:documentation>
+A semicolon-seperated list of fields to be included in cyclic garbage
+collection. This list is ignored if a &lt;gc-handler&gt; applies to the entire
+class.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="gc-ignore" type="xsd:string">
+        <xsd:annotation>
+          <xsd:documentation>
+A semicolon-seperated list of fields to be omitted from cyclic garbage
+collection. This list is ignored if a &lt;gc-handler&gt; applies to the entire
+class.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -613,6 +653,38 @@ unmanagedref     Same as "true"
           </xsd:union>
         </xsd:simpleType>
       </xsd:attribute>
+    </xsd:complexType>
+  </xsd:element>
+
+
+  <xsd:element name="gc-handler">
+    <xsd:annotation>
+      <xsd:documentation>
+Specifies how to visit a data type containing a Python reference in a
+tp_traverse function and optionally how to clear it in a tp_clear function.
+      </xsd:documentation>
+    </xsd:annotation>
+
+    <xsd:complexType>
+      <xsd:all>
+        <xsd:element name="traverse">
+          <xsd:complexType mixed="true">
+            <xsd:choice maxOccurs="unbounded" minOccurs="0">
+              <xsd:element ref="val"/>
+            </xsd:choice>
+          </xsd:complexType>
+        </xsd:element>
+
+        <xsd:element name="clear" minOccurs="0">
+          <xsd:complexType mixed="true">
+            <xsd:choice maxOccurs="unbounded" minOccurs="0">
+              <xsd:element ref="val"/>
+            </xsd:choice>
+          </xsd:complexType>
+        </xsd:element>
+      </xsd:all>
+
+      <xsd:attribute name="type" type="symbol"/>
     </xsd:complexType>
   </xsd:element>
 

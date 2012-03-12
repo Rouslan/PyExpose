@@ -13,13 +13,16 @@ def parse_access(a):
 def link_item(*args):
     def inner(self,items):
         for arg in args:
-            setattr(self,arg,items[getattr(self,arg)])
+            setattr(self,arg,find_link(items,getattr(self,arg)))
     return inner
 
 def link_list(arg):
     def inner(self,items):
         setattr(self,arg,filter(None,(items.get(id) for id in getattr(self,arg))))
     return inner
+
+def find_link(d,id):
+    return d.get(id,gccxml_missing)
 
 class ArgList(list):
     def __str__(self):
@@ -113,7 +116,7 @@ class CPPArgument(object):
         return '<{0}>'.format(s)
 
 class CPPBase(object):
-    __slots__ = 'type','access'
+    __slots__ = 'type','access','virtual','offset'
     link = link_item("type")
 
 class CPPEllipsis(object):
@@ -134,7 +137,7 @@ class CPPFunctionType(CPPType):
         self.args = ArgList()
 
     def link(self,items):
-        self.returns = items[self.returns]
+        self.returns = find_link(items,self.returns)
         for a in self.args: a.link(items)
 
     def _typestr(self,deriv):
@@ -147,7 +150,7 @@ class CPPFunction(CPPSymbol):
         self.args = ArgList()
 
     def link(self,items):
-        self.returns = items[self.returns]
+        self.returns = find_link(items,self.returns)
         for a in self.args: a.link(items)
 
     def __repr__(self):
@@ -206,7 +209,7 @@ class CPPMethod(CPPSymbol):
         self.args = ArgList()
 
     def link(self,items):
-        self.returns = items[self.returns]
+        self.returns = find_link(items,self.returns)
         for a in self.args: a.link(items)
 
 class CPPMethodType(CPPType):
@@ -216,8 +219,8 @@ class CPPMethodType(CPPType):
         self.args = ArgList()
 
     def link(self,items):
-        self.returns = items[self.returns]
-        self.basetype = items[self.basetype]
+        self.returns = find_link(items,self.returns)
+        self.basetype = find_link(items,self.basetype)
         for a in self.args: a.link(items)
 
     def _typestr(self,deriv):
@@ -238,6 +241,10 @@ class CPPArrayType(CPPType):
     def _typestr(self,deriv):
         part = '[{0}]'.format(self.max+1 if self.max else '')
         return self.type.typestr('({0}){1}'.format(deriv,part) if deriv else part)
+
+    @property
+    def size(self):
+        return self.type.size * self.max
 
 class CPPReferenceType(CPPType):
     __slots__ = 'type','size'
@@ -313,6 +320,18 @@ class CPPVariable(CPPSymbol):
     __slots__ = 'name','type','init','context'
     link = link_item('type')
 
+class GCCXMLUnimplemented(object):
+    __slots__ = ()
+
+    def link(self,items):
+        pass
+
+class _GCCXMLMissing(object):
+    """Represents a type or symbol that GCCXML referred to, but never defined.
+
+    This is to tolerate an apparant bug in GCCXML CVS revision 1.135."""
+    pass
+gccxml_missing = _GCCXMLMissing()
 
 
 
@@ -374,12 +393,15 @@ function_handlers = {
 class tag_Base(tag):
     def __init__(self,args):
         self.r = CPPBase()
-        self.r.type = args["type"]
-        self.r.access = parse_access(args["access"])
+        self.r.type = args['type']
+        self.r.access = parse_access(args['access'])
+        self.r.offset = int(args['offset'])
+        v = args.get('virtual')
+        self.r.virtual = False if v is None else zero_one(v)
 
 class tag_Class(tag):
     OType = CPPClass
-    __init__ = common_init([('name',None,None),('size',None,None),'context'])
+    __init__ = common_init([('name',None,None),('size',int,None),'context'])
 
     @tag_handler('Base',tag_Base)
     def handle_base(self,data):
@@ -392,13 +414,13 @@ class tag_Function(tag):
 
 class tag_PointerType(tag):
     OType = CPPPointerType
-    __init__ = common_init(["type","size"])
+    __init__ = common_init(["type",('size',int)])
 
 class tag_FundamentalType(tag):
     OType = CPPFundamentalType
     __init__ = common_init([
         "name",
-        ("size",None,None)]) # the type "void" does not have a size
+        ('size',int,None)]) # the type "void" does not have a size
 
 class tag_FunctionType(tag):
     OType = CPPFunctionType
@@ -407,11 +429,11 @@ class tag_FunctionType(tag):
 
 class tag_Namespace(tag):
     OType = CPPNamespace
-    __init__ = common_init([("name",lambda x: None if x == '::' else x),('context',None,None)])
+    __init__ = common_init([("name",lambda x: None if x == '::' else x,''),('context',None,None)])
 
 class tag_Field(tag):
     OType = CPPField
-    __init__ = common_init(["name","type",("access",parse_access),"offset",'context'] + bool_keys("static"))
+    __init__ = common_init(["name","type",("access",parse_access),('offset',int),'context'] + bool_keys("static"))
 
 class tag_Method(tag):
     OType = CPPMethod
@@ -432,7 +454,7 @@ class tag_ArrayType(tag):
 
 class tag_ReferenceType(tag):
     OType = CPPReferenceType
-    __init__ = common_init(["type","size"])
+    __init__ = common_init(["type",('size',int)])
 
 class tag_CvQualifiedType(tag):
     OType = CPPCvQualifiedType
@@ -448,7 +470,7 @@ class tag_OperatorFunction(tag_Function):
 
 class tag_Union(tag):
     OType = CPPUnion
-    __init__ = common_init(["size",("name",None,None),("members",unicode.split),'context'])
+    __init__ = common_init([('size',int),("name",None,None),("members",unicode.split),'context'])
 
 class tag_Destructor(tag):
     OType = CPPDestructor
@@ -456,7 +478,7 @@ class tag_Destructor(tag):
 
 class tag_OffsetType(tag):
     OType = CPPOffsetType
-    __init__ = common_init(["basetype","type","size"])
+    __init__ = common_init(["basetype","type",('size',int)])
 
 class tag_TypeDef(tag):
     OType = CPPTypeDef
@@ -464,7 +486,7 @@ class tag_TypeDef(tag):
 
 class tag_Enumeration(tag):
     OType = CPPEnumeration
-    __init__ = common_init(["name","size",'context'])
+    __init__ = common_init(["name",('size',int),'context'])
 
     @tag_handler('EnumValue',tag)
     def handle_enumval(self,data):
@@ -475,6 +497,9 @@ class tag_Variable(tag):
     OType = CPPVariable
     __init__ = common_init(['name','type','context',('init',None,None)])
 
+class tag_Unimplemented(tag):
+    OType = GCCXMLUnimplemented
+    __init__ = common_init([])
 
 class tag_root(tag):
     def __init__(self,args):
@@ -502,11 +527,13 @@ class tag_root(tag):
     @tag_handler("Typedef",tag_TypeDef)
     @tag_handler("Enumeration",tag_Enumeration)
     @tag_handler("Variable",tag_Variable)
+    @tag_handler("Unimplemented",tag_Unimplemented)
     def child(self,data):
         self.r[data[0]] = data[1]
 
     # don't care about these (yet):
     @tag_handler("Converter",tag)
+    @tag_handler("NamespaceAlias",tag)
     @tag_handler("File",tag)
     def otherchild(self,data):
         pass
