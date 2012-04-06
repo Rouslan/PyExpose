@@ -13,6 +13,7 @@
 #include "pyexpose_common.h"
 
 
+
 #pragma GCC visibility push(hidden)
 
 
@@ -37,18 +38,19 @@ namespace py {
     }
 
     inline PyObject *incref(PyObject *o) {
+        assert(o);
         Py_INCREF(o);
         return o;
     }
 
     struct borrowed_ref {
         PyObject *_ptr;
-        explicit borrowed_ref(PyObject *ptr) : _ptr(ptr) { assert(ptr); }
+        explicit borrowed_ref(PyObject *ptr) : _ptr(ptr) {}
     };
 
     struct new_ref {
         PyObject *_ptr;
-        explicit new_ref(PyObject *ptr) : _ptr(ptr) { assert(ptr); }
+        explicit new_ref(PyObject *ptr) : _ptr(ptr) {}
     };
 
     template<typename T> T *get_base_or_none(PyObject *o) {
@@ -67,7 +69,7 @@ namespace py {
 
     public:
         object(borrowed_ref r) : _ptr(incref(r._ptr)) {}
-        object(new_ref r) : _ptr(r._ptr) {}
+        object(new_ref r) : _ptr(r._ptr) { assert(_ptr); }
         object(const object &b) : _ptr(incref(b._ptr)) {}
 
         ~object() {
@@ -76,8 +78,11 @@ namespace py {
 
         object &operator=(const object &b) {
             Py_INCREF(b._ptr);
-            Py_DECREF(_ptr);
+
+            // cyclic gargable collection safety
+            PyObject *tmp = _ptr;
             _ptr = b._ptr;
+            Py_DECREF(tmp);
             return *this;
         }
 
@@ -230,7 +235,7 @@ namespace py {
             return *this;
         }
 
-        // to make sure object_a[x] = object_b[y] works as expected
+        // so object_a[x] = object_b[y] works as expected
         object_item_proxy &operator=(const object_item_proxy &val) {
             return operator=(static_cast<object>(val));
         }
@@ -247,6 +252,48 @@ namespace py {
     inline void del(const object_item_proxy &item) {
         if(PyObject_DelItem(item._ptr,item.key) == -1) throw py_error_set();
     }
+
+
+    template<typename T> class _nullable {
+        PyObject *_ptr;
+    public:
+        _nullable() : _ptr(NULL) {}
+        _nullable(const _nullable<T> &b) : _ptr(incref(b._ptr)) {}
+        _nullable(const T &b) : _ptr(incref(b.get())) {}
+
+        _nullable &operator=(const _nullable<T> &b) {
+            Py_XINCREF(b._ptr);
+
+            // cyclic gargable collection safety
+            PyObject *tmp = _ptr;
+            _ptr = b._ptr;
+            Py_XDECREF(tmp);
+            return *this;
+        }
+        _nullable &operator=(const T &b) {
+            Py_INCREF(b._ptr);
+
+            // cyclic gargable collection safety
+            PyObject *tmp = _ptr;
+            _ptr = b._ptr;
+            Py_XDECREF(tmp);
+            return *this;
+        }
+
+        operator bool() const { return _ptr != NULL; }
+        T operator*() {
+            assert(_ptr);
+            return borrowed_ref(_ptr);
+        }
+        T operator->() {
+            assert(_ptr);
+            return borrowed_ref(_ptr);
+        }
+
+        PyObject *get() { return _ptr; }
+    };
+
+    typedef _nullable<object> nullable_object;
 
 
 #if PY_VERSION_HEX >= 0x02060000
@@ -296,6 +343,88 @@ namespace py {
         object operator[](Py_ssize_t i) { return borrowed_ref(PyTuple_GET_ITEM(_ptr,i)); }
         Py_ssize_t size() const { return PyTuple_GET_SIZE(_ptr); }
     };
+
+    typedef _nullable<tuple> nullable_tuple;
+
+
+    class dict_item_proxy {
+        friend class dict;
+        friend void del(const dict_item_proxy &item);
+
+        PyObject *_ptr;
+        PyObject *key;
+
+        dict_item_proxy(PyObject *ptr,PyObject * key) : _ptr(ptr), key(key) {}
+    public:
+        dict_item_proxy(const dict_item_proxy &b) : _ptr(b._ptr), key(incref(b.key)) {}
+        ~dict_item_proxy() {
+            Py_DECREF(key);
+        }
+
+        operator object() const {
+            /* using mp_subscript because it sets the error for us if the key
+               isn't found */
+            PyMappingMethods *m = _ptr->ob_type->tp_as_mapping;
+            assert(m && m->mp_subscript);
+            PyObject *item = (*m->mp_subscript)(_ptr,key);
+            if(!item) throw py_error_set();
+            return new_ref(item);
+        }
+
+        dict_item_proxy &operator=(object val) {
+            if(PyDict_SetItem(_ptr,key,val.get()) == -1) throw py_error_set();
+            return *this;
+        }
+
+        // so object_a[x] = object_b[y] works as expected
+        dict_item_proxy &operator=(const dict_item_proxy &val) {
+            return operator=(static_cast<object>(val));
+        }
+    };
+
+    class dict : public object {
+    public:
+        dict(borrowed_ref r) : object(r) { assert(PyDict_Check(r._ptr)); }
+        dict(new_ref r) : object(r) { assert(PyDict_Check(r._ptr)); }
+        dict() : object(new_ref(check_obj(PyDict_New()))) {}
+        dict(const dict &b) : object(b) {}
+
+        dict &operator=(const dict &b) {
+            object::operator=(b);
+            return *this;
+        }
+
+        template<typename T> dict_item_proxy operator[](T key) { return dict_item_proxy(_ptr,to_pyobject(key)); }
+        Py_ssize_t size() const { return PyDict_Size(_ptr); }
+        template<typename T> nullable_object find(T key) {
+#if PY_MAJOR_VERSION >= 3
+            PyObject *item = PyDict_GetItemWithError(_ptr,to_pyobject(key));
+            if(!item && PyErr_Occurred()) throw py_error_set();
+            return borrowed_ref(item);
+#else
+            /* mp_subscript is used instead of PyDict_GetItem because the latter
+               swallows all errors */
+            PyMappingMethods *m = _ptr->ob_type->tp_as_mapping;
+            assert(m && m->mp_subscript);
+            PyObject *item = (*m->mp_subscript)(_ptr,to_pyobject(key));
+            if(!item) {
+                if(!PyErr_ExceptionMatches(PyExc_KeyError)) throw py_error_set();
+                PyErr_Clear();
+            }
+            return new_ref(item);
+#endif
+        }
+
+        dict copy(const dict &b) {
+            return new_ref(PyDict_Copy(b._ptr));
+        }
+    };
+
+    typedef _nullable<dict> nullable_dict;
+
+    inline void del(const dict_item_proxy &attr) {
+        if(PyDict_DelItem(attr._ptr,attr.key) == -1) throw py_error_set();
+    }
 
 
     template<typename T,int invariable = invariable_storage<T>::value> class pyptr {
@@ -388,6 +517,10 @@ namespace py {
 
     inline Py_ssize_t len(tuple o) {
         return PyTuple_GET_SIZE(o.get());
+    }
+
+    inline Py_ssize_t len(dict o) {
+        return PyDict_Size(o.get());
     }
 
 

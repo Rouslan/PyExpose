@@ -1158,6 +1158,8 @@ class TestGCHandler(TestCompile):
                 Py_XINCREF(obj);
                 Py_XDECREF(tmp);
             }
+
+            PyObject *raw_obj() { return obj; }
         };
 
         // a class that has a member with special handling
@@ -1179,7 +1181,7 @@ class TestGCHandler(TestCompile):
                 <property name="member" get="get_obj" set="set_obj"/>
             </class>
             <gc-handler type="Thing">
-                <traverse>Py_VISIT(<val/>.get_obj());</traverse>
+                <traverse>Py_VISIT(<val/>.raw_obj());</traverse>
                 <clear><val/>.clear();</clear>
             </gc-handler>
         </module>
@@ -1210,7 +1212,77 @@ class TestGCHandler(TestCompile):
             self.assertTrue(obj2r() is None)
 
 
+class TestAlternateSpec(TestCompile):
+    header_file = '''
+        class Thing {
+            PyObject *obj;
+        public:
+            void clear() { Py_CLEAR(obj); }
+
+            Thing() : obj(NULL) {}
+            Thing(const Thing &b) : obj(b.get_obj()) {}
+            ~Thing() { clear(); }
+
+            PyObject *get_obj() const {
+                Py_XINCREF(obj);
+                return obj;
+            }
+            void set_obj(PyObject *_obj) {
+                PyObject *tmp = obj;
+                obj = _obj;
+                Py_XINCREF(obj);
+                Py_XDECREF(tmp);
+            }
+
+            int __py_traverse__(visitproc visit,void *arg) { return obj ? visit(obj,arg) : 0; }
+            void __py_clear__() { clear(); }
+            PyObject *__py_to_pyobject__() { return get_obj(); }
+            static Thing __py_from_pyobject__(PyObject *val) {
+                Thing t;
+                t.set_obj(val);
+                return t;
+            }
+        };
+
+        class Container {
+        public:
+            Thing obj;
+        };
+    '''
+
+    spec_file = '''<?xml version="1.0"?>
+        <module name="testmodule" include="main.h">
+            <class type="Thing" use-gc="true">
+                <property name="member" get="get_obj" set="set_obj"/>
+            </class>
+            <class type="Container" use-gc="true"/>
+        </module>
+    '''
+
+    def runTest(self):
+        tm = self.compile()
+
+        for C in [tm.Thing,tm.Container]:
+            obj = C()
+            obj2 = C()
+
+            objr = weakref.ref(obj)
+            obj2r = weakref.ref(obj2)
+
+            obj.member = obj2
+            obj2.member = obj
+
+            self.assertTrue(objr())
+            self.assertTrue(obj2r())
+
+            obj = None
+            obj2 = None
+
+            gc.collect()
+
+            self.assertTrue(objr() is None)
+            self.assertTrue(obj2r() is None)
+
 
 if __name__ == '__main__':
     unittest.main()
-    #TestInheritance().debug()

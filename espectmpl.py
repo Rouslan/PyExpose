@@ -545,6 +545,7 @@ typedef std::wstring type_stdwstring;
 typedef void type_void;
 typedef Py_ssize_t type_py_ssize_t;
 typedef PyObject *type_pyobject;
+typedef visitproc type_visitproc;
 
 '''
 
@@ -1071,6 +1072,13 @@ traverse_pyobject = '''
         int ret = visit({0},arg);
         if(ret) return ret;
     }}
+'''
+
+traverse_t_func = '''
+    {{{{
+        int ret = ({{0}}).{0}(visit,arg);
+        if(ret) return ret;
+    }}}}
 '''
 
 clear_pyobject = '''

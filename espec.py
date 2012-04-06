@@ -19,6 +19,10 @@ import espectmpl as tmpl
 
 TEST_NS = "___gccxml_types_test_ns___"
 UNINITIALIZED_ERR_TYPE = "PyExc_RuntimeError"
+TO_PY_FUNC = '__py_to_pyobject__'
+FROM_PY_FUNC = '__py_from_pyobject__'
+TRAVERSE_FUNC = '__py_traverse__'
+CLEAR_FUNC = '__py_clear__'
 
 RET_MANAGED_REF = 1
 RET_MANAGED_PTR = 2
@@ -107,15 +111,18 @@ gccxml.CPPClass.getDestructor = getDestructor
 def compatible_args(f,given):
     """Return a copy of f with the subset of arguments from 'needed', specified
     by 'given' or None if the arguments don't match."""
-    if len(given) > len(f.args) or any(a.type != b.type for a,b in zip(given,f.args)): return None
+    if accepts_args(f,[a.type for a in given]): return None
     if len(f.args) > len(given):
-        if not f.args[len(given)].default: return None
         newargs = f.args[0:len(given)]
         rf = copy.copy(f)
         rf.args = newargs
         return rf
     return f
 
+def accepts_args(f,args):
+    return (len(f.args) >= len(args) and 
+            mandatory_args(f) <= len(args) and
+            all(a.type == b for a,b in zip(f.args,args)))
 
 
 def always_true(x):
@@ -1875,7 +1882,7 @@ class TypedClassDef:
         if self.use_gc():
             self.gc_fields = qualified_fields(self.type,out.conv.cppclasstopy)
 
-            if self.type in out.conv.gcvarhandlers:
+            if out.conv.gcvarhandler(self.type):
                 gc_vars.append(('base',self.type))
                 if self.gc_include:
                     err.emit_warning(SpecificationError('gc-include is ignored because <gc-handler> is defined for this type'))
@@ -1894,7 +1901,7 @@ class TypedClassDef:
                     if f.base_handler:
                         gc_vars.append(('static_cast<{0}&>(base)'.format(f.base_handler.type.type_str()),f.base_handler.type))
                     if f.handle_gc == GC_INCLUDE:
-                        if not (f.type in conv.gcvarhandlers):
+                        if not conv.gcvarhandler(f.type):
                             raise SpecificationError('There is no rule specifying how to garbage-collect an instance of "{0}". Please add one using <gc-handler>.'.format(f.type))
                         if any(sub_f.handle_gc == GC_INCLUDE for sub_f in recursive_qf_fields(f.components)):
                             emit_warning(RedundantSpecification('both "{0}" and one of its fields/items ("{1}") are marked as requiring garbage collection'.format(f.name,sub_f.name)))
@@ -1903,7 +1910,7 @@ class TypedClassDef:
                         gc_vars.append(('base.'+f.name,f.type))
                     elif f.handle_gc == GC_FUNCTION:
                         base_handlers.add(f.base_handler)
-                    elif (not f.handle_gc) and f.type in out.conv.gcvarhandlers:
+                    elif (not f.handle_gc) and out.conv.gcvarhandler(f.type):
                         # Members that are not explicitly accepted or rejected
                         # are accepted if they are public.
 
@@ -1934,7 +1941,7 @@ class TypedClassDef:
                 if gc_vars:
                     getbase = '    {0} &base = {1};\n'.format(self.type.typestr(),self.cast_base_expr().format('reinterpret_cast<PyObject*>(self)'))
                     for name,type in gc_vars:
-                        t,c = out.conv.gcvarhandlers[type]
+                        t,c = out.conv.gcvarhandler(type)
                         traverse.append(t.format(name))
                         if c:
                             clear.append(c.format(name))
@@ -2158,7 +2165,7 @@ def strip_refptr(x):
     return strip_cvq(x.type if isinstance(x,(gccxml.CPPPointerType,gccxml.CPPReferenceType)) else x)
 
 def const_qualified(x):
-    """This does NOT test for the "restrict" qualifier (because the code that this program generates never aliases mutable pointers)."""
+    """This does not test for the "restrict" qualifier (because the code that this program generates never aliases mutable pointers)."""
     return isinstance(x,gccxml.CPPCvQualifiedType) and x.const and not x.volatile
 
 
@@ -2345,7 +2352,7 @@ class Conversion:
         for x in ("bool","sint","uint","sshort","ushort","slong","ulong",
                   "float","double","long_double","size_t","py_ssize_t","schar",
                   "uchar","char","wchar_t","py_unicode","void","stdstring",
-                  "stdwstring","pyobject"):
+                  "stdwstring","pyobject",'visitproc'):
             setattr(self,x,tns.find("type_"+x)[0])
 
         try:
@@ -2467,12 +2474,51 @@ class Conversion:
 
         self.cppclasstopy = {}
 
-        self.gcvarhandlers = {
+        self.__gcvarhandlers = {
             self.pyobject : (tmpl.traverse_pyobject,tmpl.clear_pyobject)
         }
 
+    @staticmethod
+    def __find_conv(name,check,static,x):
+        if isinstance(x,gccxml.CPPClass):
+            funcs = x.lookup(name)
+            if funcs and isinstance(funcs[0],gccxml.CPPMethod):
+                # find a usable overload
+                for f in funcs:
+                    if check(f):
+                        if f.static == static:
+                            return f
+
+                        err.emit_warning(SpecificationError('"{0}" has a method named {1} but it can\'t be used because it\'s {2}static'.format(x.name,name,['not ',''][static])))
+                        break
+                else:
+                    err.emit_warning(SpecificationError('"{0}" has a method named {1} but is has the wrong format'.format(x.name,name)))
+        return None
+
+    def __topy_base(self,t):
+        """Look up a template for converting t to "PyObject*".
+
+        If one isn't found in self.__topy, check if t has a member function with
+        the name given by "TO_PY_FUNC".
+        """
+        try:
+            return self.__topy[t]
+        except KeyError:
+            r = None
+            if Conversion.__find_conv(
+                  TO_PY_FUNC,
+                  (lambda f: f.returns == self.pyobject and accepts_args(f,[])),
+                  False,
+                  t):
+                r = '({{0}}).{0}()'.format(TO_PY_FUNC)
+
+            # save the value to avoid searching again and triggering the same
+            # warnings
+            self.__topy[t] = r
+            return r
+
     def __topy_pointee(self,x):
-        return self.__topy.get(strip_cvq(x.type))
+        return self.__topy_base(strip_cvq(x.type))
 
     def topy(self,origt,retsemantic = None,container = None,temporary = True):
         t = strip_cvq(origt)
@@ -2485,7 +2531,7 @@ class Conversion:
                 return tmpl.new_uref.format(classdef[0].name,deref_placeholder(t))
 
 
-        r = self.__topy.get(t)
+        r = self.__topy_base(t)
         if r: return r
 
         if isinstance(t,gccxml.CPPArrayType):
@@ -2521,38 +2567,95 @@ class Conversion:
 
     def requires_ret_semantic(self,origt,feature,temporary=True):
         t = strip_cvq(origt)
-        if (feature == RET_UNMANAGED_REF and not temporary) or (t not in self.__topy and isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType))):
+        if (feature == RET_UNMANAGED_REF and not temporary) or (isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType)) and not self.__topy_base(t)):
             retc = self.cppclasstopy.get(strip_cvq(strip_refptr(t)))
             if retc:
                 retc[0].features.add(feature)
                 return True
         return False
 
+    def __frompy_base(self,t):
+        """Look up a template for converting "PyObject* to t".
+
+        If one isn't found in self.__frompy, check if t has a member function with
+        the name given by "FROM_PY_FUNC".
+        """
+        try:
+            return self.__frompy[t]
+        except KeyError:
+            r = None
+            f = Conversion.__find_conv(
+                FROM_PY_FUNC,
+                (lambda f: accepts_args(f,[self.pyobject])
+                 and strip_cvq(f.returns.type
+                               if isinstance(f.returns,gccxml.CPPReferenceType)
+                               else f.returns) == t),
+                True,
+                t)
+            if f:
+                r = ((isinstance(f.returns,gccxml.CPPReferenceType)
+                        and not is_const(f.returns.type)),
+                    '{0}::{1}({{0}})'.format(t.name,FROM_PY_FUNC))
+
+            # save the value to avoid searching again and triggering the same
+            # warnings
+            self.__frompy[t] = r
+            return r
+
     def frompy(self,t):
-        """Returns a tuple containing the conversion code string and the type (CPP_X_Type) that the code returns"""
+        """Returns a tuple containing the conversion code string and the type
+        (CPP_X_Type) that the code returns"""
 
         assert isinstance(t,gccxml.CPPType)
 
-        r = self.__frompy.get(t)
+        r = self.__frompy_base(t)
         ref = lambda x: gccxml.CPPReferenceType(x) if r[0] else x
         if r: return r[1],ref(t)
 
         # check if t is a pointer or reference to a type we can convert
         if isinstance(t,gccxml.CPPReferenceType):
             nt = strip_cvq(t.type)
-            r = self.__frompy.get(nt)
+            r = self.__frompy_base(nt)
             if r and (r[0] or const_qualified(t.type)):
                 return r[1], ref(nt)
         elif isinstance(t,gccxml.CPPPointerType):
             nt = strip_cvq(t.type)
-            r = self.__frompy.get(nt)
+            r = self.__frompy_base(nt)
             if r and(r[0] or const_qualified(t.type)):
                 return '*({0})'.format(r[1]), ref(nt)
         elif isinstance(t,gccxml.CPPCvQualifiedType):
-            r = self.__frompy.get(t.type)
+            r = self.__frompy_base(t.type)
             if r: return r[1], ref(t.type)
 
         raise SpecificationError('No conversion from "PyObject*" to "{0}" is registered'.format(t.typestr()))
+
+    def gcvarhandler(self,t):
+        try:
+            return self.__gcvarhandlers[t]
+        except KeyError:
+            r = None
+            if Conversion.__find_conv(
+                  TRAVERSE_FUNC,
+                  (lambda f: f.returns == self.sint 
+                      and accepts_args(
+                          f,
+                          [self.visitproc,gccxml.CPPPointerType(self.void)])),
+                  False,
+                  t):
+                clear = None
+                if Conversion.__find_conv(
+                      CLEAR_FUNC,
+                      (lambda f: f.returns == self.void and accepts_args(f,[])),
+                      False,
+                      t):
+                    clear = '    ({{0}}).{0}();'.format(CLEAR_FUNC)
+                
+                r = tmpl.traverse_t_func.format(TRAVERSE_FUNC),clear
+
+            # save the value to avoid searching again and triggering the same
+            # warnings
+            self.__gcvarhandlers[t] = r
+            return r
 
     def member_macro(self,t):
         return self.__pymember.get(t)
@@ -2691,6 +2794,9 @@ class Conversion:
         if to: self.__topy[t] = to
         if from_: self.__frompy[t] = from_
 
+    def add_gcvarhandler(self,t,handlers):
+        self.__gcvarhandlers[t] = handlers
+
     def closest_type_is_pytype(self,t,py):
         s = self.basic_types[py]
         return (t in s) or isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType)) and (strip_cvq(t.type) in s)
@@ -2826,10 +2932,14 @@ class ModuleDef:
             conv.add_conv(tns.find('topy_type_{0}'.format(i))[0],to=to[1])
 
         for i,from_ in enumerate(self.frompy):
-            conv.add_conv(tns.find('frompy_type_{0}'.format(i))[0],from_=(False,from_[1]))
+            conv.add_conv(
+                tns.find('frompy_type_{0}'.format(i))[0],
+                from_=(False,from_[1]))
 
         for i,handler in enumerate(self.gchandlers):
-            conv.gcvarhandlers[tns.find('gchandler_type_{0}'.format(i))[0]] = handler[1:]
+            conv.add_gcvarhandler(
+                tns.find('gchandler_type_{0}'.format(i))[0],
+                handler[1:])
 
         out = Output(
             open(os.path.join(path, self.name + '.cpp'),'w'),
