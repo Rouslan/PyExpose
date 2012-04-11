@@ -23,6 +23,7 @@ TO_PY_FUNC = '__py_to_pyobject__'
 FROM_PY_FUNC = '__py_from_pyobject__'
 TRAVERSE_FUNC = '__py_traverse__'
 CLEAR_FUNC = '__py_clear__'
+CAST_AS_MEMBER_FIELD = '__py_cast_as_member_t__'
 
 RET_MANAGED_REF = 1
 RET_MANAGED_PTR = 2
@@ -2595,7 +2596,7 @@ class Conversion:
             if f:
                 r = ((isinstance(f.returns,gccxml.CPPReferenceType)
                         and not is_const(f.returns.type)),
-                    '{0}::{1}({{0}})'.format(t.name,FROM_PY_FUNC))
+                    '{0}::{1}({{0}})'.format(t.full_name,FROM_PY_FUNC))
 
             # save the value to avoid searching again and triggering the same
             # warnings
@@ -2658,7 +2659,16 @@ class Conversion:
             return r
 
     def member_macro(self,t):
-        return self.__pymember.get(t)
+        try:
+            return self.__pymember[t]
+        except KeyError:
+            r = None
+            m = t.lookup(CAST_AS_MEMBER_FIELD)
+            if m and isinstance(m[0],gccxml.CPPField):
+                r = '{0}::{1}'.format(t.full_name,CAST_AS_MEMBER_FIELD)
+
+            self.__pymember[t] = r
+            return r
 
     def check_and_cast(self,t):
         st = strip_refptr(t)

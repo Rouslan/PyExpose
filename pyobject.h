@@ -2,6 +2,7 @@
 #define pyobject_h
 
 #include <algorithm>
+#include <structmember.h>
 
 
 #ifndef PYEXPOSE_TEMPLATE_HELPERS
@@ -17,7 +18,7 @@
 #pragma GCC visibility push(hidden)
 
 
-#define PY_THROW_STRING(exception,message) { PyErr_SetString(PyExc_##exception,message); throw py_error_set(); }
+#define THROW_PYERR_STRING(exception,message) { PyErr_SetString(PyExc_##exception,message); throw py_error_set(); }
 
 
 namespace py {
@@ -43,6 +44,11 @@ namespace py {
         return o;
     }
 
+    inline PyObject *xincref(PyObject *o) {
+        Py_XINCREF(o);
+        return o;
+    }
+
     struct borrowed_ref {
         PyObject *_ptr;
         explicit borrowed_ref(PyObject *ptr) : _ptr(ptr) {}
@@ -58,63 +64,86 @@ namespace py {
     }
 
 
+    class object;
     class object_attr_proxy;
     class object_item_proxy;
 
-    class object {
+    class _object_base {
     protected:
         PyObject *_ptr;
 
-        object(PyObject *ptr) : _ptr(ptr) {}
-
-    public:
-        object(borrowed_ref r) : _ptr(incref(r._ptr)) {}
-        object(new_ref r) : _ptr(r._ptr) { assert(_ptr); }
-        object(const object &b) : _ptr(incref(b._ptr)) {}
-
-        ~object() {
-            Py_DECREF(_ptr);
-        }
-
-        object &operator=(const object &b) {
-            Py_INCREF(b._ptr);
+        void reset(PyObject *b) {
+            Py_INCREF(b);
 
             // cyclic gargable collection safety
             PyObject *tmp = _ptr;
-            _ptr = b._ptr;
+            _ptr = b;
             Py_DECREF(tmp);
-            return *this;
         }
 
-        operator bool() {
-            return PyObject_IsTrue(_ptr);
+        _object_base(PyObject *ptr) : _ptr(ptr) {}
+        _object_base(borrowed_ref r) : _ptr(incref(r._ptr)) {}
+        _object_base(new_ref r) : _ptr(r._ptr) { assert(_ptr); }
+        _object_base(const _object_base &b) : _ptr(incref(b._ptr)) {}
+
+        ~_object_base() {
+            Py_DECREF(_ptr);
         }
 
-        PyObject *get() { return _ptr; }
-        const PyObject *get() const { return _ptr; }
-        PyObject *get_new_ref() { return incref(_ptr); }
-
-        object_attr_proxy attr(const char *name);
-
-        bool has_attr(const char *name) { return PyObject_HasAttrString(_ptr,name); }
-        bool has_attr(object &name) { return PyObject_HasAttr(_ptr,name._ptr); }
-
-        object operator()();
-        template<typename A> object operator()(A a);
-        template<typename A,typename B> object operator()(A a,B b);
-        template<typename A,typename B,typename C> object operator()(A a,B b,C c);
-
-        bool operator==(const object &b) const { return _ptr == b._ptr; }
-        bool operator!=(const object &b) const { return _ptr != b._ptr; }
-
-        template<typename T> object_item_proxy at(T key);
-        template<typename T> object_item_proxy operator[](T key);
-
-        void swap(object &b) {
+        void swap(_object_base &b) {
             PyObject *tmp = _ptr;
             _ptr = b._ptr;
             b._ptr = tmp;
         }
+
+    public:
+        operator bool() const {
+            return PyObject_IsTrue(_ptr);
+        }
+
+        PyObject *get() const { return _ptr; }
+        PyObject *get_new_ref() const { return incref(_ptr); }
+
+        object_attr_proxy attr(const char *name) const;
+
+        bool has_attr(const char *name) const { return PyObject_HasAttrString(_ptr,name); }
+        bool has_attr(const _object_base &name) const { return PyObject_HasAttr(_ptr,name._ptr); }
+
+        object operator()() const;
+        template<typename A> object operator()(A a) const;
+        template<typename A,typename B> object operator()(A a,B b) const;
+        template<typename A,typename B,typename C> object operator()(A a,B b,C c) const;
+
+#define OBJECT_OPERATOR(OP,PYOP) bool operator OP(const _object_base &b) const { return bool(PyObject_RichCompareBool(_ptr,b._ptr,PYOP)); }
+        OBJECT_OPERATOR(==,Py_EQ)
+        OBJECT_OPERATOR(!=,Py_NE)
+        OBJECT_OPERATOR(<,Py_LT)
+        OBJECT_OPERATOR(<=,Py_LE)
+        OBJECT_OPERATOR(>,Py_GT)
+        OBJECT_OPERATOR(>=,Py_GE)
+
+        template<typename T> object_item_proxy at(T key) const;
+        template<typename T> object_item_proxy operator[](T key) const;
+
+        int __py_traverse__(visitproc visit,void *arg) const { return _ptr != Py_None ? (*visit)(_ptr,arg) : 0; }
+        void __py_clear__() { reset(Py_None); }
+        PyObject *__py_to_pyobject__() const { return incref(_ptr); }
+    };
+
+    class object : public _object_base {
+    public:
+        object(borrowed_ref r) : _object_base(r) {}
+        object(new_ref r) : _object_base(r) {}
+        object(const _object_base &b) : _object_base(b) {}
+
+        object &operator=(const _object_base &b) {
+            reset(b.get());
+            return *this;
+        }
+
+        void swap(object &b) { _object_base::swap(b); }
+
+        static object __py_from_pyobject__(PyObject *val) { return new_ref(val); }
     };
 
     template<typename T> inline object make_object(T x) {
@@ -122,7 +151,7 @@ namespace py {
     }
 
     class object_attr_proxy {
-        friend class object;
+        friend class _object_base;
         friend void del(const object_attr_proxy &attr);
 
         PyObject *_ptr;
@@ -143,7 +172,7 @@ namespace py {
         }
 
 #ifdef PYOBJECT_USE_CXX0X
-        template<typename... Args> object operator(Args... args) {
+        template<typename... Args> object operator(Args... args) const {
             return new_ref(check_obj(PyObject_CallMethodObjArgs(
                 _ptr,
                 object(new_ref(check_obj(PyString_FromString(name)))).get(),
@@ -151,19 +180,19 @@ namespace py {
                 0)));
         }
 #else
-        object operator()() {
+        object operator()() const {
             return new_ref(check_obj(PyObject_CallMethodObjArgs(_ptr,
                 object(new_ref(check_obj(PyString_FromString(name)))).get(),0)));
         }
 
-        template<typename A> object operator()(A a) {
+        template<typename A> object operator()(A a) const {
             return new_ref(check_obj(PyObject_CallMethodObjArgs(_ptr,
                 object(new_ref(check_obj(PyString_FromString(name)))).get(),
                 make_object(a).get(),
                 0)));
         }
 
-        template<typename A,typename B> object operator()(A a,B b) {
+        template<typename A,typename B> object operator()(A a,B b) const {
             return new_ref(check_obj(PyObject_CallMethodObjArgs(_ptr,
                 object(new_ref(check_obj(PyString_FromString(name)))).get(),
                 make_object(a).get(),
@@ -171,7 +200,7 @@ namespace py {
                 0)));
         }
 
-        template<typename A,typename B,typename C> object operator()(A a,B b,C c) {
+        template<typename A,typename B,typename C> object operator()(A a,B b,C c) const {
             return new_ref(check_obj(PyObject_CallMethodObjArgs(_ptr,
                 object(new_ref(check_obj(PyString_FromString(name)))).get(),
                 make_object(a).get(),
@@ -182,26 +211,26 @@ namespace py {
 #endif
     };
 
-    inline object_attr_proxy object::attr(const char *name) { return object_attr_proxy(_ptr,name); }
+    inline object_attr_proxy _object_base::attr(const char *name) const { return object_attr_proxy(_ptr,name); }
 
-    inline object object::operator()() {
+    inline object _object_base::operator()() const {
         return new_ref(check_obj(PyObject_CallObject(_ptr,0)));
     }
 
-    template<typename A> inline object object::operator()(A a) {
+    template<typename A> inline object _object_base::operator()(A a) const {
         return new_ref(check_obj(PyObject_CallFunctionObjArgs(_ptr,
             make_object(a).get(),
             0)));
     }
 
-    template<typename A,typename B> inline object object::operator()(A a,B b) {
+    template<typename A,typename B> inline object _object_base::operator()(A a,B b) const {
         return new_ref(check_obj(PyObject_CallFunctionObjArgs(_ptr,
             make_object(a).get(),
             make_object(b).get(),
             0)));
     }
 
-    template<typename A,typename B,typename C> inline object object::operator()(A a,B b,C c) {
+    template<typename A,typename B,typename C> inline object _object_base::operator()(A a,B b,C c) const {
         return new_ref(check_obj(PyObject_CallFunctionObjArgs(_ptr,
             make_object(a).get(),
             make_object(b).get(),
@@ -215,7 +244,7 @@ namespace py {
 
 
     class object_item_proxy {
-        friend class object;
+        friend class _object_base;
         friend void del(const object_item_proxy &item);
 
         PyObject *_ptr;
@@ -241,11 +270,11 @@ namespace py {
         }
     };
 
-    template<typename T> inline object_item_proxy object::at(T key) {
+    template<typename T> inline object_item_proxy _object_base::at(T key) const {
         return object_item_proxy(_ptr,to_pyobject(key));
     }
 
-    template<typename T> inline object_item_proxy object::operator[](T key) {
+    template<typename T> inline object_item_proxy _object_base::operator[](T key) const {
         return at<T>(key);
     }
 
@@ -256,41 +285,46 @@ namespace py {
 
     template<typename T> class _nullable {
         PyObject *_ptr;
+
+        void reset(PyObject *b) {
+            // cyclic gargable collection safety
+            PyObject *tmp = _ptr;
+            _ptr = b;
+            Py_XDECREF(tmp);
+        }
     public:
         _nullable() : _ptr(NULL) {}
         _nullable(const _nullable<T> &b) : _ptr(incref(b._ptr)) {}
-        _nullable(const T &b) : _ptr(incref(b.get())) {}
+        _nullable(const T &b) : _ptr(b.get_new_ref()) {}
 
-        _nullable &operator=(const _nullable<T> &b) {
+        _nullable<T> &operator=(const _nullable<T> &b) {
             Py_XINCREF(b._ptr);
-
-            // cyclic gargable collection safety
-            PyObject *tmp = _ptr;
-            _ptr = b._ptr;
-            Py_XDECREF(tmp);
+            reset(b._ptr);
             return *this;
         }
-        _nullable &operator=(const T &b) {
+        _nullable<T> &operator=(const T &b) {
             Py_INCREF(b._ptr);
-
-            // cyclic gargable collection safety
-            PyObject *tmp = _ptr;
-            _ptr = b._ptr;
-            Py_XDECREF(tmp);
+            reset(b._ptr);
             return *this;
         }
 
         operator bool() const { return _ptr != NULL; }
-        T operator*() {
+        T operator*() const {
             assert(_ptr);
             return borrowed_ref(_ptr);
         }
-        T operator->() {
+        T operator->() const {
             assert(_ptr);
             return borrowed_ref(_ptr);
         }
 
-        PyObject *get() { return _ptr; }
+        PyObject *get() const { return _ptr; }
+
+        int __py_traverse__(visitproc visit,void *arg) const { return _ptr ? (*visit)(_ptr,arg) : 0; }
+        void __py_clear__() { reset(NULL); }
+        // __py_to_pyobject__ intentionally omitted
+        static _nullable<T> __py_from_pyobject__(PyObject *val) { return T::__py_from_pyobject__(val); }
+        static const int __py_cast_as_member_t__ = T_OBJECT_EX;
     };
 
     typedef _nullable<object> nullable_object;
@@ -312,36 +346,43 @@ namespace py {
             PyBuffer_Release(&view);
         }
 
-        void *buf() { return view.buf; }
-        Py_ssize_t len() { return view.len; }
-        int readonly() { return view.readonly; }
-        const char *format() { return view.format; }
-        int ndim() { return view.ndim; }
-        Py_ssize_t *shape() { return view.shape; }
-        Py_ssize_t *strides() { return view.strides; }
-        Py_ssize_t *suboffsets() { return view.suboffsets; }
-        Py_ssize_t itemsize() { return view.itemsize; }
-        void *internal() { return view.internal; }
+        void *buf() const { return view.buf; }
+        Py_ssize_t len() const { return view.len; }
+        int readonly() const { return view.readonly; }
+        const char *format() const { return view.format; }
+        int ndim() const { return view.ndim; }
+        Py_ssize_t *shape() const { return view.shape; }
+        Py_ssize_t *strides() const { return view.strides; }
+        Py_ssize_t *suboffsets() const { return view.suboffsets; }
+        Py_ssize_t itemsize() const { return view.itemsize; }
+        void *internal() const { return view.internal; }
     };
 #endif
 
 
-    class tuple : public object {
+    class tuple : public _object_base {
     public:
-        tuple(borrowed_ref r) : object(r) { assert(PyTuple_Check(r._ptr)); }
-        tuple(new_ref r) : object(r) { assert(PyTuple_Check(r._ptr)); }
-        explicit tuple(Py_ssize_t len) : object(new_ref(check_obj(PyTuple_New(len)))) {}
-        tuple(const tuple &b) : object(b) {}
+        tuple(borrowed_ref r) : _object_base(r) { assert(PyTuple_Check(r._ptr)); }
+        tuple(new_ref r) : _object_base(r) { assert(PyTuple_Check(r._ptr)); }
+        explicit tuple(Py_ssize_t len) : _object_base(new_ref(check_obj(PyTuple_New(len)))) {}
+        tuple(const tuple &b) : _object_base(b) {}
 
         tuple &operator=(const tuple &b) {
-            object::operator=(b);
+            reset(b._ptr);
             return *this;
         }
 
-        object at(Py_ssize_t i) { return borrowed_ref(check_obj(PyTuple_GetItem(_ptr,i))); }
-        void set_unsafe(Py_ssize_t i,PyObject *item) { PyTuple_SET_ITEM(_ptr,i,item); }
-        object operator[](Py_ssize_t i) { return borrowed_ref(PyTuple_GET_ITEM(_ptr,i)); }
+        void swap(tuple &b) { _object_base::swap(b); }
+
+        object at(Py_ssize_t i) const { return borrowed_ref(check_obj(PyTuple_GetItem(_ptr,i))); }
+        void set_unsafe(Py_ssize_t i,PyObject *item) const { PyTuple_SET_ITEM(_ptr,i,item); }
+        object operator[](Py_ssize_t i) const { return borrowed_ref(PyTuple_GET_ITEM(_ptr,i)); }
         Py_ssize_t size() const { return PyTuple_GET_SIZE(_ptr); }
+
+        static tuple __py_from_pyobject__(PyObject *val) {
+            if(!PyTuple_Check(val)) THROW_PYERR_STRING(TypeError,"object is not an instance of tuple")
+            return new_ref(val);
+        }
     };
 
     typedef _nullable<tuple> nullable_tuple;
@@ -382,21 +423,23 @@ namespace py {
         }
     };
 
-    class dict : public object {
+    class dict : public _object_base {
     public:
-        dict(borrowed_ref r) : object(r) { assert(PyDict_Check(r._ptr)); }
-        dict(new_ref r) : object(r) { assert(PyDict_Check(r._ptr)); }
-        dict() : object(new_ref(check_obj(PyDict_New()))) {}
-        dict(const dict &b) : object(b) {}
+        dict(borrowed_ref r) : _object_base(r) { assert(PyDict_Check(r._ptr)); }
+        dict(new_ref r) : _object_base(r) { assert(PyDict_Check(r._ptr)); }
+        dict() : _object_base(new_ref(check_obj(PyDict_New()))) {}
+        dict(const dict &b) : _object_base(b) {}
 
         dict &operator=(const dict &b) {
-            object::operator=(b);
+            reset(b._ptr);
             return *this;
         }
 
-        template<typename T> dict_item_proxy operator[](T key) { return dict_item_proxy(_ptr,to_pyobject(key)); }
+        void swap(dict &b) { _object_base::swap(b); }
+
+        template<typename T> dict_item_proxy operator[](T key) const { return dict_item_proxy(_ptr,to_pyobject(key)); }
         Py_ssize_t size() const { return PyDict_Size(_ptr); }
-        template<typename T> nullable_object find(T key) {
+        template<typename T> nullable_object find(T key) const {
 #if PY_MAJOR_VERSION >= 3
             PyObject *item = PyDict_GetItemWithError(_ptr,to_pyobject(key));
             if(!item && PyErr_Occurred()) throw py_error_set();
@@ -415,8 +458,13 @@ namespace py {
 #endif
         }
 
-        dict copy(const dict &b) {
+        dict copy(const dict &b) const {
             return new_ref(PyDict_Copy(b._ptr));
+        }
+
+        static dict __py_from_pyobject__(PyObject *val) {
+            if(!PyDict_Check(val)) THROW_PYERR_STRING(TypeError,"object is not an instance of dict")
+            return new_ref(val);
         }
     };
 
@@ -560,6 +608,9 @@ namespace py {
 
 namespace std {
     template<> inline void swap(py::object &a,py::object &b) { a.swap(b); }
+    template<> inline void swap(py::tuple &a,py::tuple &b) { a.swap(b); }
+    template<> inline void swap(py::dict &a,py::dict &b) { a.swap(b); }
+    template<typename T> inline void swap(py::_nullable<T> &a,py::_nullable<T> &b) { a.swap(b); }
     template<typename T> inline void swap(py::pyptr<T> &a,py::pyptr<T> &b) { a.swap(b); }
 }
 

@@ -1031,7 +1031,6 @@ class TestObjectH(TestCompile):
 
     spec_file = '''<?xml version="1.0"?>
         <module name="testmodule" include="main.h">
-            <from-pyobject type="py::object">py::object(py::borrowed_ref(<val/>))</from-pyobject>
             <def func="swap_1_and_3"/>
         </module>
     '''
