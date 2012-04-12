@@ -1,5 +1,9 @@
 import sys
 
+
+__all__ = 'Error','SpecificationError','emit_warning'
+
+
 class Error(Exception):
     def __init__(self,msg,**info):
         super(Error,self).__init__(msg,info)
@@ -15,6 +19,10 @@ class Error(Exception):
     def __str__(self):
         return self.msg + ''.join('\n  {0}: {1}'.format(*i) for i in self.info.iteritems())
 
+
+class SpecificationError(Error):
+    def __str__(self):
+        return 'Specification Error: ' + super(SpecificationError,self).__str__()
 
 
 warnings_are_errors = False

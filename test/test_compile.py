@@ -1283,5 +1283,30 @@ class TestAlternateSpec(TestCompile):
             self.assertTrue(obj2r() is None)
 
 
+class TestModuleInit(TestCompile):
+    header_file = '''
+        int initvalue = 0;
+
+        int init_pre() {
+            initvalue = 5;
+            return 0;
+        }
+
+        int init_post(PyObject *m) {
+            return PyModule_AddIntConstant(m,"value",initvalue);
+        }
+'''
+
+    spec_file = '''
+        <module name="testmodule" include="main.h">
+            <init pre="init_pre" post="init_post"/>
+        </module>
+'''
+
+    def runTest(self):
+        tm = self.compile()
+        self.assertEqual(tm.value,5)
+
+
 if __name__ == '__main__':
     unittest.main()

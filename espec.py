@@ -12,24 +12,15 @@ import functools
 import operator
 
 from xmlparse import *
-import err
+from err import *
 import gccxml
 import espectmpl as tmpl
+from cpptypes import *
+from conversion import Conversion
 
 
 TEST_NS = "___gccxml_types_test_ns___"
 UNINITIALIZED_ERR_TYPE = "PyExc_RuntimeError"
-TO_PY_FUNC = '__py_to_pyobject__'
-FROM_PY_FUNC = '__py_from_pyobject__'
-TRAVERSE_FUNC = '__py_traverse__'
-CLEAR_FUNC = '__py_clear__'
-CAST_AS_MEMBER_FIELD = '__py_cast_as_member_t__'
-
-RET_MANAGED_REF = 1
-RET_MANAGED_PTR = 2
-RET_UNMANAGED_REF = 3
-RET_COPY = 1001
-RET_SELF = 1002
 
 tmpl.env.globals['MANAGED_REF'] = RET_MANAGED_REF
 tmpl.env.globals['MANAGED_PTR'] = RET_MANAGED_PTR
@@ -54,43 +45,12 @@ SF_RET_INT_VOID = 4 # the return type is int, -1 for an exception and 0 otherwis
 SF_RET_INT_BOOL = 5 # the return type is int, 1 for True, 0 for False, -1 for an exception
 
 
-TYPE_FLOAT = 1
-TYPE_INT = 2
-TYPE_LONG = 3
-TYPE_STR = 4
-TYPE_UNICODE = 5
-TYPES_LIST = range(1,6)
-
-
-# A table specifying what checks to make when matching a Python number to a specific C++ overload
-
-CHECK_FLOAT = 0b100
-CHECK_INT = 0b010
-CHECK_LONG = 0b001
-
-coercion = [
-    (None,             None,             None            ),
-    (None,             None,             'PyNumber_Check'),
-    (None,             'PyNumber_Check', None            ),
-    (None,             'PyInt_Check',    'PyNumber_Check'),
-    ('PyNumber_Check', None,             None            ),
-    ('PyFloat_Check',  None,             'PyNumber_Check'),
-    ('PyFloat_Check',  'PyNumber_Check', None            ),
-    ('PyFloat_Check',  'PyInt_Check',    'PyLong_Check'  )
-]
-
-
 EXTRA_VARS_NONE = 0
 EXTRA_VARS_IDICT = 1
 EXTRA_VARS_WEAKLIST = 2
 EXTRA_VARS_BOTH = 3
 
 EXTRA_VARS_SUFFIXES = ['','_i','_w','_wi']
-
-
-class SpecificationError(err.Error):
-    def __str__(self):
-        return 'Specification Error: ' + super(SpecificationError,self).__str__()
 
 
 
@@ -101,190 +61,6 @@ class Scope(object):
         self.__dict__.update(args)
 
 
-def getDestructor(self):
-    for m in self.members:
-        if isinstance(m,gccxml.CPPDestructor):
-            return m
-    return None
-gccxml.CPPClass.getDestructor = getDestructor
-
-
-def compatible_args(f,given):
-    """Return a copy of f with the subset of arguments from 'needed', specified
-    by 'given' or None if the arguments don't match."""
-    if accepts_args(f,[a.type for a in given]): return None
-    if len(f.args) > len(given):
-        newargs = f.args[0:len(given)]
-        rf = copy.copy(f)
-        rf.args = newargs
-        return rf
-    return f
-
-def accepts_args(f,args):
-    return (len(f.args) >= len(args) and 
-            mandatory_args(f) <= len(args) and
-            all(a.type == b for a,b in zip(f.args,args)))
-
-
-def always_true(x):
-    return True
-
-def simple_member_lookup(x,name,test = always_true):
-    return (real_type(m) for m in x.members if getattr(m,"canon_name",None) == name and test(m))
-
-def min_access(m,min_access):
-    if getattr(m,'access',sys.maxint) >= min_access:
-        return m
-
-    m = copy.copy(m)
-    m.access = min_access
-
-
-class BaseCacheItem:
-    def __init__(self,had_virtual,data):
-        self.had_virtual = had_virtual
-        self.data = data
-
-class BaseMembers(object):
-    """Call a function on all direct and inherited members of a class.
-
-    This class will pass an instance of itself to 'generate'. generate is
-    expected to return a list. generate can compute a value using c, members()
-    and base_members(). members() will return a generator that emits all direct
-    members of c. base_members() returns a generator that emits a concatinated
-    sequence of the lists produced by calling generate on each base class.
-
-    Each member will have the correct access specifier
-    (public/protected/private) with regard to the access specifier of the
-    inheritance. e.g. for 'class A : private B { ... };' every member of B will
-    be private.
-
-    Each unique class is only visited once. If a class occurs more than once in
-    an inheritance hierarchy, it's previous computed (by 'generate') value is
-    reused, unless the inheritance is virtual. Only the first occurance of a
-    virtually inherited class yields a value.
-
-    """
-    def __init__(self,c,generate,access = gccxml.ACCESS_PUBLIC,cache = None):
-        self.c = c
-        self.generate = generate
-        self.access = access
-        self.cache = {} if cache is None else cache
-
-    def members(self):
-        return (min_access(real_type(m),self.access) for m in self.c.members)
-
-    def base_members(self):
-        for b in self.c.bases:
-            ci = self.cache.get(b.type)
-            if ci is None:
-                ci = BaseCacheItem(
-                    b.virtual,
-                    self.generate(
-                        BaseMembers(
-                            b.type,
-                            self.generate,
-                            max(self.access,b.access),
-                            self.cache)))
-
-                self.cache[b.type] = ci
-            elif b.virtual:
-                if ci.had_virtual:
-                    # the members of virtual base classes are only counted once
-                    continue
-
-                ci.had_virtual = True
-
-            yield b,ci.data
-
-    def just_base_members(self):
-        return reduce(operator.concat,(data for b,data in self.base_members()),[])
-
-    def __call__(self):
-        return self.generate(self)
-
-
-def inherited_member_lookup(c,name,test = always_true,access = gccxml.ACCESS_PUBLIC):
-    """Look up a class member name the same way C++ does"""
-
-    def generate(bm):
-        return list(m for m in bm.members() if getattr(m,"canon_name",None) == name and test(m)) or \
-            bm.just_base_members()
-
-    return BaseMembers(c,generate,access)()
-
-
-def real_type(x):
-    return real_type(x.type) if isinstance(x,gccxml.CPPTypeDef) else x
-
-def _namespace_find(self,x,test):
-    parts = x.split('::',1)
-    matches = list(self.lookup(parts[0],test))
-    if matches:
-        if len(parts) == 2:
-            if not isinstance(matches[0],(gccxml.CPPClass,gccxml.CPPNamespace)):
-                raise SpecificationError('"{0}" is not a namespace, struct, class or union'.format(parts[0]))
-
-            assert len(matches) == 1
-            return _namespace_find(matches[0],parts[1],test)
-
-        return matches
-    return []
-
-def raise_not_found_error(x):
-    raise SpecificationError('could not find "{0}"'.format(x))
-
-def namespace_find(self,x,test = always_true):
-    """Find symbol x in this object's scope"""
-    if x.startswith('::'): # explicit global namespace
-        while self.context: self = self.context
-        r = _namespace_find(self,x[2:],test)
-        if r: return r
-    else:
-        # if the symbol isn't found in this scope, check the outer scope
-        while self:
-            r = _namespace_find(self,x,test)
-            if r: return r
-            self = self.context
-
-    raise_not_found_error(x)
-
-def class_find_member(self,x):
-    """Find member x of this class."""
-    parts = x.rsplit('::')
-
-    if len(parts) == 2:
-        context = self.find(parts[0])
-        nonlocal = Scope(found=False)
-
-        def generate(bm):
-            if bm.c == context:
-                nonlocal.found = True
-                return inherited_member_lookup(bm.c,name=parts[1],access=bm.access)
-
-            return bm.just_base_members()
-
-        matches = BaseMembers(c,generate)()
-
-        if not nonlocal.found:
-            raise SpecificationError('"{0}" is not a base class of "{1}"'.format(parts[0],self.typestr()))
-
-    else:
-        matches = inherited_member_lookup(self,x)
-
-    if matches: return matches
-    raise_not_found_error(x)
-
-
-gccxml.CPPClass.find = namespace_find
-gccxml.CPPClass.lookup = inherited_member_lookup
-gccxml.CPPClass.find_member = class_find_member
-
-gccxml.CPPNamespace.find = namespace_find
-gccxml.CPPNamespace.lookup = simple_member_lookup
-
-gccxml.CPPUnion.find = namespace_find
-gccxml.CPPUnion.lookup = simple_member_lookup
 
 
 def get_unique_num():
@@ -297,48 +73,6 @@ def get_unique_num():
     return get_unique_num.nextnum
 get_unique_num.nextnum = 0
 
-
-class Tab:
-    """Yield 4 x self.amount whitespace characters when converted to a string.
-
-    An instance can be added to or subtracted from directly, to add to or
-    subtract from "amount".
-
-    """
-    def __init__(self,amount = 1):
-        if isinstance(amount,Tab):
-            self.amount = amount.amount # copy constructor
-        else:
-            self.amount = amount
-
-    def __str__(self):
-        return self.amount * 4 * ' '
-
-    def __repr__(self):
-        return 'Tab({0})'.format(self.amount)
-
-    # in-place addition/subtraction omitted to prevent modification when passed
-    # as an argument to a function
-
-    def __add__(self,val):
-        if isinstance(val,basestring):
-            return self.__str__() + val
-        return Tab(self.amount + val)
-
-    def __radd__(self,val):
-        if isinstance(val,basestring):
-            return val + self.__str__()
-        return Tab(self.amount + val)
-
-    def __sub__(self,val):
-        return Tab(self.amount - val)
-
-    def line(self,x):
-        return self.__str__() + x + '\n'
-
-
-def mandatory_args(x):
-    return len(list(itertools.takewhile(lambda a: a.default is None, x.args)))
 
 
 def varargs(x):
@@ -472,8 +206,6 @@ class BindableArg:
         self.arg = arg
         self.val = val
 
-def is_const(x):
-    return isinstance(x,gccxml.CPPCvQualifiedType) and x.const
 
 class TypedOverload:
     def __init__(self,func,overload=None):
@@ -549,7 +281,7 @@ def append_except(f):
     def wrapper(self,*args,**kwds):
         try:
             return f(self,*args,**kwds)
-        except err.Error as e:
+        except Error as e:
             e.info[self.what] = self.name
             raise
     return wrapper
@@ -619,23 +351,23 @@ class TypedDefDef(object):
         self.check_args_ret(conv)
         return conv.function_call(self.make_argss(conv),errval,use_kwds)
 
-    def function_call_1arg(self,conv,ind=Tab(2),var='arg',errval='0'):
+    def function_call_1arg(self,conv,ind=tmpl.Tab(2),var='arg',errval='0'):
         self.check_args_ret(conv)
         return conv.function_call_narg(self.make_argss(conv),[var],errval,ind)
 
-    def function_call_narg_fallthrough(self,conv,vars,ind=Tab(2)):
+    def function_call_narg_fallthrough(self,conv,vars,ind=tmpl.Tab(2)):
         self.check_args_ret(conv)
         return conv.function_call_narg_fallthrough(self.make_argss(conv),vars,ind)
 
-    def function_call_narg(self,conv,vars,ind=Tab(2),errval='0'):
+    def function_call_narg(self,conv,vars,ind=tmpl.Tab(2),errval='0'):
         self.check_args_ret(conv)
         return conv.function_call_narg(self.make_argss(conv),vars,errval,ind)
 
-    def function_call_1arg_fallthrough(self,conv,ind=Tab(2),var='arg'):
+    def function_call_1arg_fallthrough(self,conv,ind=tmpl.Tab(2),var='arg'):
         self.check_args_ret(conv)
         return conv.function_call_narg_fallthrough(self.make_argss(conv),[var],ind)
 
-    def function_call_0arg(self,conv,ind=Tab(2)):
+    def function_call_0arg(self,conv,ind=tmpl.Tab(2)):
         self.check_args_ret(conv)
         assert len(self.overloads) == 1
         return ind.line(self.call_code(conv,self.overloads[0]).output([],ind))
@@ -753,23 +485,23 @@ class TypedMethodDef(TypedDefDef):
 
     def function_call_var_args(self,conv,use_kwds,errval='0'):
         if self.all_pure_virtual():
-            return PureVirtualCallCode(errval).output(None,Tab(2))
+            return PureVirtualCallCode(errval).output(None,tmpl.Tab(2))
 
         return super(TypedMethodDef,self).function_call_var_args(conv,use_kwds,errval)
 
-    def function_call_1arg(self,conv,ind=Tab(2),var='arg',errval='0'):
+    def function_call_1arg(self,conv,ind=tmpl.Tab(2),var='arg',errval='0'):
         if self.all_pure_virtual():
             return PureVirtualCallCode(errval).output(None,ind)
 
         return super(TypedMethodDef,self).function_call_1arg(conv,ind,var,errval)
 
-    def function_call_narg(self,conv,vars,ind=Tab(2),errval='0'):
+    def function_call_narg(self,conv,vars,ind=tmpl.Tab(2),errval='0'):
         if self.all_pure_virtual():
             return PureVirtualCallCode(errval).output(None,ind)
 
         return super(TypedMethodDef,self).function_call_narg(conv,vars,ind,errval)
 
-    def function_call_0arg(self,conv,ind=Tab(2),errval='0'):
+    def function_call_0arg(self,conv,ind=tmpl.Tab(2),errval='0'):
         if self.all_pure_virtual():
             return PureVirtualCallCode(errval).output(None,ind)
 
@@ -860,7 +592,7 @@ class SpecialMethod(TypedMethodDef):
         return super(SpecialMethod,self).call_code(conv,ov)
 
     @append_except
-    def output(self,conv,ind=Tab(2)):
+    def output(self,conv,ind=tmpl.Tab(2)):
         errval = '-1'
         if self.rettype in (SF_RET_INT,SF_RET_INT_VOID,SF_RET_INT_BOOL):
             ret = 'int'
@@ -1213,7 +945,7 @@ class ClassDef:
         return ct,include,ignore
 
 
-def splitdefdef23code(defdef,conv,vars,ind=Tab(2)):
+def splitdefdef23code(defdef,conv,vars,ind=tmpl.Tab(2)):
     a = copy.copy(defdef)
     b = copy.copy(defdef)
     a.argtype = SF_ONE_ARG
@@ -1252,18 +984,6 @@ def bindpyssize(conv,f,arg):
             raise SpecificationError('"{0}" must accept an integer type as its first argument'.format(ov.func.name))
 
 
-def default_to_ov(args):
-    """turn default values into overloads"""
-    newargs = []
-    for a in args:
-        if a.default:
-            yield newargs[:]
-            a = copy.copy(a)
-            a.default = None
-        newargs.append(a)
-    yield newargs
-
-
 def subname(a,b):
     return '{0}::{1}'.format(a,b)
 
@@ -1298,10 +1018,10 @@ class QualifiedFieldHandling(object):
     def from_field(field,handle_gc=None):
         return QualifiedFieldHandling(field.name,field.type,None,field.offset,None,handle_gc)
 
-class TypeMismatch(err.Error):
+class TypeMismatch(Error):
     pass
 
-class RedundantSpecification(err.Error):
+class RedundantSpecification(Error):
     pass
 
 def check_base_handler(fields,f,handle):
@@ -1377,15 +1097,6 @@ def qualified_fields(c,classdefs):
         return sorted(fields,key=(lambda x: x.offset))
 
     return BaseMembers(c,generate)()
-
-
-def find_field(c,field):
-    m = c.find_member(field)
-    if not isinstance(m[0],gccxml.CPPField):
-        raise SpecificationError('"{0}" is not a member variable'.format(field))
-
-    if len(m) > 1:
-        raise SpecificationError('"{0}" is ambiguous in this context')
 
 
 class TypedClassDef:
@@ -1680,7 +1391,7 @@ class TypedClassDef:
             code = ''
             sf = self.special_methods.get(f)
             if sf:
-                code = sf.function_call_1arg_fallthrough(out.conv,Tab(3))
+                code = sf.function_call_1arg_fallthrough(out.conv,tmpl.Tab(3))
 
             print >> out.cpp, tmpl.richcompare_op.format(op = c,code = code)
 
@@ -1721,9 +1432,9 @@ class TypedClassDef:
                 code = ''
                 rcode = ''
                 if f:
-                    code = self.method_prolog('a',Tab(3)) + f.function_call_1arg_fallthrough(out.conv,ind=Tab(3),var='b')
+                    code = self.method_prolog('a',tmpl.Tab(3)) + f.function_call_1arg_fallthrough(out.conv,ind=tmpl.Tab(3),var='b')
                 if fr:
-                    rcode = self.method_prolog('b',Tab(3)) + fr.function_call_1arg_fallthrough(out.conv,ind=Tab(3),var='a')
+                    rcode = self.method_prolog('b',tmpl.Tab(3)) + fr.function_call_1arg_fallthrough(out.conv,ind=tmpl.Tab(3),var='a')
 
                 print >> out.cpp, tmpl.number_op.format(
                     cname = self.name,
@@ -1750,9 +1461,9 @@ class TypedClassDef:
             code =''
             rcode = ''
             if f:
-                code = self.method_prolog('a',Tab(3)) + splitdefdef23code(f,out.conv,vars=['b','c'],ind=Tab(3))
+                code = self.method_prolog('a',tmpl.Tab(3)) + splitdefdef23code(f,out.conv,vars=['b','c'],ind=tmpl.Tab(3))
             if fr:
-                rcode = self.method_prolog('b',Tab(3)) + fr.function_call_1arg_fallthrough(out.conv,ind=Tab(3),var='a')
+                rcode = self.method_prolog('b',tmpl.Tab(3)) + fr.function_call_1arg_fallthrough(out.conv,ind=tmpl.Tab(3),var='a')
 
             print >> out.cpp, tmpl.number_op.format(
                 cname = self.name,
@@ -1835,7 +1546,7 @@ class TypedClassDef:
     def cast_base_expr(self):
         return ('get_base_{0}({{0}},false)' if self.has_multi_inherit_subclass() else 'cast_base_{0}({{0}})').format(self.name)
 
-    def method_prolog(self,var='reinterpret_cast<PyObject*>(self)',ind=Tab(2)):
+    def method_prolog(self,var='reinterpret_cast<PyObject*>(self)',ind=tmpl.Tab(2)):
         return '{0}{1} &base = {2};\n'.format(
             ind,
             self.type.full_name,
@@ -1886,9 +1597,9 @@ class TypedClassDef:
             if out.conv.gcvarhandler(self.type):
                 gc_vars.append(('base',self.type))
                 if self.gc_include:
-                    err.emit_warning(SpecificationError('gc-include is ignored because <gc-handler> is defined for this type'))
+                    emit_warning(SpecificationError('gc-include is ignored because <gc-handler> is defined for this type'))
                 if self.gc_ignore:
-                    err.emit_warning(SpecificationError('gc-ignore is ignored because <gc-handler> is defined for this type'))
+                    emit_warning(SpecificationError('gc-ignore is ignored because <gc-handler> is defined for this type'))
                 
                 for f in recursive_qf_fields(self.gc_fields):
                     f.handle_gc = GC_FUNCTION
@@ -1922,7 +1633,7 @@ class TypedClassDef:
                         if f.access == gccxml.ACCESS_PUBLIC:
                             gc_vars.append(('base.'+f.name,f.type))
                         else:
-                            err.emit_warning(SpecificationError(
+                            emit_warning(SpecificationError(
                                 ('"{0}" may need garbage collection but cannot be '+
                                 'accessed because it is not public. Add "{0}" to ' +
                                 'gc-ignore to prevent this warning.').format(f.name)))
@@ -2115,7 +1826,7 @@ class TypedClassDef:
                         pyargvals = ''.join(out.conv.topy(a.type).format('_{0}'.format(i)) + ',' for i,a in enumerate(m.args)),
                         retfrompy = frompy and frompy.format('ret'),
                         rettype = rettype and rettype.typestr())
-                except err.Error as e:
+                except Error as e:
                     e.info['method'] = d.name
                     raise
 
@@ -2148,698 +1859,6 @@ class TypedClassDef:
             gc = gc,
             gc_clear = clear),
 
-
-def base_count(x):
-    """Return the number of direct and indirect base classes of x."""
-    return sum(base_count(b.type) for b in x.bases)
-
-def cconst(x):
-    return gccxml.CPPCvQualifiedType(x,True)
-
-def cptr(x):
-    return gccxml.CPPPointerType(x)
-
-def strip_cvq(x):
-    return x.type if isinstance(x,gccxml.CPPCvQualifiedType) else x
-
-def strip_refptr(x):
-    return strip_cvq(x.type if isinstance(x,(gccxml.CPPPointerType,gccxml.CPPReferenceType)) else x)
-
-def const_qualified(x):
-    """This does not test for the "restrict" qualifier (because the code that this program generates never aliases mutable pointers)."""
-    return isinstance(x,gccxml.CPPCvQualifiedType) and x.const and not x.volatile
-
-
-class ArgBranchNode:
-    def __init__(self):
-        self.basic = dict.fromkeys(TYPES_LIST)
-        self.objects = []
-
-        # an overloaded function is available if and only if self.call is not None
-        self.call = None
-
-    def child_nodes(self):
-        return itertools.chain(filter(None,self.basic.itervalues()),(val for k,val in self.objects))
-
-    def min_arg_length(self):
-        if self.call:
-            return 0
-
-        length = sys.maxint
-
-        for n in self.child_nodes():
-            length = min(length,n.min_arg_length()+1)
-
-        assert length < sys.maxint
-        return length
-
-    def max_arg_length(self):
-        length = 0
-
-        for n in self.child_nodes():
-            length = max(length,n.max_arg_length()+1)
-
-        return length
-
-    def merge(self,b):
-        if b:
-            if b.call:
-                if self.call:
-                    raise SpecificationError(
-                        'Ambiguous overloads: Overload accepting "{0!s}" and overload with "{1!s}" translate to the same set of Python Arguments.'
-                            .format(b.call,self.call))
-
-                self.call = b.call
-
-            for t in TYPES_LIST:
-                if b.basic[t]:
-                    self.basic[t] = b.basic[t].merge(self.basic[t])
-
-            otherobj = dict(b.objects)
-            for k,val in self.objects:
-                val.merge(otherobj.pop(k,None))
-            self.objects.extend(otherobj.iteritems())
-
-        return self
-
-    def sort_objects(self):
-        """Sort self.objects on this instance and all child instances so that no
-        CPPClass is preceded by its base class.
-
-        When comparing types, if S inherits from B, and our type T matches S,
-        then T will always match B, so S must be tested first, since the tests
-        will stop after finding the first viable match.
-
-        """
-        self.objects.sort(key = (lambda x: base_count(strip_refptr(x[0]))),reverse = True)
-        for n in self.child_nodes(): n.sort_objects()
-
-    def basic_and_objects_code(self,conv,argconv,skipsize,ind,get_arg,exactlenchecked = False):
-        r = ''
-
-        # check for general classes
-        if self.objects:
-            for t,branch in self.objects:
-                check,cast = conv.check_and_cast(t)
-                r += '{0}if({1}) {{\n{2}{0}}}\n'.format(
-                    ind,
-                    check.format(get_arg(len(argconv))),
-                    branch.get_code(conv,argconv + [cast],skipsize,ind + 1,get_arg,exactlenchecked))
-
-
-        # check for numeric types
-        nums = 0
-        if self.basic[TYPE_FLOAT]: nums |= CHECK_FLOAT
-        if self.basic[TYPE_INT]: nums |= CHECK_INT
-        if self.basic[TYPE_LONG]: nums |= CHECK_LONG
-        if nums:
-            for c,t in zip(coercion[nums],[TYPE_FLOAT,TYPE_INT,TYPE_LONG]):
-                if c:
-                    r += '{0}if({2}({1})) {{\n{3}{0}}}\n'.format(
-                        ind,
-                        get_arg(len(argconv)),
-                        c,
-                        self.basic[t].get_code(conv,argconv + [None],skipsize,ind + 1,get_arg,exactlenchecked))
-
-
-        # check for string types
-        if self.basic[TYPE_UNICODE]:
-            r += '{0}if(PyUnicode_Check({1}){2}) {{\n{3}{0}}}\n'.format(
-                ind,
-                get_arg(len(argconv)),
-                '' if self.basic[TYPE_STR] else ' && PyString_Check(o)',
-                self.basic[TYPE_UNICODE].get_code(conv,argconv + [None],skipsize,ind + 1,get_arg,exactlenchecked))
-
-        if self.basic[TYPE_STR]:
-            r += '{0}if(PyString_Check({1})) {{\n{2}{0}}}\n'.format(
-                ind,
-                get_arg(len(argconv)),
-                self.basic[TYPE_STR].get_code(conv,argconv + [None],skipsize,ind + 1,get_arg,exactlenchecked))
-
-        return r
-
-    def call_code(self,conv,argconv,ind,get_arg):
-        func,args = self.call
-
-        r = ind.line(
-            func.output(((c or conv.frompy(a.type)[0]).format(get_arg(i)) for
-                i,a,c in zip(itertools.count(),args,argconv)),ind+1))
-
-        return r
-
-    def get_code(self,conv,argconv = [],skipsize = 0,ind = Tab(2),get_arg = lambda x: 'PyTuple_GET_ITEM(args,{0})'.format(x),exactlenchecked = False):
-        anychildnodes = any(self.basic.itervalues()) or self.objects
-
-        assert anychildnodes or self.call
-
-        r = ''
-        get_size = ind.line('if(PyTuple_GET_SIZE(args) {1} {2}) {{')
-
-        if skipsize > 0:
-            assert anychildnodes
-
-            r += self.basic_and_objects_code(conv,argconv,skipsize-1,ind,get_arg,exactlenchecked)
-            if self.call:
-                r += self.call_code(conv,argconv,ind,get_arg)
-
-        elif anychildnodes:
-            # if the exact length was tested, "skipsize" should cover the rest of the arguments
-            assert not exactlenchecked
-
-            min_args = self.min_arg_length()
-            max_args = self.max_arg_length()
-
-            if min_args == max_args:
-                r += get_size.format(ind,'==',len(argconv) + min_args)
-                ind += 1
-
-                r += self.basic_and_objects_code(conv,argconv,min_args - 1,ind,get_arg,True)
-                if self.call:
-                    r += self.call_code(conv,argconv,ind,get_arg)
-
-                ind -= 1
-                r += ind.line('}')
-            else:
-                r += get_size.format(ind,'>',len(argconv))
-
-                r += self.basic_and_objects_code(conv,argconv,min_args - 1,ind + 1,get_arg)
-
-                if self.call:
-                    r += ind.line('} else {')
-                    r += self.call_code(conv,argconv,ind+1,get_arg)
-
-                r += ind.line('}')
-
-        elif exactlenchecked:
-            assert self.call
-            r += self.call_code(conv,argconv,ind,get_arg)
-
-        else:
-            assert self.call
-            r += get_size.format(ind,'==',len(argconv))
-            r += self.call_code(conv,argconv,ind + 1,get_arg)
-            r += ind.line('}')
-
-        return r
-
-
-
-def deref_placeholder(x):
-    return '*({0})' if isinstance(x,gccxml.CPPPointerType) else '{0}'
-
-class Conversion:
-    def __init__(self,tns):
-        # get the types specified by the typedefs
-        for x in ("bool","sint","uint","sshort","ushort","slong","ulong",
-                  "float","double","long_double","size_t","py_ssize_t","schar",
-                  "uchar","char","wchar_t","py_unicode","void","stdstring",
-                  "stdwstring","pyobject",'visitproc'):
-            setattr(self,x,tns.find("type_"+x)[0])
-
-        try:
-            for x in ("slonglong","ulonglong"):
-                setattr(self,x,tns.find("type_"+x)[0])
-        except SpecificationError:
-            self.slonglong = None
-            self.ulonglong = None
-
-
-        self.cstring = cptr(cconst(self.char))
-        self.cmutstring = cptr(self.char)
-        self.cwstring = cptr(cconst(self.wchar_t))
-
-
-        fl = "PyInt_FromLong({0})"
-        ful = "PyLong_FromUnsignedLong({0})"
-        fd = "PyFloat_FromDouble({0})"
-
-        self.__topy = {
-            self.bool : 'bool_to_py({0})',
-            self.sshort : fl,
-            self.ushort : fl,
-            self.sint : fl,
-            self.uint : 'uint_to_py({0})',
-            self.slong : fl,
-            self.ulong : ful,
-            self.float : fd,
-            self.double : fd,
-            self.long_double : 'PyFloat_FromDouble(static_cast<double>({0}))',
-            self.pyobject : '{0}',
-            self.stdstring : 'string_to_py({0})',
-            self.cstring : 'PyString_FromString({0})'
-        }
-
-        self.basic_types = {
-            TYPE_INT : set([self.sshort,self.ushort,self.sint,self.uint,self.slong]),
-            TYPE_LONG : set([self.ulong,self.size_t]),
-            TYPE_FLOAT : set([self.float,self.double,self.long_double]),
-            TYPE_STR : set([self.cstring,self.stdstring]),
-            TYPE_UNICODE : set([self.cwstring,self.stdwstring])
-        }
-
-        self.basic_types[TYPE_LONG if self.uint.size == self.ulong.size else TYPE_INT].add(self.slong)
-
-
-        tod = (False,'py_to_double({0})')
-        # The first value of each tuple specifies whether the converted type is
-        # a reference to the original value. If not, it cannot be passed by
-        # non-const reference.
-        self.__frompy = {
-            self.bool : (False,'static_cast<bool>(PyObject_IsTrue({0}))'),
-            self.sshort : (False,'py_to_short({0})'),
-            self.ushort : (False,'py_to_ushort({0})'),
-            self.sint : (False,'py_to_int({0})'),
-            self.uint : (False,'py_to_uint({0})'),
-            self.slong : (False,'py_to_long({0})'),
-            self.ulong : (False,'py_to_ulong({0})'),
-            self.float : (False,'static_cast<float>(py_to_double({0}))'),
-            self.double : tod,
-            self.long_double : tod,
-            self.pyobject : (True,'{0}'),
-            self.cstring : (False,'PyString_AsString({0})')
-        }
-
-        self.from_py_ssize_t = {
-            self.schar : 'py_ssize_t_to_schar({0})',
-            self.uchar : 'py_ssize_t_to_uchar({0})',
-            self.char : 'py_ssize_t_to_char({0})',
-            self.sshort : 'py_ssize_t_to_sshort({0})',
-            self.ushort : 'py_ssize_t_to_ushort({0})',
-            self.sint : 'py_ssize_t_to_ssint({0})',
-            self.uint : 'py_ssize_t_to_uint({0})',
-            self.slong : '{0}',
-            self.ulong : 'py_ssize_t_to_ulong({0})'
-        }
-
-        ts = 'T_STRING'
-        self.__pymember = {
-            self.sshort : 'T_SHORT',
-            self.ushort : 'T_USHORT',
-            self.sint : 'T_INT',
-            self.uint : 'T_UINT',
-            self.slong : 'T_LONG',
-            self.float : 'T_FLOAT',
-            self.double : 'T_DOUBLE',
-            self.schar : 'T_BYTE',
-            self.uchar : 'T_UBTYE',
-            self.pyobject : 'T_OBJECT_EX',
-            self.cstring : ts,
-            self.cmutstring : ts,
-            self.py_ssize_t : 'T_PYSSIZET'
-        }
-
-        self.integers = set((self.sint,self.uint,self.sshort,self.ushort,
-            self.slong,self.ulong,self.size_t,self.py_ssize_t,self.schar,
-            self.uchar,self.char))
-
-        if self.slonglong:
-            self.__topy[self.slonglong] = 'PyLong_FromLongLong({0})'
-            self.__topy[self.ulonglong] = 'PyLong_FromUnsignedLongLong({0})'
-
-            self.basic_types[TYPE_LONG].add(self.slonglong)
-            self.basic_types[TYPE_LONG].add(self.ulonglong)
-
-            self.__frompy[self.slonglong] = (False,'py_to_longlong({0})')
-            self.__frompy[self.ulonglong] = (False,'py_to_ulonglong({0})')
-
-            self.from_py_ssize_t[self.slonglong] = '{0}'
-
-            # to_ulong is used since 'Py_ssize_t' isn't going to be larger than 'long' anyway
-            self.from_py_ssize_t[self.ulonglong] = 'py_ssize_t_to_ulong({0})'
-
-            self.__pymember[self.slonglong] = 'T_LONGLONG'
-            self.__pymember[self.ulonglong] = 'T_ULONGLONG'
-
-            self.integers.add(self.slonglong)
-            self.integers.add(self.ulonglong)
-
-        self.cppclasstopy = {}
-
-        self.__gcvarhandlers = {
-            self.pyobject : (tmpl.traverse_pyobject,tmpl.clear_pyobject)
-        }
-
-    @staticmethod
-    def __find_conv(name,check,static,x):
-        if isinstance(x,gccxml.CPPClass):
-            funcs = x.lookup(name)
-            if funcs and isinstance(funcs[0],gccxml.CPPMethod):
-                # find a usable overload
-                for f in funcs:
-                    if check(f):
-                        if f.static == static:
-                            return f
-
-                        err.emit_warning(SpecificationError('"{0}" has a method named {1} but it can\'t be used because it\'s {2}static'.format(x.name,name,['not ',''][static])))
-                        break
-                else:
-                    err.emit_warning(SpecificationError('"{0}" has a method named {1} but is has the wrong format'.format(x.name,name)))
-        return None
-
-    def __topy_base(self,t):
-        """Look up a template for converting t to "PyObject*".
-
-        If one isn't found in self.__topy, check if t has a member function with
-        the name given by "TO_PY_FUNC".
-        """
-        try:
-            return self.__topy[t]
-        except KeyError:
-            r = None
-            if Conversion.__find_conv(
-                  TO_PY_FUNC,
-                  (lambda f: f.returns == self.pyobject and accepts_args(f,[])),
-                  False,
-                  t):
-                r = '({{0}}).{0}()'.format(TO_PY_FUNC)
-
-            # save the value to avoid searching again and triggering the same
-            # warnings
-            self.__topy[t] = r
-            return r
-
-    def __topy_pointee(self,x):
-        return self.__topy_base(strip_cvq(x.type))
-
-    def topy(self,origt,retsemantic = None,container = None,temporary = True):
-        t = strip_cvq(origt)
-
-        # if the value is not a temporary, we can store a reference to it, even
-        # if the value itself is not a reference
-        if retsemantic == RET_UNMANAGED_REF and not temporary:
-            classdef = self.cppclasstopy.get(strip_refptr(t))
-            if classdef:
-                return tmpl.new_uref.format(classdef[0].name,deref_placeholder(t))
-
-
-        r = self.__topy_base(t)
-        if r: return r
-
-        if isinstance(t,gccxml.CPPArrayType):
-            # array types are implicitly convertable to pointer types
-            r = self.__topy.get(cptr(cconst(t.type) if is_const(origt) else t.type))
-            if r: return r
-        elif isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType)):
-            if retsemantic == RET_COPY:
-                r = self.__topy_pointee(t)
-                if r:
-                    if isinstance(t,gccxml.CPPPointerType):
-                        r = r.format('*({0})')
-                    return r
-            else:
-                classdef = self.cppclasstopy.get(strip_cvq(t.type))
-                if classdef:
-                    if retsemantic == RET_MANAGED_REF:
-                        assert container
-                        return 'reinterpret_cast<PyObject*>(new ref_{0}({2},reinterpret_cast<PyObject*>({1})))'.format(
-                            classdef[0].name,
-                            container,
-                            deref_placeholder(t))
-                    elif retsemantic == RET_UNMANAGED_REF:
-                        return tmpl.new_uref.format(
-                            classdef[0].name,
-                            deref_placeholder(t))
-                    elif retsemantic == RET_MANAGED_PTR:
-                        return 'reinterpret_cast<PyObject*>(new ptr_{0}({1}))'.format(
-                            classdef[0].name,
-                            '{0}' if isinstance(t,gccxml.CPPPointerType) else '&({0})') # taking the address of a reference in order to call delete (eventually) is weird, but whatever
-
-        raise SpecificationError('No conversion from "{0}" to "PyObject*" is registered'.format(t.typestr()))
-
-    def requires_ret_semantic(self,origt,feature,temporary=True):
-        t = strip_cvq(origt)
-        if (feature == RET_UNMANAGED_REF and not temporary) or (isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType)) and not self.__topy_base(t)):
-            retc = self.cppclasstopy.get(strip_cvq(strip_refptr(t)))
-            if retc:
-                retc[0].features.add(feature)
-                return True
-        return False
-
-    def __frompy_base(self,t):
-        """Look up a template for converting "PyObject* to t".
-
-        If one isn't found in self.__frompy, check if t has a member function with
-        the name given by "FROM_PY_FUNC".
-        """
-        try:
-            return self.__frompy[t]
-        except KeyError:
-            r = None
-            f = Conversion.__find_conv(
-                FROM_PY_FUNC,
-                (lambda f: accepts_args(f,[self.pyobject])
-                 and strip_cvq(f.returns.type
-                               if isinstance(f.returns,gccxml.CPPReferenceType)
-                               else f.returns) == t),
-                True,
-                t)
-            if f:
-                r = ((isinstance(f.returns,gccxml.CPPReferenceType)
-                        and not is_const(f.returns.type)),
-                    '{0}::{1}({{0}})'.format(t.full_name,FROM_PY_FUNC))
-
-            # save the value to avoid searching again and triggering the same
-            # warnings
-            self.__frompy[t] = r
-            return r
-
-    def frompy(self,t):
-        """Returns a tuple containing the conversion code string and the type
-        (CPP_X_Type) that the code returns"""
-
-        assert isinstance(t,gccxml.CPPType)
-
-        r = self.__frompy_base(t)
-        ref = lambda x: gccxml.CPPReferenceType(x) if r[0] else x
-        if r: return r[1],ref(t)
-
-        # check if t is a pointer or reference to a type we can convert
-        if isinstance(t,gccxml.CPPReferenceType):
-            nt = strip_cvq(t.type)
-            r = self.__frompy_base(nt)
-            if r and (r[0] or const_qualified(t.type)):
-                return r[1], ref(nt)
-        elif isinstance(t,gccxml.CPPPointerType):
-            nt = strip_cvq(t.type)
-            r = self.__frompy_base(nt)
-            if r and(r[0] or const_qualified(t.type)):
-                return '*({0})'.format(r[1]), ref(nt)
-        elif isinstance(t,gccxml.CPPCvQualifiedType):
-            r = self.__frompy_base(t.type)
-            if r: return r[1], ref(t.type)
-
-        raise SpecificationError('No conversion from "PyObject*" to "{0}" is registered'.format(t.typestr()))
-
-    def gcvarhandler(self,t):
-        try:
-            return self.__gcvarhandlers[t]
-        except KeyError:
-            r = None
-            if Conversion.__find_conv(
-                  TRAVERSE_FUNC,
-                  (lambda f: f.returns == self.sint 
-                      and accepts_args(
-                          f,
-                          [self.visitproc,gccxml.CPPPointerType(self.void)])),
-                  False,
-                  t):
-                clear = None
-                if Conversion.__find_conv(
-                      CLEAR_FUNC,
-                      (lambda f: f.returns == self.void and accepts_args(f,[])),
-                      False,
-                      t):
-                    clear = '    ({{0}}).{0}();'.format(CLEAR_FUNC)
-                
-                r = tmpl.traverse_t_func.format(TRAVERSE_FUNC),clear
-
-            # save the value to avoid searching again and triggering the same
-            # warnings
-            self.__gcvarhandlers[t] = r
-            return r
-
-    def member_macro(self,t):
-        try:
-            return self.__pymember[t]
-        except KeyError:
-            r = None
-            m = t.lookup(CAST_AS_MEMBER_FIELD)
-            if m and isinstance(m[0],gccxml.CPPField):
-                r = '{0}::{1}'.format(t.full_name,CAST_AS_MEMBER_FIELD)
-
-            self.__pymember[t] = r
-            return r
-
-    def check_and_cast(self,t):
-        st = strip_refptr(t)
-        try:
-            cdef,cast = self.cppclasstopy[st]
-        except KeyError:
-            raise SpecificationError('No conversion from "PyObject*" to "{0}" is registered'.format(st.typestr()))
-
-        check ='PyObject_TypeCheck({{0}},get_obj_{0}Type())'.format(cdef.name)
-        if isinstance(t,gccxml.CPPPointerType): cast = '&' + cast
-        return check,cast
-
-    def arg_parser(self,args,use_kwds = True,indent = Tab(2)):
-        # even if we are not taking any arguments, get_arg::finish should still be called (to report an error if arguments were received)
-
-        prep = indent.line('get_arg ga(args,{1});'.format(indent,'kwds' if use_kwds else '0'))
-
-        namesvar = '0'
-        if use_kwds and any(a.name for a in args):
-            prep += indent.line('const char *names[] = {{{0}}};'.format(
-                ','.join(('"{0}"'.format(a.name) if a.name else '0') for a in args)))
-            namesvar = 'names'
-
-        if args:
-            prep += indent.line('PyObject *temp;')
-
-        for i,a in enumerate(args):
-            frompy, frompytype = self.frompy(a.type)
-            var = frompytype.typestr("_{0}".format(i))
-            name = 'names[{0}]'.format(i) if a.name and use_kwds else '0'
-            if a.default:
-                defval = a.default
-                if isinstance(a.type,gccxml.CPPReferenceType) and cconst(a.type.type):
-                    # if the argument takes a const reference, the default value
-                    # is very likely to be a temporary, so we need to save it
-                    # to a variable
-                    prep += indent.line('{0} temp{1} = {2};'.format(a.type.type.type.typestr(),i,a.default))
-                    defval = 'temp{0}'.format(i)
-                prep += '{0}temp = ga({1},false);\n{0}{2} = temp ? {3} : {4};\n'.format(indent,name,var,frompy.format('temp'),defval)
-            else:
-                # we put the PyObject in a variable in case frompy has more than one '{0}'
-                prep += '{0}temp = ga({1},true);\n{0}{2} = {3};\n'.format(indent,name,var,frompy.format('temp'))
-
-        prep += indent.line('ga.finished({0});'.format(namesvar))
-
-        return ['_{0}'.format(i) for i in range(len(args))], prep
-
-    def arg_parser_b(self,args,use_kwds=True,indent=Tab(2)):
-        prep = ''
-        if any(a.default for a in args):
-            convargs = [(i,a) + self.frompy(a.type) for i,a in enumerate(args)]
-
-            for a in args:
-                t = a.type
-                if isinstance(t,gccxml.CPPReferenceType) and cconst(t.type):
-                    # if the argument takes a const reference, the default value
-                    # is very likely to be a temporary
-                    t = t.type.type
-
-                prep += indent.line('{0} _{1};'.format(t.typestr(),i,' = {2}'.format(a.default) if a.default else ''))
-
-            prep += indent.line('switch(PyTuple_GET_SIZE(args)) {')
-            i2 = indent + 1
-            case = 'case {0}:'
-            prep += indent.line(case.format(len(args)))
-            for i,a in reversed(list(enumerate(args))):
-                prep += i2.line('_{0} = {1}'.format(i,frompy.format('PyTuple_GET_ITEM(args,{0})'.format(i))))
-                if a.default:
-                    prep += indent.line(case.format(i))
-            prep += '{0}    break;\n{0}default:\n{0}}}\n'
-
-        return ['_{0}'.format(i) for i in range(len(args))], prep
-
-    def function_call(self,calls,errval = '0',use_kwds = True):
-        """Generate code to call one function from a list of overloads.
-
-        calls -- A sequence of tuples containing a function (Conversion.Func)
-            and a list of arguments
-        errval -- The value to return to signal an error
-        use_kwds -- whether keyword arguments are available or not (does not
-            apply if len(calls) is greater than 1)
-
-        Caveat: only position arguments are checked, unless len(calls) == 1. Use
-        of keywords will result in an exception being thrown.
-
-        Caveat: the resulting algorithm for overload resolution is different
-        from the C++ standard. It will compare one argument at a time and will
-        stop after finding a viable match. The parallel arguments are sorted
-        from most to least specific, however given classes S and B, where B is
-        the base class of S, if there are two overloads S,B,B and B,S,S and the
-        arguments given are S,S,S then S,B,B will be chosen because the first
-        argument was a better match. The same limitation applies when S and B
-        are built-in types that can be converted to one-another (unicode vs str
-        and float vs int vs long).
-
-        """
-        assert calls
-
-        if len(calls) == 1:
-            args,prep = self.arg_parser(calls[0][1],use_kwds)
-            return prep + Tab(2).line(calls[0][0].output(args,Tab(2)))
-
-        # turn default values into overloads
-        ovlds = []
-        for f,args in calls:
-            ovlds.extend((f,newargs) for newargs in default_to_ov(args))
-
-        return tmpl.overload_func_call.render(
-            inner = self.generate_arg_tree(ovlds).get_code(self),
-            nokwdscheck = use_kwds,
-            args = 'args',
-            errval = errval)
-
-    def function_call_narg_fallthrough(self,calls,vars,ind=Tab(2)):
-        assert calls
-        return self.generate_arg_tree(calls).basic_and_objects_code(
-            self,[],len(vars)-1,ind,lambda x: vars[x],True)
-
-    def function_call_narg(self,calls,vars,errval='0',ind=Tab(2)):
-        if len(calls) == 1:
-            return ind + calls[0][0].output(
-                [self.frompy(a.type)[0].format(v) for a,v in zip(calls[0][1],vars)],
-                ind)
-
-        return tmpl.overload_func_call.render(
-            inner = self.function_call_narg_fallthrough(calls,vars,ind),
-            nokwdscheck = False,
-            args = ','.join(vars),
-            errval = errval,
-            endlabel = False)
-
-    def add_conv(self,t,to=None,from_=None):
-        if to: self.__topy[t] = to
-        if from_: self.__frompy[t] = from_
-
-    def add_gcvarhandler(self,t,handlers):
-        self.__gcvarhandlers[t] = handlers
-
-    def closest_type_is_pytype(self,t,py):
-        s = self.basic_types[py]
-        return (t in s) or isinstance(t,(gccxml.CPPPointerType,gccxml.CPPReferenceType)) and (strip_cvq(t.type) in s)
-
-    def generate_arg_tree(self,calls):
-        tree = self._generate_arg_tree([(x[1],x) for x in calls])
-        tree.sort_objects()
-        return tree
-
-    def _generate_arg_tree(self,argss):
-        argss.sort(key = lambda x: len(x[0]) and x[0][0].type.typestr())
-
-        node = ArgBranchNode()
-        for k,g in itertools.groupby(argss,lambda x: bool(x[0]) and x[0][0].type):
-            if k:
-                subnode = self._generate_arg_tree([(x[1:],orig) for x,orig in g])
-
-                # see if the argument is any of the types that require special handling
-                for t in TYPES_LIST:
-                    if self.closest_type_is_pytype(k,t):
-                        node.basic[t] = subnode.merge(node.basic[t])
-                        break
-                else:
-                    node.objects.append((k,subnode))
-            else:
-                g = list(g)
-
-                assert len(g) == 1
-                assert not len(g[0][0])
-
-                node.call = g[0][1]
-
-        return node
 
 
 def methods_that_return(c):
@@ -2885,6 +1904,19 @@ def check_extra_vars(s_weakref,s_instance_dict,c,s_multi,bases_needed):
     for b in c.bases:
         check_extra_vars(c._weakref,c._instance_dict,b,s_multi or c.multi_inherit,bases_needed)
 
+
+def wrong_format(name):
+    raise SpecificationError('"{0}" has the wrong format'.format(name))
+
+def unambiguous_func(scope,name):
+    f = scope.find(name)
+    if not (isinstance(f[0],gccxml.CPPFunction) or (isinstance(f[0],gccxml.CPPMethod) and f[0].static)):
+        raise SpecificationError('"{0}" is not a function'.format(name))
+    if len(f) > 1:
+        raise SpecificationError('"{0}" is overloaded and hence ambiguous'.format(name))
+    return f[0]
+
+
 class ModuleDef:
     def __init__(self,name,includes=None):
         self.name = name
@@ -2897,6 +1929,7 @@ class ModuleDef:
         self.smartptrs = []
         self.vars = {}
         self.gchandlers = []
+        self.init = None,None
 
     def print_gccxml_input(self,out):
         # In addition to the include files, declare certain typedefs so they can
@@ -3005,7 +2038,7 @@ class ModuleDef:
                 if v.really_a_property(conv):
                     try:
                         conv.requires_ret_semantic(v.getter_type(conv),RET_MANAGED_REF)
-                    except err.Error as e:
+                    except Error as e:
                         e.info['attr'] = v.name
 
         for f in functions:
@@ -3077,8 +2110,47 @@ class ModuleDef:
             print >> out.cpp, body
             functable.append(tentry)
 
+        
+        init_pre = ''
+        init_post = ''
+        throw = False
+
+        if self.init[0]:
+            f = unambiguous_func(scope,self.init[0])
+            if not accepts_args(f,[]):
+                wrong_format(self.init[0])
+
+            if f.returns == conv.sint:
+                init_pre = '    if(UNLIKELY({0}())) return;'.format(self.init[0])
+            elif f.returns == conv.void:
+                init_pre = '    {0}();'.format(self.init[0])
+                throw = can_throw(f)
+            else:
+                wrong_format(self.init[0])
+
+        if self.init[1]:
+            f = unambiguous_func(scope,self.init[1])
+
+            # since the module init function doesn't have a return value and f
+            # is called at the end of the init function, we don't need to test
+            # f's return value
+            if accepts_args(f,[conv.pyobject]):
+                init_post = '    {0}(m);'.format(self.init[1])
+            elif accepts_args(f,[]):
+                init_post = '    {0}();'.format(self.init[1])
+            else:
+                wrong_format(self.init[1])
+
+            if f.returns == conv.void:
+                throw = throw and can_throw(f)
+            elif f.returns != conv.sint:
+                wrong_format(self.init[1])
+
 
         print >> out.cpp, tmpl.module.render(
+            init_pre = init_pre,
+            init_post = init_post,
+            wrap_in_trycatch = throw,
             funclist = functable,
             module = self.name,
             doc = self.doc,
@@ -3553,6 +2625,13 @@ class tag_GCHandler(tag):
         return self.type,self.traverse,self.clear
 
 
+class tag_ModuleInit(tag):
+    def __init__(self,args):
+        self.r = args.get('pre'),args.get('post')
+        if not (self.r[0] or self.r[1]):
+            raise SpecificationError('<init> must have a "pre" or "post" attribute')
+
+
 class tag_Module(tag):
     def __init__(self,args):
         self.r = ModuleDef(args["name"],stripsplit(args["include"]))
@@ -3590,6 +2669,12 @@ class tag_Module(tag):
     @tag_handler('gc-handler',tag_GCHandler)
     def handle_gchandler(self,data):
         self.r.gchandlers.append(data)
+
+    @tag_handler('init',tag_ModuleInit)
+    def handle_init(self,data):
+        if self.r.init[0] or self.r.init[1]:
+            raise SpecificationError('<module> can only have one <init> tag')
+        self.r.init = data
 
 
 

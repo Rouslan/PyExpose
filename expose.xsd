@@ -67,6 +67,39 @@ Example: ::
         <xsd:element ref="to-pyobject"/>
         <xsd:element ref="from-pyobject"/>
         <xsd:element ref="gc-handler"/>
+
+        <xsd:element name="init" maxOccurs="1">
+          <xsd:annotation>
+            <xsd:documentation>
+Call a function at the start or end (or both) of the module's initialization.
+
+A function specified here may either return ``int`` or nothing. If it returns
+int, it is expected to use the return value to indicate an error and never throw
+an (C++) exception. A value of zero indicates success. If any other value is
+returned, a Python exception is assumed to be raised and the module
+initialization is aborted.
+            </xsd:documentation>
+          </xsd:annotation>
+          <xsd:complexType>
+            <xsd:attribute name="pre" type="symbol">
+              <xsd:annotation>
+                <xsd:documentation>
+The name of a function to call at the start of the module's initialization. The
+function is called with no arguments.
+                </xsd:documentation>
+              </xsd:annotation>
+            </xsd:attribute>
+            <xsd:attribute name="post" type="symbol">
+              <xsd:annotation>
+                <xsd:documentation>
+The name of a function to call at the end of the module's initialization. The
+function should either accept one argument of type ``PyObject*`` or no
+arguments. If it accepts ``PyObject*``, it will receive the module object.
+                </xsd:documentation>
+              </xsd:annotation>
+            </xsd:attribute>
+          </xsd:complexType>
+        </xsd:element>
       </xsd:choice>
 
       <xsd:attribute name="name" type="ident" use="required">
@@ -80,7 +113,7 @@ The name of the module. This will be the name by which the module is imported.
       <xsd:attribute name="include" type="includelist" use="required">
         <xsd:annotation>
           <xsd:documentation>
-A comma seperated list of include files to scan for the types and functions to
+A comma separated list of include files to scan for the types and functions to
 expose.
           </xsd:documentation>
         </xsd:annotation>
@@ -290,7 +323,7 @@ Like func, except the return value is assigned to.
           <xsd:documentation>
 The list of arguments the C++ function/method takes. This is to select a
 specific function/method when the function/method is overloaded. The arguments
-are seperated by commas just like in the function/method. The types can be
+are separated by commas just like in the function/method. The types can be
 specified with or without typedefs, as long as the underlying types are the same
 as that of the function/method.
           </xsd:documentation>
@@ -302,7 +335,7 @@ as that of the function/method.
           <xsd:documentation>
 Specifies how a pointer or reference return value is to be handled. If the
 function returns by value, this attribute is meaningless. The options are
-"default", "copy", "managedref" and "self". "default" is the same as ommitting
+"default", "copy", "managedref" and "self". "default" is the same as omitting
 this attribute. "copy" means the value will be dereferenced and copied.
 "managedref" means the returned Python object will keep a reference and a
 pointer to the class, in order to keep the class alive while the reference
@@ -338,8 +371,8 @@ both ``arity`` and ``overload`` is redundant.
         <xsd:annotation>
           <xsd:documentation>
 For virtual methods, if true (the default), the method will be overridable in
-Python code. An attribute lookup must be performed to determine if the method is
-overridden, so setting this to false avoids a small amount of overhead.
+Python code. An attribute look-up must be performed to determine if the method
+is overridden, so setting this to false avoids a small amount of overhead.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -464,7 +497,7 @@ solution is to either specify the template instantiation directly, or add
 If true, the wrapped type will be initialized using the default constructor upon
 object creation (when ``type.__new__`` is called), before ``__init__`` is
 called. This allows an object to always be in a usable state. Without this
-attribute, an object for which ``__init__`` was not called, raises an excpetion
+attribute, an object for which ``__init__`` was not called, raises an exception
 when any of its methods (include property getters and setters) are called.
           </xsd:documentation>
         </xsd:annotation>
@@ -491,7 +524,7 @@ Specifies whether to support weak references (``__weakref__``). The default is
       <xsd:attribute name="use-gc" type="xsd:boolean" default="true">
         <xsd:annotation>
           <xsd:documentation>
-Specifies whether to support cyclyc garbage collection. If true, the "traverse"
+Specifies whether to support cyclic garbage collection. If true, the "traverse"
 and "clear" functions are generated for this class, handling the instance
 dictionary and any fields of type ``PyObject*`` or a type specified by
 ``&lt;gc-handler&gt;``. Fields can be omitted from the traverse and clear
@@ -510,7 +543,7 @@ The default is "true".
       <xsd:attribute name="gc-include" type="xsd:string">
         <xsd:annotation>
           <xsd:documentation>
-A semicolon-seperated list of fields to be included in cyclic garbage
+A semicolon-separated list of fields to be included in cyclic garbage
 collection. This list is ignored if a &lt;gc-handler&gt; applies to the entire
 class.
           </xsd:documentation>
@@ -520,7 +553,7 @@ class.
       <xsd:attribute name="gc-ignore" type="xsd:string">
         <xsd:annotation>
           <xsd:documentation>
-A semicolon-seperated list of fields to be omitted from cyclic garbage
+A semicolon-separated list of fields to be omitted from cyclic garbage
 collection. This list is ignored if a &lt;gc-handler&gt; applies to the entire
 class.
           </xsd:documentation>

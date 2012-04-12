@@ -3,6 +3,46 @@
 import jinja2
 
 
+
+class Tab:
+    """Yield 4 x self.amount whitespace characters when converted to a string.
+
+    An instance can be added to or subtracted from directly, to add to or
+    subtract from "amount".
+
+    """
+    def __init__(self,amount = 1):
+        if isinstance(amount,Tab):
+            self.amount = amount.amount # copy constructor
+        else:
+            self.amount = amount
+
+    def __str__(self):
+        return self.amount * 4 * ' '
+
+    def __repr__(self):
+        return 'Tab({0})'.format(self.amount)
+
+    # in-place addition/subtraction omitted to prevent modification when passed
+    # as an argument to a function
+
+    def __add__(self,val):
+        if isinstance(val,basestring):
+            return self.__str__() + val
+        return Tab(self.amount + val)
+
+    def __radd__(self,val):
+        if isinstance(val,basestring):
+            return val + self.__str__()
+        return Tab(self.amount + val)
+
+    def __sub__(self,val):
+        return Tab(self.amount - val)
+
+    def line(self,x):
+        return self.__str__() + x + '\n'
+
+
 def quote_c(x):
     # python's non-unicode string syntax appears to be the same as C's
     return '"'+x.encode('utf_8').encode('string_escape')+'"'
@@ -735,6 +775,11 @@ PyMethodDef func_table[] = {
 
 
 extern "C" SHARED(void) init<% module %>(void) {
+== if wrap_in_trycatch
+    try {
+== endif
+<% init_pre %>
+
 == for suf in internal_suffixes
     if(UNLIKELY(PyType_Ready(&_obj_Internal<% suf %>Type) < 0)) return;
 == endfor
@@ -769,16 +814,21 @@ extern "C" SHARED(void) init<% module %>(void) {
 == endfor
 
 == for v in vars
-==     if loop.first
+==     if loop.first and not wrap_in_trycatch
     try {
 ==     endif
         PyModule_AddObject(m,"<% v.name %>",<% v.create %>);
-==     if loop.last
+==     if loop.last and not wrap_in_trycatch
     } catch(std::bad_alloc&) {
         PyErr_NoMemory();
     }
 ==     endif
 == endfor
+
+<% init_post %>
+== if wrap_in_trycatch
+    } EXCEPT_HANDLERS()
+== endif
 }
 
 #pragma GCC visibility pop

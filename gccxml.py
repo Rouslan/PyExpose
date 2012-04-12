@@ -144,7 +144,7 @@ class CPPFunctionType(CPPType):
         return '{0} ({1})({2})'.format(self.returns.typestr(),deriv,','.join(map(str,self.args)))
 
 class CPPFunction(CPPSymbol):
-    __slots__ = 'name','returns','args','context'
+    __slots__ = 'name','returns','args','context','throw','attributes'
 
     def __init__(self):
         self.args = ArgList()
@@ -203,7 +203,7 @@ class CPPConstructor(CPPSymbol):
         for a in self.args: a.link(items)
 
 class CPPMethod(CPPSymbol):
-    __slots__ = 'name','returns','access','const','virtual','pure_virtual','static','args','context'
+    __slots__ = 'name','returns','access','const','virtual','pure_virtual','static','args','context','throw','attributes'
 
     def __init__(self):
         self.args = ArgList()
@@ -269,8 +269,10 @@ class CPPCvQualifiedType(CPPType):
     link = link_item('type')
 
     def _typestr(self,deriv):
-        # Because of the way CPPBasicType works, these qualifiers end up on the right side of types (e.g. "int const"). If one wants, this
-        # can be easily changed by testing isinstance(self.type,CPPBasicType) and outputting "{qualifiers} {self.type.name} {deriv}"
+        # Because of the way CPPBasicType works, these qualifiers end up on the
+        # right side of types (e.g. "int const"). If one wants, this can be
+        # easily changed by testing isinstance(self.type,CPPBasicType) and
+        # outputting "{qualifiers} {self.type.name} {deriv}"
         a = []
         if deriv: a.append(deriv)
         if self.restrict: a.insert(0,'restrict')
@@ -341,6 +343,10 @@ no_default = _no_default()
 def zero_one(x):
     return bool(int(x))
 
+def space_sep_set(x):
+    return frozenset(x.split())
+
+
 def common_init(keys):
     def inner(self,args):
         o = self.OType()
@@ -409,7 +415,7 @@ class tag_Class(tag):
 
 class tag_Function(tag):
     OType = CPPFunction
-    __init__ = common_init(["name","returns",'context'])
+    __init__ = common_init(["name","returns",'context',('throw',None,None),('attributes',space_sep_set,frozenset())])
     tag_handlers = function_handlers
 
 class tag_PointerType(tag):
@@ -437,7 +443,7 @@ class tag_Field(tag):
 
 class tag_Method(tag):
     OType = CPPMethod
-    __init__ = common_init(["name","returns",("access",parse_access),'context'] + bool_keys("const","virtual","pure_virtual","static"))
+    __init__ = common_init(["name","returns",("access",parse_access),'context',('throw',None,None),('attributes',space_sep_set,frozenset())] + bool_keys("const","virtual","pure_virtual","static"))
     tag_handlers = function_handlers
 
 class tag_Constructor(tag):
