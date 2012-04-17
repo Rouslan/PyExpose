@@ -1308,5 +1308,39 @@ class TestModuleInit(TestCompile):
         self.assertEqual(tm.value,5)
 
 
+class TestSelfArg(TestCompile):
+    header_file = '''
+        #include <stdexcept>
+
+        class Thing {
+            PyObject *self;
+        public:
+            Thing(int a,PyObject *self,int b,int c) : self(self) {
+                if(a != 1) throw std::invalid_argument("a");
+                if(b != 2) throw std::invalid_argument("b");
+                if(c != 3) throw std::invalid_argument("c");
+            }
+
+            bool check_self(const char *a,const char *b,const char *c,PyObject *s) {
+                return a[0] == '1' && b[0] == '2' && c[0] == '3' && self == s;
+            }
+        };
+'''
+
+    spec_file = '''
+        <module name="testmodule" include="main.h">
+            <class type="Thing">
+                <init self-arg="2" overload="int,PyObject*,int,int"/>
+                <def self-arg="4" func="check_self"/>
+            </class>
+        </module>
+'''
+
+    def runTest(self):
+        tm = self.compile()
+        thing = tm.Thing(1,2,3)
+        self.assertTrue(thing.check_self('1','2','3'))
+
+
 if __name__ == '__main__':
     unittest.main()

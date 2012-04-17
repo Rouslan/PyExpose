@@ -5,8 +5,8 @@ __all__ = 'Error','SpecificationError','emit_warning'
 
 
 class Error(Exception):
-    def __init__(self,msg,**info):
-        super(Error,self).__init__(msg,info)
+    def __init__(self,msg,info=None):
+        super(Error,self).__init__(msg,info or {})
 
     @property
     def msg(self):

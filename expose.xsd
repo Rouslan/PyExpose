@@ -322,10 +322,9 @@ Like func, except the return value is assigned to.
         <xsd:annotation>
           <xsd:documentation>
 The list of arguments the C++ function/method takes. This is to select a
-specific function/method when the function/method is overloaded. The arguments
-are separated by commas just like in the function/method. The types can be
-specified with or without typedefs, as long as the underlying types are the same
-as that of the function/method.
+specific function/method out of a set of overloads. The arguments are separated
+by commas and can be specified with or without typedefs, as long as the
+underlying types are the same as that of the function/method.
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -356,6 +355,16 @@ determined automatically when ``func`` is a method.
         </xsd:annotation>
       </xsd:attribute>
 
+      <xsd:attribute name="self-arg" type="xsd:nonNegativeInteger">
+        <xsd:annotation>
+          <xsd:documentation>
+For methods only, if supplied, the method will receive the ``self`` pointer, of
+type ``PyObject*``. The value specifies the index (starting at 1) of the
+argument to receive the pointer.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
       <xsd:attribute name="arity" type="xsd:nonNegativeInteger">
         <xsd:annotation>
           <xsd:documentation>
@@ -382,7 +391,26 @@ is overridden, so setting this to false avoids a small amount of overhead.
 
   <xsd:element name="init">
     <xsd:complexType>
-      <xsd:attribute name="overload" type="arglist"/>
+      <xsd:attribute name="overload" type="arglist">
+        <xsd:annotation>
+          <xsd:documentation>
+The list of arguments the constructor. This is to select a specific constructor
+out of a set of overloads. The arguments are separated by commas and can be
+specified with or without typedefs, as long as the underlying types are the same
+as that of the constructor.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
+
+      <xsd:attribute name="self-arg" type="xsd:nonNegativeInteger">
+        <xsd:annotation>
+          <xsd:documentation>
+If supplied, the constructor will receive the ``self`` pointer, or type
+``PyObject*``. The value specifies the index (starting at 1) of the argument to
+receive the pointer.
+          </xsd:documentation>
+        </xsd:annotation>
+      </xsd:attribute>
     </xsd:complexType>
   </xsd:element>
 

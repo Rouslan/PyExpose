@@ -27,7 +27,7 @@ def mandatory_args(x):
 def compatible_args(f,given):
     """Return a copy of f with the subset of arguments from 'needed', specified
     by 'given' or None if the arguments don't match."""
-    if accepts_args(f,[a.type for a in given]): return None
+    if not accepts_args(f,[a.type for a in given]): return None
     if len(f.args) > len(given):
         newargs = f.args[0:len(given)]
         rf = copy.copy(f)

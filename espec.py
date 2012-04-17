@@ -145,7 +145,7 @@ class Output:
 
 
 class Overload:
-    def __init__(self,func=None,retsemantic=None,args=None,static=False,arity=None,assign=False,bridge_virt=True):
+    def __init__(self,func=None,retsemantic=None,args=None,static=False,arity=None,assign=False,bridge_virt=True,binds=None):
         self.func = func
         self.retsemantic = retsemantic
         self.args = args
@@ -153,6 +153,7 @@ class Overload:
         self.arity = arity
         self.assign = assign
         self.bridge_virt = bridge_virt
+        self.binds = binds or {}
         self.uniquenum = get_unique_num()
 
     def gccxml_input(self,outfile):
@@ -170,7 +171,7 @@ class DefDef:
     def __init__(self,name = None,doc = None):
         self.name = name
         self.doc = doc
-        self.overloads = []
+        self.overloads = [] #list of Overload objects
 
     def gccxml_input(self,outfile):
         for o in self.overloads:
@@ -212,11 +213,19 @@ class TypedOverload:
         self.func = func
         self.retsemantic = overload and overload.retsemantic
         self.argbinds = [BindableArg(a) for a in func.args]
-        self.explicit_static = overload.static if overload else False
+        self.static = (overload.static 
+            if overload and overload.static is not None 
+            else (isinstance(self.func,gccxml.CPPMethod) and self.func.static))
         self.bridge_virt = overload.bridge_virt if overload else False
         self._returns = None
-
         self.assign = overload and overload.assign
+
+        if overload:
+            for i,b in overload.binds.items():
+                if i >= len(self.argbinds):
+                    raise SpecificationError('"{0}" doesn\'t have an argument #{1}'.format(func.canon_name,i+1),b[1])
+                self.argbinds[i].val = b[0]
+
         if self.assign:
             ret = func.returns
             if not isinstance(ret,(gccxml.CPPReferenceType,gccxml.CPPPointerType)):
@@ -250,14 +259,17 @@ class TypedOverload:
 
     def can_accept(self,args):
         if not (mandatory_args(self) <= args <= len(self.args)):
+            needed = args
+            for a in self.argbinds:
+                if a.val: needed += 1
+            if self.assign: needed -= 1
             raise SpecificationError(
                 '"{0}" must take {1} argument(s)'.format(
                     self.func.canon_name,
-                    args + sum(1 for a in self.argbinds if a.val is not None)))
+                    needed))
 
-    @property
-    def static(self):
-        return self.explicit_static or (isinstance(self.func,gccxml.CPPMethod) and self.func.static)
+def call_code_binds(overload):
+    return [(i,argbind.val) for i,argbind in enumerate(overload.argbinds) if argbind.val]
 
 
 def choose_overload(ov,options,tns):
@@ -308,7 +320,7 @@ class TypedDefDef(object):
 
             # if there is more than one result, remove the const methods
             if len(cf) > 1:
-                newcf = [f for f in cf if not (hasattr(f,'const') and f.const)]
+                newcf = [f for f in cf if not getattr(f,'const',False)]
                 if newcf: cf = newcf
 
             self.overloads.extend(choose_overload(ov,cf,tns))
@@ -329,10 +341,7 @@ class TypedDefDef(object):
                 assert isinstance(ov.func.returns,gccxml.CPPPointerType)
                 code = '*({0}) = {{1}}'.format(code)
 
-        return CallCode(
-            code,
-            [(i,argbind.val) for i,argbind in enumerate(ov.argbinds) if argbind.val],
-            ov.assign)
+        return CallCode(code,call_code_binds(ov),ov.assign)
 
     def call_code(self,conv,ov):
         cc = self.call_code_mid(conv,ov)
@@ -442,7 +451,7 @@ class TypedMethodDef(TypedDefDef):
         self.classdef = classdef
 
         for ov in self.overloads:
-            if isinstance(ov.func,gccxml.CPPFunction) and not ov.explicit_static:
+            if isinstance(ov.func,gccxml.CPPFunction) and not ov.static:
                 if len(ov.func.args) == 0 or strip_refptr(ov.func.args[0].type) != self.classdef.type:
                     self.odd_function(ov)
                 else:
@@ -671,8 +680,8 @@ class TypedInitDef:
                     raise SpecificationError('There is more than one constructor and there is no default. An overload must be specified in the spec file.')
 
     def output(self,conv,typestr):
-        cc = CallCode('new(addr) {0}({{0}}); return 0;'.format(typestr))
-        return conv.function_call([(cc,ov.args) for ov in self.overloads],'-1',True)
+        cc = 'new(addr) {0}({{0}}); return 0;'.format(typestr)
+        return conv.function_call([(CallCode(cc,call_code_binds(ov)),ov.args) for ov in self.overloads],'-1',True)
 
 class PropertyDef:
     def __init__(self,name,get=None,set=None):
@@ -2242,13 +2251,17 @@ def stripsplit(x):
     return [i.strip() for i in x.split(',')]
 
 
+def parse_self_arg(args):
+    sa = parse_nonneg_int(args,'self-arg')
+
+    return sa if sa is None else {(sa-1): ('reinterpret_cast<PyObject*>(self)',{'attribute':'self-arg'})}
 
 
 class tag_Init(tag):
     def __init__(self,args):
         self.r = DefDef()
-        self.r.overloads.append(Overload(args=args.get("overload")))
-
+        self.r.overloads.append(Overload(args=args.get("overload"),binds=parse_self_arg(args)))
+        
 
 class tag_ToFromPyObject(tag):
     def __init__(self,args):
@@ -2379,6 +2392,20 @@ def parse_bool(args,prop,default=False):
     except LookupError:
         raise ParseError('The value of "{0}" must be either "true" or "false"'.format(prop))
 
+def parse_nonneg_int(args,prop,default=None):
+    def badval():
+        raise ParseError('The value of "{0}" must be a non-negative integer'.format(prop))
+
+    val = args.get(prop,None)
+    if val is None: return default
+    try:
+        val = int(val,10)
+    except ValueError:
+        badval()
+
+    if val < 0: badval()
+    return val
+
 
 def parse_cint(x):
     if x.startswith('0x') or x.startswith('0X'):
@@ -2495,25 +2522,23 @@ class tag_Def(tag):
             if 'assign-to' in args:
                 raise ParseError('"func" and "assign-to" cannot be used together')
         self.r = DefDef(get_valid_py_ident(args.get('name'),func))
-        arity = args.get('arity')
-        if arity:
-            def badval():
-                raise ParseError('"arity" must be a non-negative integer')
 
-            try:
-                arity = int(arity)
-            except ValueError:
-                badval()
-            if arity < 0:
-                badval()
+        static = parse_bool(args,'static',None)
+        sa = parse_self_arg(args)
+        if sa is not None:
+            if static:
+                raise SpecificationError('"self-arg" is not available for static methods')
+            static = False
+
         self.r.overloads.append(Overload(
             tag_Def.operator_parse(func),
             get_ret_semantic(args),
             args.get('overload'),
-            parse_bool(args,'static'),
-            arity,
+            static,
+            parse_nonneg_int(args,'arity'),
             assign,
-            parse_bool(args,'bridge-virtual',True)))
+            parse_bool(args,'bridge-virtual',True),
+            sa))
 
 
     op_parse_re = re.compile(r'.*\boperator\b')
@@ -2629,7 +2654,7 @@ class tag_ModuleInit(tag):
     def __init__(self,args):
         self.r = args.get('pre'),args.get('post')
         if not (self.r[0] or self.r[1]):
-            raise SpecificationError('<init> must have a "pre" or "post" attribute')
+            raise ParseError('<init> must have a "pre" or "post" attribute')
 
 
 class tag_Module(tag):
