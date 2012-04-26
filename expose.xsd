@@ -208,13 +208,14 @@ __index__       tp_as_number->nb_index
 __coerce__      tp_as_number->nb_coerce
 =============== ================================================================
 
-The following two cannot be used because they correspond to the constructor and
+The following cannot be used because they correspond to the constructor and
 destructor. To specify the constructor, use the <init> tag.
 
 =============== =================
 Python          C++
 =============== =================
 __init__        tp_init
+__new__         tp_new
 __del__         tp_dealloc
 =============== =================
 
@@ -389,30 +390,28 @@ is overridden, so setting this to false avoids a small amount of overhead.
   </xsd:element>
 
 
-  <xsd:element name="init">
-    <xsd:complexType>
-      <xsd:attribute name="overload" type="arglist">
-        <xsd:annotation>
-          <xsd:documentation>
-The list of arguments the constructor. This is to select a specific constructor
-out of a set of overloads. The arguments are separated by commas and can be
-specified with or without typedefs, as long as the underlying types are the same
-as that of the constructor.
-          </xsd:documentation>
-        </xsd:annotation>
-      </xsd:attribute>
+  <xsd:complexType name="init">
+    <xsd:attribute name="overload" type="arglist">
+      <xsd:annotation>
+        <xsd:documentation>
+The list of arguments of the constructor. This is to select a specific
+constructor out of a set of overloads. The arguments are separated by commas and
+can be specified with or without typedefs, as long as the underlying types are
+the same as that of the constructor.
+        </xsd:documentation>
+      </xsd:annotation>
+    </xsd:attribute>
 
-      <xsd:attribute name="self-arg" type="xsd:nonNegativeInteger">
-        <xsd:annotation>
-          <xsd:documentation>
+    <xsd:attribute name="self-arg" type="xsd:nonNegativeInteger">
+      <xsd:annotation>
+        <xsd:documentation>
 If supplied, the constructor will receive the ``self`` pointer, or type
 ``PyObject*``. The value specifies the index (starting at 1) of the argument to
 receive the pointer.
-          </xsd:documentation>
-        </xsd:annotation>
-      </xsd:attribute>
-    </xsd:complexType>
-  </xsd:element>
+        </xsd:documentation>
+      </xsd:annotation>
+    </xsd:attribute>
+  </xsd:complexType>
 
 
   <xsd:element name="no-init">
@@ -484,9 +483,22 @@ The member variable of the C++ class to expose.
 
 
   <xsd:element name="class">
+    <xsd:annotation>
+      <xsd:documentation><![CDATA[
+A class to expose to python.
+
+Use ``<init>`` or ``<new>`` to specify a constructor. If none of ``<init>;``,
+``<new>`` or ``<no-init>`` are specified, ``<init overload="">`` is implied.
+
+Unless ``<new>`` is specified, the underlying C++ object is not constructed
+until ``__init__`` is called. An unconstructed object raises an exception when
+any of its methods (include property getters and setters) are called.
+]]></xsd:documentation>
+    </xsd:annotation>
     <xsd:complexType>
       <xsd:choice maxOccurs="unbounded" minOccurs="0">
-        <xsd:element ref="init"/>
+        <xsd:element name="init" type="init"/>
+        <xsd:element name="new" type="init"/>
         <xsd:element ref="no-init"/>
         <xsd:element ref="def"/>
         <xsd:element ref="property"/>
@@ -519,18 +531,6 @@ solution is to either specify the template instantiation directly, or add
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="new-initializes" type="xsd:boolean" default="false">
-        <xsd:annotation>
-          <xsd:documentation>
-If true, the wrapped type will be initialized using the default constructor upon
-object creation (when ``type.__new__`` is called), before ``__init__`` is
-called. This allows an object to always be in a usable state. Without this
-attribute, an object for which ``__init__`` was not called, raises an exception
-when any of its methods (include property getters and setters) are called.
-          </xsd:documentation>
-        </xsd:annotation>
-      </xsd:attribute>
-
       <xsd:attribute name="instance-dict" type="xsd:boolean" default="true">
         <xsd:annotation>
           <xsd:documentation>
@@ -540,7 +540,7 @@ Specifies whether to include an instance dictionary (``__dict__``). The default 
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="instance-dict" type="xsd:boolean" default="true">
+      <xsd:attribute name="weakrefs" type="xsd:boolean" default="true">
         <xsd:annotation>
           <xsd:documentation>
 Specifies whether to support weak references (``__weakref__``). The default is

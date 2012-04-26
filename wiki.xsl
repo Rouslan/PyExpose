@@ -52,13 +52,25 @@ PyExpose Specification File Format
 
 </xsl:text>
         <xsl:apply-templates select="xsd:annotation/xsd:documentation"/>
-        <xsl:if test="xsd:complexType/*/xsd:element">
+        <xsl:choose>
+            <xsl:when test="@type">
+                <xsl:variable name="type" select="@type"/>
+                <xsl:apply-templates select="//xsd:complexType[@name=$type]"/>
+            </xsl:when>
+            <xsl:otherwise>
+              <xsl:apply-templates select="xsd:complexType"/>
+            </xsl:otherwise>
+        </xsl:choose>
+    </xsl:template>
+
+    <xsl:template match="xsd:complexType">
+        <xsl:if test="*/xsd:element">
             <xsl:text>
 Child elements:
 -----------------------
 
 </xsl:text>
-            <xsl:for-each select="xsd:complexType/*/xsd:element">
+            <xsl:for-each select="*/xsd:element">
                 <xsl:variable name="name">
                     <xsl:choose>
                         <xsl:when test="@ref">
@@ -80,14 +92,14 @@ Child elements:
 
 </xsl:text>
         </xsl:if>
-        <xsl:if test="xsd:complexType/xsd:attribute">
+        <xsl:if test="xsd:attribute">
             <xsl:variable name="element" select="@name"/>
                 <xsl:text>
 Attributes:
 -----------
 
 </xsl:text>
-            <xsl:for-each select="xsd:complexType/xsd:attribute">
+            <xsl:for-each select="xsd:attribute">
                 <xsl:value-of select="@name"/>
                 <xsl:text> = </xsl:text>
                 <xsl:choose>

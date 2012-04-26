@@ -527,8 +527,12 @@ class TestConstructorDestructor(TestCompile):
 
     spec_file = '''<?xml version="1.0"?>
         <module name="testmodule" include="main.h">
-            <class type="A" new-initializes="false"/>
-            <class type="B" new-initializes="true"/>
+            <class type="A">
+                <init overload=""/>
+            </class>
+            <class type="B">
+                <new overload=""/>
+            </class>
             <def func="count"/>
         </module>
     '''
@@ -1340,6 +1344,7 @@ class TestSelfArg(TestCompile):
         tm = self.compile()
         thing = tm.Thing(1,2,3)
         self.assertTrue(thing.check_self('1','2','3'))
+
 
 
 if __name__ == '__main__':

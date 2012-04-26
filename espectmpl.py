@@ -376,7 +376,7 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
 
 =#     before we can call the constructor, the destructor needs to be called if
 =#     we already have an initialized object
-==     if features or (destructor and not new_init)
+==     if features or (destructor and not newinitcode)
     switch(self->mode) {
 =#         The ref_X, ptr_X and uref_X all store an address to the contained
 =#         type, in the same place. We'll need to pick one that exists.
@@ -413,28 +413,31 @@ int obj_<% name %>_init(obj_<% name %> *self,PyObject *args,PyObject *kwds) {
     }
 ==     elif destructor
     self->base.<% destructor %>();
-==     elif not new_init
+==     elif not newinitcode
     self->mode = CONTAINS;
 ==     endif
     try {
 <% initcode %>
     } EXCEPT_HANDLERS(-1)
+success:
+    return 0;
 }
 == endif
 
-== if new_init or not initcode
-PyObject *obj_<% name %>_new(PyTypeObject *type,PyObject *,PyObject *) {
-== if new_init
+== if newinitcode or not initcode
+PyObject *obj_<% name %>_new(PyTypeObject *type,PyObject *args,PyObject *kwds) {
+== if newinitcode
     obj_<% name %> *ptr = reinterpret_cast<obj_<% name %>*>(type->tp_alloc(type,0));
     if(ptr) {
         try {
             try {
-                new(&ptr->base) <% type %>();
+<% newinitcode %>
             } catch(...) {
                 Py_DECREF(ptr);
             }
         } EXCEPT_HANDLERS(0)
-        ptr->mode = CONTAINS;
+success:
+        <@ if features or destructor @>ptr->mode = CONTAINS<@ endif @>;
     }
     return reinterpret_cast<PyObject*>(ptr);
 == else
@@ -494,10 +497,18 @@ inline PyTypeObject *create_obj_<% name %>Type() {
 <@ if membersref @>    type->tp_members = obj_<% name %>_members;<@ endif @>
 <@ if getsetref @>    type->tp_getset = obj_<% name %>_getset;<@ endif @>
 <@ if richcompare @>    type->tp_richcompare = reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare);<@ endif @>
-<@ if '__iter__' in specialmethods @>    type->tp_iter = reinterpret_cast<getiterfunc>(&obj_<% name %>___iter__);<@ endif @>
-<@ if 'next' in specialmethods @>    type->tp_iter = reinterpret_cast<iternextfunc>(&obj_<% name %>_next);<@ endif @>
-<@ if initcode @>    type->tp_init = reinterpret_cast<initproc>(&obj_<% name %>_init);<@ endif @>
-<@ if new_init or not initcode @>    type->tp_new = &obj_<% name %>_new;<@ endif @>
+==     if '__iter__' in specialmethods
+    type->tp_iter = reinterpret_cast<getiterfunc>(&obj_<% name %>___iter__);
+==     endif
+==     if 'next' in specialmethods
+    type->tp_iter = reinterpret_cast<iternextfunc>(&obj_<% name %>_next);
+==     endif
+==     if initcode
+    type->tp_init = reinterpret_cast<initproc>(&obj_<% name %>_init);
+==     endif
+==     if newinitcode or not initcode
+    type->tp_new = &obj_<% name %>_new;
+==     endif
 ==     if gc
     type->tp_traverse = reinterpret_cast<traverseproc>(&obj_<% name %>_traverse);
 ==     endif
@@ -547,7 +558,7 @@ PyTypeObject obj_<% name %>Type = {
     <@if instance_dict @>offsetof(obj_<% name %>,idict)<@ else @>0<@ endif @>, /* tp_dictoffset */
     <@ if initcode @>reinterpret_cast<initproc>(&obj_<% name %>_init)<@ else @>0<@ endif @>, /* tp_init */
     0,                         /* tp_alloc */
-    <@ if new_init or not initcode @>&obj_<% name %>_new<@ else @>0<@ endif @> /* tp_new */
+    <@ if newinitcode or not initcode @>&obj_<% name %>_new<@ else @>0<@ endif @> /* tp_new */
 };
 == endif
 ''')

@@ -581,6 +581,7 @@ class SpecialMethod(TypedMethodDef):
     def call_code_cast(self,conv,ov,t):
         cc = self.call_code_mid(conv,ov)
         cc.code = 'return static_cast<{0}>({1});'.format(t,cc.code)
+        return cc
 
     def call_code(self,conv,ov):
         if self.rettype == SF_RET_INT or self.rettype == SF_RET_INT_BOOL:
@@ -679,9 +680,9 @@ class TypedInitDef:
                 else:
                     raise SpecificationError('There is more than one constructor and there is no default. An overload must be specified in the spec file.')
 
-    def output(self,conv,typestr):
-        cc = 'new(addr) {0}({{0}}); return 0;'.format(typestr)
-        return conv.function_call([(CallCode(cc,call_code_binds(ov)),ov.args) for ov in self.overloads],'-1',True)
+    def output(self,conv,typestr,addr,errval):
+        cc = 'new({0}) {1}({{0}}); goto success;'.format(addr,typestr)
+        return conv.function_call([(CallCode(cc,call_code_binds(ov)),ov.args) for ov in self.overloads],errval,True)
 
 class PropertyDef:
     def __init__(self,name,get=None,set=None):
@@ -890,11 +891,11 @@ class QualifiedField(object):
         self.offset = offset
 
 class ClassDef:
-    def __init__(self,name,type,new_initializes=False,instance_dict=True,weakref=True,use_gc=True,gc_include=None,gc_ignore=None):
+    def __init__(self,name,type,instance_dict=True,weakref=True,use_gc=True,gc_include=None,gc_ignore=None):
         self.name = name
         self.type = type
-        self.new_initializes = new_initializes
         self.constructor = None
+        self.newconstructor = None
         self.methods = MethodDict()
         self.properties = []
         self.vars = []
@@ -1027,11 +1028,6 @@ class QualifiedFieldHandling(object):
     def from_field(field,handle_gc=None):
         return QualifiedFieldHandling(field.name,field.type,None,field.offset,None,handle_gc)
 
-class TypeMismatch(Error):
-    pass
-
-class RedundantSpecification(Error):
-    pass
 
 def check_base_handler(fields,f,handle):
     """Check if the base handler is still usable and remove it if not.
@@ -1045,16 +1041,16 @@ def check_base_handler(fields,f,handle):
     if b_handler:
         if f.handle_gc == GC_FUNCTION:
             if handle == GC_IGNORE:
-                emit_warning(SpecificationError(
+                emit_warning(WARN_MINOR,
                     ('"{0}" is a member of a base class that uses '+
                     '<gc-handler>. Ignoring it here has no effect.')
-                    .format(f.name)))
+                    .format(f.name))
             elif handle == GC_INCLUDE:
-                emit_warning(SpecificationError(
+                emit_warning(WARN_NORMAL,
                     ('"{0}" is a member of a base class that uses '+
                     '<gc-handler>. If the member is handled by the base class,'+
                     'including it here will cause it to be handled twice.')
-                    .format(f.name)))
+                    .format(f.name))
         elif handle == GC_IGNORE and f.handle_gc == GC_INCLUDE:
             for field in recursive_qf_fields(fields):
                 if field.base_handler == handler:
@@ -1065,7 +1061,7 @@ def qf_handle(fields,target,handle):
 
     for i,f in enumerate(fields):
         if target.offset < f.offset:
-            raise TypeMismatch('"{0}" does not correspond to a defined field'.format(target.name))
+            raise SpecificationError('"{0}" does not correspond to a defined field'.format(target.name))
 
         if f.offset == target.offset:
             if target.type.size < f.type.size:
@@ -1075,21 +1071,21 @@ def qf_handle(fields,target,handle):
             if i+1 == len(fields) or target.end_offset <= fields[i+1].offset:
                 if f.type != target.type:
                     # TODO: don't emit this warning for proper union members
-                    emit_warning(TypeMismatch('Field "{0}" is of type "{1}" but is cast as "{2}"'.format(f.name,f.typestr(),target.type.typestr())))
+                    emit_warning(WARN_NORMAL,'Field "{0}" is of type "{1}" but is cast as "{2}"'.format(f.name,f.typestr(),target.type.typestr()))
                 check_base_handler(fields,f,handle)
                 if f.handle_gc == handle:
-                    emit_warning(RedundantSpecification(('Field "{0}" was already included' if handle else 'Field "{0}" was already ignored').format(f.name)))
+                    emit_warning(WARN_NORMAL,('Field "{0}" was already included' if handle else 'Field "{0}" was already ignored').format(f.name))
                 f.handle_gc = handle
                 break
 
-            raise TypeMismatch('"{0}" overlaps two or more defined fields'.format(target.name))
+            raise SpecificationError('"{0}" overlaps two or more defined fields'.format(target.name))
         
         if target.end_offset <= f.end_offset:
             qf_handle(f.components,target,handle)
             break
     else:
         # this might mean we are dealing with a variable-sized type
-        emit_warning(TypeMismatch('"{0}" is farther than any defined field'.format(target.name)))
+        emit_warning(WARN_NORMAL,'"{0}" is farther than any defined field'.format(target.name))
         fields.append(QualifiedFieldHandling.from_field(target))
 
 
@@ -1116,7 +1112,7 @@ class TypedClassDef:
         self.name = classdef.name
         self.uniquenum = classdef.uniquenum
         self.type,self.gc_include,self.gc_ignore = classdef.get_types(tns)
-        self.new_initializes = classdef.new_initializes
+        self.newconstructor = classdef.newconstructor and TypedInitDef(self.type,classdef.newconstructor,tns)
         self._instance_dict = classdef.instance_dict
         self._weakref = classdef.weakref
         self._use_gc = classdef.use_gc
@@ -1125,7 +1121,9 @@ class TypedClassDef:
         if not isinstance(self.type,gccxml.CPPClass):
             raise SpecificationError('"{0}" is not a class or struct'.format(classdef.type))
 
-        self.constructor = None if classdef.constructor is NoInit else TypedInitDef(self.type,classdef.constructor,tns)
+        self.constructor = None
+        if not ((classdef.newconstructor and not classdef.constructor) or classdef.constructor is NoInit):
+            self.constructor = TypedInitDef(self.type,classdef.constructor,tns)
 
         # TODO: allow this by putting the function call inside ob_<name>_dealloc
         if '__del__' in classdef.methods.data:
@@ -1133,6 +1131,9 @@ class TypedClassDef:
 
         if '__init__' in classdef.methods.data:
             raise SpecificationError('__init__ cannot be defined using <def>. Use <init>.')
+
+        if '__new__' in classdef.methods.data:
+            raise SpecificationError('__new__ cannot be defined using <def>. Use <new>.')
 
         BinaryIOpMethod = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,defretsemantic=RET_SELF)
         TernaryIOpMethod = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,defretsemantic=RET_SELF)
@@ -1160,7 +1161,6 @@ class TypedClassDef:
 
         self.special_methods = {}
         for key,mtype in (
-            ('__new__',          KeywordArgs), # tp_new
             ('__repr__',         NoArgs), # tp_repr
             ('__str__',          NoArgs), # tp_str
             ('__lt__',           OneArg), # tp_richcompare
@@ -1283,7 +1283,7 @@ class TypedClassDef:
         return self.has_multi_inherit_subclass() or self.indirect_features()
 
     def uninstantiatable(self):
-        return (not self.constructor) and any(pure_virtual(m) for m in self.type.members)
+        return (not (self.constructor or self.newconstructor)) and any(pure_virtual(m) for m in self.type.members)
 
     def findbases(self,classdefs):
         assert len(self.bases) == 0
@@ -1308,7 +1308,7 @@ class TypedClassDef:
         function to know when it must not call the destructor.
 
         """
-        if (not self.needs_mode_var) and (self.features or not (self.new_initializes and self.no_destruct)):
+        if (not self.needs_mode_var) and (self.features or not (self.newconstructor and self.no_destruct)):
             self.propogate_needs_mode_var()
 
     def propogate_needs_mode_var(self):
@@ -1323,7 +1323,7 @@ class TypedClassDef:
             name = self.name,
             uninstantiatable = self.uninstantiatable(),
             features = self.indirect_features(),
-            new_init = self.new_initializes)
+            new_init = bool(self.newconstructor))
 
     def get_base_func(self,module):
         """Generate the get_base_X(PyObject o) function.
@@ -1606,9 +1606,9 @@ class TypedClassDef:
             if out.conv.gcvarhandler(self.type):
                 gc_vars.append(('base',self.type))
                 if self.gc_include:
-                    emit_warning(SpecificationError('gc-include is ignored because <gc-handler> is defined for this type'))
+                    emit_warning(WARN_NORMAL,'gc-include is ignored because <gc-handler> is defined for this type')
                 if self.gc_ignore:
-                    emit_warning(SpecificationError('gc-ignore is ignored because <gc-handler> is defined for this type'))
+                    emit_warning(WARN_NORMAL,'gc-ignore is ignored because <gc-handler> is defined for this type')
                 
                 for f in recursive_qf_fields(self.gc_fields):
                     f.handle_gc = GC_FUNCTION
@@ -1625,7 +1625,7 @@ class TypedClassDef:
                         if not conv.gcvarhandler(f.type):
                             raise SpecificationError('There is no rule specifying how to garbage-collect an instance of "{0}". Please add one using <gc-handler>.'.format(f.type))
                         if any(sub_f.handle_gc == GC_INCLUDE for sub_f in recursive_qf_fields(f.components)):
-                            emit_warning(RedundantSpecification('both "{0}" and one of its fields/items ("{1}") are marked as requiring garbage collection'.format(f.name,sub_f.name)))
+                            emit_warning(WARN_NORMAL,'both "{0}" and one of its fields/items ("{1}") are marked as requiring garbage collection'.format(f.name,sub_f.name))
                         #if f.access != gccxml.ACCESS_PUBLIC:
                         #    raise SpecificationError('"{0}" cannot be accessed for garbage collection because it is not public')
                         gc_vars.append(('base.'+f.name,f.type))
@@ -1642,10 +1642,10 @@ class TypedClassDef:
                         if f.access == gccxml.ACCESS_PUBLIC:
                             gc_vars.append(('base.'+f.name,f.type))
                         else:
-                            emit_warning(SpecificationError(
+                            emit_warning(WARN_MINOR,
                                 ('"{0}" may need garbage collection but cannot be '+
                                 'accessed because it is not public. Add "{0}" to ' +
-                                'gc-ignore to prevent this warning.').format(f.name)))
+                                'gc-ignore to prevent this warning.').format(f.name))
 
 
             if self._instance_dict or gc_vars:
@@ -1667,13 +1667,13 @@ class TypedClassDef:
                         if c:
                             clear.append(c.format(name))
 
-                    if not self.new_initializes:
+                    if not self.newconstructor:
                         t_body += '    if(self->mode) {\n'
 
                     t_body += getbase
                     t_body += ''.join(traverse)
 
-                    if not self.new_initializes:
+                    if not self.newconstructor:
                         t_body += '    }\n'
 
 
@@ -1681,13 +1681,13 @@ class TypedClassDef:
                     c_body += tmpl.clear_pyobject.format('self->idict')
 
                 if clear:
-                    if not self.new_initializes:
+                    if not self.newconstructor:
                         c_body += '    if(self->mode) {\n'
 
                     c_body += getbase
                     c_body += ''.join(clear)
 
-                    if not self.new_initializes:
+                    if not self.newconstructor:
                         c_body += '    }\n'
 
 
@@ -1751,7 +1751,7 @@ class TypedClassDef:
                 name = self.name,
                 destructor = destructor,
                 features = self.features,
-                new_init = self.new_initializes,
+                new_init = bool(self.newconstructor),
                 instance_dict = self.instance_dict(),
                 weakref = self.weakref()),
 
@@ -1763,7 +1763,6 @@ class TypedClassDef:
             destructor = destructor,
             uninstantiatable = self.uninstantiatable(),
             bool_arg_get = self.has_multi_inherit_subclass(),
-            new_init = self.new_initializes,
             dynamic = self.dynamic,
             features = self.features,
             constructors = self.constructor_args(),
@@ -1848,9 +1847,9 @@ class TypedClassDef:
             name = self.name,
             type = typestr,
             features = self.features,
-            new_init = self.constructor and self.new_initializes,
+            newinitcode = self.newconstructor and self.newconstructor.output(out.conv,typestr,'&ptr->base','0'),
             destructor = destructor,
-            initcode = self.constructor and self.constructor.output(out.conv,typestr),
+            initcode = self.constructor and self.constructor.output(out.conv,typestr,'addr','-1'),
             module = module.name,
             doc = self.doc,
             getsetref = getsetref,
@@ -2166,7 +2165,7 @@ class ModuleDef:
             classes = [{
                 'name' : c.name,
                 'dynamic' : c.dynamic,
-                'new_init' : c.new_initializes,
+                'new_init' : bool(c.newconstructor),
                 'no_init' : not c.constructor,
                 'base' : c.static_from_dynamic and c.bases[0].name}
                     for c in classes],
@@ -2566,7 +2565,6 @@ class tag_Class(tag):
         self.r = ClassDef(
             get_valid_py_ident(args.get('name'),t),
             t,
-            parse_bool(args,'new-initializes'),
             parse_bool(args,'instance-dict',True),
             parse_bool(args,'weakrefs',True),
             parse_bool(args,'use-gc',True),
@@ -2584,6 +2582,11 @@ class tag_Class(tag):
 
         if self.r.constructor: join_func(self.r.constructor,data)
         else: self.r.constructor = data
+
+    @tag_handler('new',tag_Init)
+    def handle_new(self,data):
+        if self.r.newconstructor: join_func(self.r.newconstructor,data)
+        else: self.r.newconstructor = data
 
     @tag_handler('doc',tag_Doc)
     def handle_doc(self,data):

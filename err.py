@@ -1,7 +1,7 @@
 import sys
 
 
-__all__ = 'Error','SpecificationError','emit_warning'
+__all__ = 'Error','SpecificationError','WARN_ERROR','WARN_NORMAL','WARN_MINOR','emit_warning'
 
 
 class Error(Exception):
@@ -25,10 +25,16 @@ class SpecificationError(Error):
         return 'Specification Error: ' + super(SpecificationError,self).__str__()
 
 
-warnings_are_errors = False
+WARN_ERROR = 3 # it's wrong but we can still generate the code
+WARN_NORMAL = 2 # probably a mistake
+WARN_MINOR = 1 # could be a mistake
 
-def emit_warning(exc):
-    if warnings_are_errors:
-        raise exc
+error_level = WARN_ERROR
+ignore_level = 0
 
-    print >> sys.stderr, exc
+def emit_warning(level,msg):
+    if level >= error_level:
+        raise SpecificationError(msg)
+
+    if level > ignore_level:
+        print >> sys.stderr, 'Warning: '+msg
