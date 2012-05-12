@@ -273,7 +273,7 @@ equivalent:
 ~             __invert__
 ============= ================
 
-One of ``func`` or ``assign-to`` needs to be defined, but not both.
+One and only one of ``func`` or ``assign-to`` needs to be defined.
 ]]>
       </xsd:documentation>
     </xsd:annotation>
@@ -342,7 +342,7 @@ pointer to the class, in order to keep the class alive while the reference
 exists. "self" means ignore the return value and return what would be the "self"
 argument in Python.
 
-For __iop__ methods, the default is "self".
+For ``__iop__`` methods, the default is "self".
           </xsd:documentation>
         </xsd:annotation>
       </xsd:attribute>
@@ -408,6 +408,17 @@ the same as that of the constructor.
 If supplied, the constructor will receive the ``self`` pointer, or type
 ``PyObject*``. The value specifies the index (starting at 1) of the argument to
 receive the pointer.
+        </xsd:documentation>
+      </xsd:annotation>
+    </xsd:attribute>
+
+    <xsd:attribute name="func" type="symbol">
+      <xsd:annotation>
+        <xsd:documentation>
+If specified, the given function is used to initialize the class instead of the
+constructor. The first argument (or second argument if ``self-arg`` is 1) must
+take a pointer to the class. The function will be given a zero-filled region of
+memory where the class is to be written.
         </xsd:documentation>
       </xsd:annotation>
     </xsd:attribute>
@@ -554,7 +565,7 @@ Specifies whether to support weak references (``__weakref__``). The default is
           <xsd:documentation>
 Specifies whether to support cyclic garbage collection. If true, the "traverse"
 and "clear" functions are generated for this class, handling the instance
-dictionary and any fields of type ``PyObject*`` or a type specified by
+dictionary and any public fields of type ``PyObject*`` or a type specified by
 ``&lt;gc-handler&gt;``. Fields can be omitted from the traverse and clear
 functions using ``gc-ignore``.
 

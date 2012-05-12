@@ -91,8 +91,7 @@ class TestCompile(unittest.TestCase):
 
             spec = espec.getspec('spec.xml')
             spec.name = self.modname() # give the new module a unique name
-            expose.generate_intermediate(spec,'gccxml.interm','.',None,'g++',gccxml_flags)
-            expose.generate_module(spec,'gccxml.interm','.')
+            expose.generate_module(spec,'.',None,'g++',gccxml_flags)
 
             self.comp = distutils.ccompiler.new_compiler()
             distutils.sysconfig.customize_compiler(self.comp)
@@ -1344,6 +1343,35 @@ class TestSelfArg(TestCompile):
         tm = self.compile()
         thing = tm.Thing(1,2,3)
         self.assertTrue(thing.check_self('1','2','3'))
+
+
+class TestNonInPlaceConstructor(TestCompile):
+    header_file = '''
+        struct Thing {
+            int a, b;
+        };
+
+        void create_thing(Thing* t,int a,int b) {
+            t->a = a;
+            t->b = b;
+        }
+'''
+
+    spec_file = '''
+        <module name="testmodule" include="main.h">
+            <class type="Thing">
+                <init func="create_thing"/>
+                <attr cmember="a"/>
+                <attr cmember="b"/>
+            </class>
+        </module>
+'''
+
+    def runTest(self):
+        tm = self.compile()
+        thing = tm.Thing(5,-2)
+        self.assertEqual(thing.a,5)
+        self.assertEqual(thing.b,-2)
 
 
 

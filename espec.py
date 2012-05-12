@@ -64,11 +64,7 @@ class Scope(object):
 
 
 def get_unique_num():
-    """Generates a unique number.
-
-    This is used by ClassDef and others to generate unique C++ identifiers.
-
-    """
+    """This is used by ClassDef and others to generate unique C++ identifiers"""
     get_unique_num.nextnum += 1
     return get_unique_num.nextnum
 get_unique_num.nextnum = 0
@@ -89,9 +85,9 @@ def forwarding_arg_vals(args):
 def has_trivial_destructor(x):
     if not isinstance(x,gccxml.CPPClass): return True
     d = x.getDestructor()
-    return (d is None or d.artificial) and \
-        all(has_trivial_destructor(m) for m in x.members) and \
-        all(has_trivial_destructor(b.type) for b in x.bases)
+    return ((d is None or d.artificial) and
+        all(has_trivial_destructor(m) for m in x.members) and
+        all(has_trivial_destructor(b.type) for b in x.bases))
 
 
 class MultiInheritNode:
@@ -188,7 +184,7 @@ class CallCode(object):
     def output(self,args,ind):
         args = list(args)
         for i,val in self.binds:
-            args.insert(i,val)
+            args.insert(i,str(val))
 
         joinargs = lambda _args: ','.join('\n'+ind+a for a in _args)
         if self.divided:
@@ -298,6 +294,14 @@ def append_except(f):
             raise
     return wrapper
 
+def check_callable(items):
+    # if the first one is a function, they all should be functions
+    if not isinstance(items[0],(gccxml.CPPFunction,gccxml.CPPMethod)):
+        raise SpecificationError('"{0}" is not a function or method'.format(items[0].full_name))
+    assert all(isinstance(f,(gccxml.CPPFunction,gccxml.CPPMethod)) for f in items)
+
+    return items
+
 class TypedDefDef(object):
     what = 'function'
 
@@ -311,12 +315,7 @@ class TypedDefDef(object):
             extratest = always_true
             if ov.arity is not None:
                 extratest = lambda x: mandatory_args(x) <= ov.arity <= len(x.args)
-            cf = scope.find(ov.func,extratest)
-
-            # if the first one is a function, they all should be functions
-            if not isinstance(cf[0],(gccxml.CPPFunction,gccxml.CPPMethod)):
-                raise SpecificationError('"{0}" is not a function or method'.format(cf[0]))
-            assert all(isinstance(f,(gccxml.CPPFunction,gccxml.CPPMethod)) for f in cf)
+            cf = check_callable(scope.find(ov.func,extratest))
 
             # if there is more than one result, remove the const methods
             if len(cf) > 1:
@@ -657,22 +656,47 @@ class BinaryROpMethod(SpecialMethod):
         ov.bind(1,'&base' if isinstance(ov.func.args[1].type,gccxml.CPPPointerType) else 'base')
 
 
+class AddrVar(object):
+    value = None
+    def __str__(self):
+        assert self.value is not None
+        return self.value
+
 class TypedInitDef:
     def __init__(self,scope,idef,tns):
         self.doc = None
         self.overloads = []
+        self.addr_var = AddrVar()
 
         cons = [con for con in scope.members if isinstance(con,gccxml.CPPConstructor) and con.access == gccxml.ACCESS_PUBLIC]
         if idef:
             self.doc = idef.doc
-            for ov in idef.overloads:
-                self.overloads.extend(choose_overload(ov,cons,tns))
+            key = lambda x: x.func
+            for f,overloads in itertools.groupby(sorted(idef.overloads,key=key),key=key):
+                candidates = cons
+                if f:
+                    candidates = check_callable(scope.find(f))
+                    if any(isinstance(c,gccxml.CPPMethod) and not c.static for c in candidates):
+                        raise SpecificationError('"{0}" cannot be used by <init> because it is a non-static member function'.format(c[0].full_name))
+
+                for ov in overloads:
+                    newo = choose_overload(ov,candidates,tns)
+                    if f:
+                        for o in newo:
+                            if not (o.args and 
+                                    isinstance(o.args[0].type,gccxml.CPPPointerType) and
+                                    o.args[0].type.type == scope):
+                                raise SpecificationError('The first argument (or second argument if "self-arg" is 1) of "{0}" must be of type {1}'.format(f.full_name,gccxml.CPPPointerType(scope)))
+                            o.bind(0,self.addr_var)
+                    self.overloads.extend(newo)
         else:
             realconstructs = [c for c in cons if not c.artificial]
             if len(realconstructs) == 1:
                 self.overloads = [TypedOverload(realconstructs[0])]
             else:
-                # if there is more than one constructor and an overload wasn't specified, look for one with no arguments (the default constructor)
+                # if there is more than one constructor and an overload wasn't
+                # specified, look for one with no arguments (the default
+                # constructor)
                 for c in cons:
                     if not c.args:
                         self.overloads = [TypedOverload(c)]
@@ -681,8 +705,15 @@ class TypedInitDef:
                     raise SpecificationError('There is more than one constructor and there is no default. An overload must be specified in the spec file.')
 
     def output(self,conv,typestr,addr,errval):
-        cc = 'new({0}) {1}({{0}}); goto success;'.format(addr,typestr)
-        return conv.function_call([(CallCode(cc,call_code_binds(ov)),ov.args) for ov in self.overloads],errval,True)
+        self.addr_var.value = addr
+        inplace_c = 'new({0}) {1}({{0}}); goto success;'.format(addr,typestr)
+        func_c = '{0}({{0}}); goto success;'
+        return conv.function_call(
+            [(CallCode(
+                inplace_c if isinstance(ov.func,gccxml.CPPConstructor) else func_c.format(ov.func.full_name),
+                call_code_binds(ov)),ov.args
+              ) for ov in self.overloads],errval,True)
+
 
 class PropertyDef:
     def __init__(self,name,get=None,set=None):
@@ -920,7 +951,7 @@ class ClassDef:
         if self.gc_include: fields.extend(self.gc_include)
         if self.gc_ignore: fields.extend(self.gc_ignore)
         for i,f in enumerate(fields):
-            print >> outfile, field_offset_and_type.format(self.uniquenum,i,f)
+            print >> outfile, tmpl.field_offset_and_type.format(self.uniquenum,i,f)
 
         for m in self.methods.itervalues():
             m.gccxml_input(outfile)
@@ -1641,11 +1672,12 @@ class TypedClassDef:
                         # True).
                         if f.access == gccxml.ACCESS_PUBLIC:
                             gc_vars.append(('base.'+f.name,f.type))
-                        else:
-                            emit_warning(WARN_MINOR,
-                                ('"{0}" may need garbage collection but cannot be '+
-                                'accessed because it is not public. Add "{0}" to ' +
-                                'gc-ignore to prevent this warning.').format(f.name))
+                        # this doesn't work because of the way members are compared
+                        #else:
+                        #    emit_warning(WARN_MINOR,
+                        #        ('"{0}" may need garbage collection but cannot be '+
+                        #        'accessed because it is not public. Add "{0}" to ' +
+                        #        'gc-ignore to prevent this warning.').format(f.name))
 
 
             if self._instance_dict or gc_vars:
@@ -2252,14 +2284,21 @@ def stripsplit(x):
 
 def parse_self_arg(args):
     sa = parse_nonneg_int(args,'self-arg')
+    if sa is not None:
+        if sa < 1:
+            raise SpecificationError('"self-arg" must be at least 1 (where 1 means the first argument)')
+        return {(sa-1): ('reinterpret_cast<PyObject*>(self)',{'attribute':'self-arg'})}
 
-    return sa if sa is None else {(sa-1): ('reinterpret_cast<PyObject*>(self)',{'attribute':'self-arg'})}
+    return None
 
 
 class tag_Init(tag):
     def __init__(self,args):
         self.r = DefDef()
-        self.r.overloads.append(Overload(args=args.get("overload"),binds=parse_self_arg(args)))
+        self.r.overloads.append(Overload(
+            args.get('func'),
+            args=args.get('overload'),
+            binds=parse_self_arg(args)))
         
 
 class tag_ToFromPyObject(tag):
@@ -2557,7 +2596,7 @@ class tag_Def(tag):
 
 def parse_gc_list(args,name):
     gc = args.get(name)
-    return gc and map(str.trim,gc.split(';'))
+    return gc and [item.strip() for item in gc.split(';')]
 
 class tag_Class(tag):
     def __init__(self,args):
