@@ -141,7 +141,7 @@ class Output:
 
 
 class Overload:
-    def __init__(self,func=None,retsemantic=None,args=None,static=False,arity=None,assign=False,bridge_virt=True,binds=None):
+    def __init__(self,func=None,retsemantic=None,args=None,static=False,arity=None,assign=False,bridge_virt=True,binds=None,raw=False):
         self.func = func
         self.retsemantic = retsemantic
         self.args = args
@@ -151,6 +151,7 @@ class Overload:
         self.bridge_virt = bridge_virt
         self.binds = binds or {}
         self.uniquenum = get_unique_num()
+        self.raw = raw
 
     def gccxml_input(self,outfile):
         if self.args:
@@ -215,6 +216,7 @@ class TypedOverload:
         self.bridge_virt = overload.bridge_virt if overload else False
         self._returns = None
         self.assign = overload and overload.assign
+        self.raw = overload and overload.raw
 
         if overload:
             for i,b in overload.binds.items():
@@ -253,6 +255,10 @@ class TypedOverload:
     def returns(self):
         return self._returns or self.func.returns
 
+    @property
+    def name(self):
+        return self.func.canon_name
+
     def can_accept(self,args):
         if not (mandatory_args(self) <= args <= len(self.args)):
             needed = args
@@ -260,9 +266,10 @@ class TypedOverload:
                 if a.val: needed += 1
             if self.assign: needed -= 1
             raise SpecificationError(
-                '"{0}" must take {1} argument(s)'.format(
-                    self.func.canon_name,
-                    needed))
+                '"{0}" must take {1} argument(s)'.format(self.name,needed))
+
+    def has_bind(self):
+        return self.argbinds and any(a.val for a in self.argbinds)
 
 def call_code_binds(overload):
     return [(i,argbind.val) for i,argbind in enumerate(overload.argbinds) if argbind.val]
@@ -302,6 +309,35 @@ def check_callable(items):
 
     return items
 
+
+def function_call_var_args(conv,overloads,raw_overload,make_cc,use_kwds,errval='0'):
+    argss = [(make_cc(conv,ov),ov.args) for ov in overloads]
+    if raw_overload:
+        ind = tmpl.Tab(2)
+        vars = ['args']
+        if use_kwds:
+            vars.append('kwds')
+
+            # if overloaded functions are made to be able to accept keywords,
+            # this assertion will be able to fail and this method will need to
+            # be updated
+            assert mandatory_args(raw_overload) <= 2 <= len(raw_overload.args)
+
+        r = make_cc(conv,raw_overload).output(vars,ind)
+        if argss:
+            if use_kwds:
+                r = (ind.line('if(!(kwds && PyDict_Size(kwds))) {') +
+                     conv.function_call_fallthrough(argss,ind+1) +
+                     ind.line('}') + r)
+            else:
+                r = conv.function_call_fallthrough(argss,ind) + r
+    else:
+        assert overloads
+        r = conv.function_call(argss,errval,use_kwds)
+
+    return r
+
+
 class TypedDefDef(object):
     what = 'function'
 
@@ -310,6 +346,7 @@ class TypedDefDef(object):
         self.name = defdef.name
         self.doc = defdef.doc
         self.overloads = []
+        self.raw_overload = None
 
         for ov in defdef.overloads:
             extratest = always_true
@@ -322,11 +359,18 @@ class TypedDefDef(object):
                 newcf = [f for f in cf if not getattr(f,'const',False)]
                 if newcf: cf = newcf
 
-            self.overloads.extend(choose_overload(ov,cf,tns))
+            tovs = choose_overload(ov,cf,tns)
+            for tov in tovs:
+                if tov.raw:
+                    if self.raw_overload:
+                        emit_warning(WARN_ERROR,'"{0}" has more than one <raw-def> defined'.format(self.name))
+                    self.raw_overload = tov
+                else:
+                    self.overloads.append(tov)
 
 
     def call_code_base(self,ov):
-        return ov.func.canon_name
+        return ov.name
 
     def topy(self,conv,t,retsemantic):
         return conv.topy(t,retsemantic)
@@ -345,57 +389,83 @@ class TypedDefDef(object):
     def call_code(self,conv,ov):
         cc = self.call_code_mid(conv,ov)
         cc.code = (cc.code + '; Py_RETURN_NONE;' if ov.returns == conv.void else
-            'return {0};'.format(self.topy(conv,ov.returns,ov.retsemantic).format(cc.code)))
+            'return {0};'.format(conv.topy(ov.returns,ov.retsemantic).format(cc.code)))
         return cc
 
     def make_argss(self,conv):
         return [(self.call_code(conv,ov),ov.args) for ov in self.overloads]
 
-    def check_args_ret(self,conv):
-        # this gets overridden by SpecialMethod
-        pass
-
     def function_call_var_args(self,conv,use_kwds,errval='0'):
-        self.check_args_ret(conv)
-        return conv.function_call(self.make_argss(conv),errval,use_kwds)
+        return function_call_var_args(
+            conv,
+            self.overloads,
+            self.raw_overload,
+            self.call_code,
+            use_kwds,
+            errval)
+
+    def function_call_var_args_fallthrough(self,conv,ind=tmpl.Tab(2)):
+        assert self.raw_overload is None
+        return conv.function_call_fallthrough(self.make_argss(conv),ind)
 
     def function_call_1arg(self,conv,ind=tmpl.Tab(2),var='arg',errval='0'):
-        self.check_args_ret(conv)
-        return conv.function_call_narg(self.make_argss(conv),[var],errval,ind)
-
-    def function_call_narg_fallthrough(self,conv,vars,ind=tmpl.Tab(2)):
-        self.check_args_ret(conv)
-        return conv.function_call_narg_fallthrough(self.make_argss(conv),vars,ind)
-
-    def function_call_narg(self,conv,vars,ind=tmpl.Tab(2),errval='0'):
-        self.check_args_ret(conv)
-        return conv.function_call_narg(self.make_argss(conv),vars,errval,ind)
+        return self.function_call_narg(conv,[var],ind,errval)
 
     def function_call_1arg_fallthrough(self,conv,ind=tmpl.Tab(2),var='arg'):
-        self.check_args_ret(conv)
-        return conv.function_call_narg_fallthrough(self.make_argss(conv),[var],ind)
+        return self.function_call_narg_fallthrough(conv,[var],ind)
+
+    def function_call_narg(self,conv,vars,ind=tmpl.Tab(2),errval='0'):
+        if self.raw_overload:
+            r = self.call_code(conv,self.raw_overload).output(vars,ind)
+            if self.overloads:
+                r = conv.function_call_narg_fallthrough(self.make_argss(conv),vars,ind) + r
+        else:
+            assert self.overloads
+            r = conv.function_call_narg(self.make_argss(conv),vars,errval,ind)
+
+        return r
+
+    def function_call_narg_fallthrough(self,conv,vars,ind=tmpl.Tab(2)):
+        assert self.raw_overload is None
+        return conv.function_call_narg_fallthrough(self.make_argss(conv),vars,ind)
 
     def function_call_0arg(self,conv,ind=tmpl.Tab(2)):
-        self.check_args_ret(conv)
-        assert len(self.overloads) == 1
-        return ind.line(self.call_code(conv,self.overloads[0]).output([],ind))
+        # without arguments, there is no difference between <def> and <raw-def>
+        assert (int(self.raw_overload is not None) + len(self.overloads)) == 1
+        return ind.line(
+            self.call_code(
+                conv,
+                self.overloads[0] if self.overloads else self.raw_overload
+            ).output([],ind))
 
     @append_except
     def _output(self,conv,prolog,type_extra,selfvar,funcnameprefix):
-        arglens = [len(ov.args) for ov in self.overloads]
-        maxargs = max(len(ov.args) for ov in self.overloads)
-        minargs = min(mandatory_args(ov.func) for ov in self.overloads)
+        raw_args = None
+        if self.raw_overload:
+            if accepts_args(self.raw_overload,[conv.pyobject,conv.pyobject]):
+                raw_args = 2
+            elif accepts_args(self.raw_overload,[conv.pyobject]):
+                raw_args = 1
+            else:
+                raise SpecificationError('"{0}" must take one or two instances of PyObject*'.format(self.raw_overload.func))
 
-        if maxargs == 0:
+        maxargs = None
+        minargs = None
+        if self.overloads:
+            maxargs = max(len(ov.args) for ov in self.overloads)
+            minargs = min(mandatory_args(ov.func) for ov in self.overloads)
+
+        if maxargs == 0 and raw_args is None:
             assert len(self.overloads) == 1
             type = 'METH_NOARGS'
             funcargs = ',PyObject *'
             code = self.function_call_0arg(conv)
-        elif maxargs == 1 and minargs == 1 and not self.overloads[0].args[0].name:
+        elif raw_args is None and maxargs == 1 and minargs == 1 and not self.overloads[0].args[0].name:
             type = 'METH_O'
             funcargs = ',PyObject *arg'
             code = self.function_call_1arg(conv)
-        elif len(self.overloads) == 1 and any(a.name for a in self.overloads[0].args): # is there a named argument?
+        elif raw_args == 2 or (len(self.overloads) == 1 and
+                    any(a.name for a in self.overloads[0].args)): # is there a named argument?
             type = 'METH_VARARGS|METH_KEYWORDS'
             funcargs = ',PyObject *args,PyObject *kwds'
             code = self.function_call_var_args(conv,True)
@@ -464,7 +534,7 @@ class TypedMethodDef(TypedDefDef):
             if ov.func.static:
                 return ov.func.full_name
 
-            f = ov.func.canon_name
+            f = ov.name
             if is_virtual(ov.func):
                 # don't bother calling the overridden method from X_virt_handler
                 f = self.classdef.type.typestr() + '::' + f
@@ -545,37 +615,45 @@ class SpecialMethod(TypedMethodDef):
     @staticmethod
     def check_static(ov):
         if not ov.func.static:
-            raise SpecificationError('"{0}" must be static'.format(ov.func.canon_name))
+            raise SpecificationError('"{0}" must be static'.format(ov.name))
 
     def check_args_ret(self,conv):
+        ovs = self.overloads[:]
+        if self.raw_overload: ovs.append(self.raw_overload)
         for ov in self.overloads:
             if self.argtype <= SF_TWO_ARGS:
                 ov.can_accept(self.argtype - 1)
             elif self.argtype == SF_COERCE_ARGS:
                 # no conversion is done
-                ov.can_accept(2)
-                t = cptr(cptr(gccxml.CPPBasicType('PyObject')))
-                if ov.args[0].type != t or ov.args[1].type != t:
-                    raise SpecificationError('"{0}" must accept 2 arguments of PyObject**'.format(ov.func.canon_name))
-                self.check_static(ov)
-            elif self.argtype == SF_TYPE_KEYWORD_ARGS:
-                # no conversion is done for the first arg
-                if len(ov.args) == 0:
-                    raise Specification('"{0}" must accept at least one argument'.format(ov.func.canon_name))
-                if ov.args[0].type != cptr(gccxml.CPPBasicType('PyTypeObject')):
-                    raise Specification('The first argument to "{0}" must be PyTypeObject*'.format(ov.func.canon_name))
+                t = cptr(conv.pyobject)
+                if not accepts_args(ov,[t,t]):
+                    emit_warning(WARN_ERROR,'"{0}" must accept 2 arguments of type PyObject**'.format(ov.name))
                 self.check_static(ov)
 
             if self.rettype in (SF_RET_INT,SF_RET_LONG,SF_RET_SSIZE):
                 if not ov.returns in conv.integers:
-                    if ov.assign:
-                        raise SpecificationError('The expression "({0}() = x)" must yield an integer type'.format(ov.func.canon_name))
-                    raise SpecificationError('"{0}" must return an integer type'.format(ov.func.canon_name))
+                    emit_warning(WARN_ERROR,(
+                        'The expression "({0}() = x)" must yield an integer type'
+                            if ov.assign else
+                        '"{0}" must return an integer type').format(ov.name))
             elif self.rettype == SF_RET_INT_BOOL:
                 if not (ov.returns in conv.integers or ov.returns == conv.bool):
-                    if ov.assign:
-                        raise SpecificationError('The expression "({0}() = x)" must yield an integer or bool type'.format(ov.func.canon_name))
-                    raise SpecificationError('"{0}" must return an integer or bool type'.format(ov.func.canon_name))
+                    emit_warning(WARN_ERROR,(
+                        'The expression "({0}() = x)" must yield an integer or bool type'
+                            if ov.assign else
+                        '"{0}" must return an integer or bool type').format(ov.name))
+
+        if self.raw_overload:
+            args = self.raw_overload.args
+            if self.argtype == SF_ONE_ARG:
+                # the number of arguments has already been checked
+                if args[0].type != conv.pyobject:
+                    emit_warning(WARN_ERROR,'"{0}" must accept an argument of type PyObject*'.format(self.raw_overload.name))
+            elif self.argtype == SF_TWO_ARGS or self.argtype == SF_KEYWORD_ARGS:
+                if not accepts_args(self.raw_overload,[conv.pyobject,conv.pyobject]):
+                    emit_warning(WARN_ERROR,'"{0}" must accept two arguments of type PyObject*'.format(self.raw_overload.name))
+            else:
+                assert False
 
     def call_code_cast(self,conv,ov,t):
         cc = self.call_code_mid(conv,ov)
@@ -602,6 +680,8 @@ class SpecialMethod(TypedMethodDef):
 
     @append_except
     def output(self,conv,ind=tmpl.Tab(2)):
+        self.check_args_ret(conv)
+
         errval = '-1'
         if self.rettype in (SF_RET_INT,SF_RET_INT_VOID,SF_RET_INT_BOOL):
             ret = 'int'
@@ -667,6 +747,7 @@ class TypedInitDef:
         self.doc = None
         self.overloads = []
         self.addr_var = AddrVar()
+        self.raw_overload = None
 
         cons = [con for con in scope.members if isinstance(con,gccxml.CPPConstructor) and con.access == gccxml.ACCESS_PUBLIC]
         if idef:
@@ -688,7 +769,13 @@ class TypedInitDef:
                                     o.args[0].type.type == scope):
                                 raise SpecificationError('The first argument (or second argument if "self-arg" is 1) of "{0}" must be of type {1}'.format(f.full_name,gccxml.CPPPointerType(scope)))
                             o.bind(0,self.addr_var)
-                    self.overloads.extend(newo)
+                    for o in newo:
+                        if o.raw:
+                            if self.raw_overload:
+                                emit_warning(WARN_ERROR,'class has more than one <raw-init> defined')
+                            self.raw_overload = o
+                        else:
+                            self.overloads.append(o)
         else:
             realconstructs = [c for c in cons if not c.artificial]
             if len(realconstructs) == 1:
@@ -708,11 +795,19 @@ class TypedInitDef:
         self.addr_var.value = addr
         inplace_c = 'new({0}) {1}({{0}}); goto success;'.format(addr,typestr)
         func_c = '{0}({{0}}); goto success;'
-        return conv.function_call(
-            [(CallCode(
-                inplace_c if isinstance(ov.func,gccxml.CPPConstructor) else func_c.format(ov.func.full_name),
-                call_code_binds(ov)),ov.args
-              ) for ov in self.overloads],errval,True)
+        make_cc = (lambda conv,ov: CallCode(
+            inplace_c
+                if isinstance(ov.func,gccxml.CPPConstructor) else
+            func_c.format(ov.func.full_name),
+            call_code_binds(ov)))
+
+        return function_call_var_args(
+            conv,
+            self.overloads,
+            self.raw_overload,
+            make_cc,
+            True,
+            errval)
 
 
 class PropertyDef:
@@ -1004,7 +1099,7 @@ def splitdefdef23code(defdef,conv,vars,ind=tmpl.Tab(2)):
             b.overloads.append(ov)
 
         if not inserted:
-            raise SpecificationError('"{0}" must take 1 or 2 arguments'.format(ov.func.canon_name))
+            raise SpecificationError('"{0}" must take 1 or 2 arguments'.format(ov.name))
 
     if not a.overloads: a = None
     if not b.overloads: b = None
@@ -2105,7 +2200,7 @@ class ModuleDef:
                         newm = False
                         newo = []
                         for o in m.overloads:
-                            if isinstance(o.func,gccxml.CPPMethod) and o.func.context is not d.type.find(o.func.canon_name)[0].context:
+                            if isinstance(o.func,gccxml.CPPMethod) and o.func.context is not d.type.find(o.name)[0].context:
                                 newm = True
                                 no = copy.copy(o)
                                 no.func = copy.copy(o.func)
@@ -2161,7 +2256,7 @@ class ModuleDef:
                 wrong_format(self.init[0])
 
             if f.returns == conv.sint:
-                init_pre = '    if(UNLIKELY({0}())) return;'.format(self.init[0])
+                init_pre = '    if(UNLIKELY({0}())) return INIT_ERR_VAL;'.format(self.init[0])
             elif f.returns == conv.void:
                 init_pre = '    {0}();'.format(self.init[0])
                 throw = can_throw(f)
@@ -2171,19 +2266,18 @@ class ModuleDef:
         if self.init[1]:
             f = unambiguous_func(scope,self.init[1])
 
-            # since the module init function doesn't have a return value and f
-            # is called at the end of the init function, we don't need to test
-            # f's return value
+            param = ''
             if accepts_args(f,[conv.pyobject]):
-                init_post = '    {0}(m);'.format(self.init[1])
-            elif accepts_args(f,[]):
-                init_post = '    {0}();'.format(self.init[1])
-            else:
+                param = 'm'
+            elif not accepts_args(f,[]):
                 wrong_format(self.init[1])
 
-            if f.returns == conv.void:
+            if f.returns == conv.sint:
+                init_post = '    if(UNLIKELY({0}({1}))) return INIT_ERR_VAL;'.format(self.init[1],param)
+            elif f.returns == conv.void:
+                init_post = '    {0}({1});'.format(self.init[1],param)
                 throw = throw and can_throw(f)
-            elif f.returns != conv.sint:
+            else:
                 wrong_format(self.init[1])
 
 
@@ -2293,12 +2387,13 @@ def parse_self_arg(args):
 
 
 class tag_Init(tag):
-    def __init__(self,args):
+    def __init__(self,args,raw=False):
         self.r = DefDef()
         self.r.overloads.append(Overload(
             args.get('func'),
             args=args.get('overload'),
-            binds=parse_self_arg(args)))
+            binds=parse_self_arg(args),
+            raw=raw))
         
 
 class tag_ToFromPyObject(tag):
@@ -2548,7 +2643,7 @@ def get_ret_semantic(args):
 
 
 class tag_Def(tag):
-    def __init__(self,args):
+    def __init__(self,args,raw=False):
         assign = False
         func = args.get('func')
         if func is None:
@@ -2561,12 +2656,7 @@ class tag_Def(tag):
                 raise ParseError('"func" and "assign-to" cannot be used together')
         self.r = DefDef(get_valid_py_ident(args.get('name'),func))
 
-        static = parse_bool(args,'static',None)
-        sa = parse_self_arg(args)
-        if sa is not None:
-            if static:
-                raise SpecificationError('"self-arg" is not available for static methods')
-            static = False
+        static,sa = tag_Def.get_static_and_selfarg(args)
 
         self.r.overloads.append(Overload(
             tag_Def.operator_parse(func),
@@ -2576,7 +2666,8 @@ class tag_Def(tag):
             parse_nonneg_int(args,'arity'),
             assign,
             parse_bool(args,'bridge-virtual',True),
-            sa))
+            sa,
+            raw))
 
 
     op_parse_re = re.compile(r'.*\boperator\b')
@@ -2588,6 +2679,16 @@ class tag_Def(tag):
         if m:
             return m.group(0) + ' ' + ''.join(x[m.end():].split())
         return x
+
+    @staticmethod
+    def get_static_and_selfarg(args):
+        static = parse_bool(args,'static',None)
+        sa = parse_self_arg(args)
+        if sa is not None:
+            if static:
+                raise SpecificationError('"self-arg" is not available for static methods')
+            static = False
+        return static,sa
 
     @tag_handler('doc',tag_Doc)
     def handle_doc(self,data):
@@ -2615,6 +2716,7 @@ class tag_Class(tag):
         raise SpecificationError("You can't have both <no-init> and <init>")
 
     @tag_handler('init',tag_Init)
+    @tag_handler('raw-init',tag_Init,True)
     def handle_init(self,data):
         if self.r.constructor is NoInit:
             tag_Class.noinit_means_noinit()
@@ -2623,6 +2725,7 @@ class tag_Class(tag):
         else: self.r.constructor = data
 
     @tag_handler('new',tag_Init)
+    @tag_handler('raw-new',tag_Init,True)
     def handle_new(self,data):
         if self.r.newconstructor: join_func(self.r.newconstructor,data)
         else: self.r.newconstructor = data
@@ -2640,6 +2743,7 @@ class tag_Class(tag):
         self.r.vars.append(data)
 
     @tag_handler('def',tag_Def)
+    @tag_handler('raw-def',tag_Def,True)
     def handle_def(self,data):
         add_func(self.r.methods,data)
 
@@ -2690,7 +2794,7 @@ class tag_GCHandler(tag):
         if self.traverse is None:
             raise SpecificationError('<traverse> must be defined for <gc-handler>')
         return self.type,self.traverse,self.clear
-
+            
 
 class tag_ModuleInit(tag):
     def __init__(self,args):
@@ -2708,6 +2812,7 @@ class tag_Module(tag):
         self.r.classes.append(data)
 
     @tag_handler('def',tag_Def)
+    @tag_handler('raw-def',tag_Def,True)
     def handle_def(self,data):
         add_func(self.r.functions,data)
 

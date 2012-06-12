@@ -26,13 +26,13 @@ class ArgProxy(object):
         return key in self.args
 
 
-def tag_handler(tagname,tagclass):
+def tag_handler(tagname,tagclass,*args,**kwds):
     def inner(func):
         th = getattr(func,'_tag_handler',None)
         if not th:
             th = []
             func._tag_handler = th
-        th.append((tagname,tagclass))
+        th.append((tagname,tagclass,args,kwds))
         return func
     return inner
 
@@ -52,8 +52,8 @@ class TagMeta(type):
         for func in dct.itervalues():
             h = getattr(func,'_tag_handler',None)
             if h:
-                for tagname,tagclass in h:
-                    handlers[tagname] = tagclass,func
+                for tagname,tagclass,args,kwds in h:
+                    handlers[tagname] = tagclass,func,args,kwds
 
 
 class tag(object):
@@ -83,14 +83,17 @@ def parse(path,toplevelname,toplevel):
         e.info['file'] = path
         e.info['line #'] = p.CurrentLineNumber
 
-    def start_tag(name,args):
+    def start_tag(name,attr):
         handlers = getattr(stack[-1][0].__class__,'tag_handlers',{})
         try:
-            c,f = handlers[name]
+            h = handlers[name]
+            c,f = h[0:2]
+            args = h[2] if len(h) > 2 else []
+            kwds = h[3] if len(h) > 3 else {}
         except KeyError:
             raise ParseError('unexpected tag "{0}"'.format(name))
         try:
-            t = c(ArgProxy(args))
+            t = c(ArgProxy(attr),*args,**kwds)
         except ParseError as e:
             add_to_except(e)
             raise

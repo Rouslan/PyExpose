@@ -1374,6 +1374,75 @@ class TestNonInPlaceConstructor(TestCompile):
         self.assertEqual(thing.b,-2)
 
 
+class TestRawFunc(TestCompile):
+    header_file = '''
+    #include "pyexpose_common.h"
+
+    PyObject *varandkeywords(PyObject *var,PyObject *kwrds) {
+        PyObject *a,*b;
+        a = PyDict_GetItemString(kwrds,"joe");
+        if(!a) {
+            PyErr_SetString(PyExc_LookupError,"joe");
+            return 0;
+        }
+        b = PyTuple_GetItem(var,2);
+        if(!b) return 0;
+        return PyTuple_Pack(2,b,a);
+    }
+
+    PyObject *varonly(PyObject *var) {
+        PyObject *r = PyTuple_GetItem(var,1);
+        Py_XINCREF(r);
+        return r;
+    }
+
+    PyObject *E(PyObject *x) {
+        if(!x) throw py_error_set();
+        return x;
+    }
+
+    class Thing {
+    public:
+        Thing(PyObject *var,PyObject *kwds) {
+            var = E(PyTuple_GetItem(var,0));
+            a = PyInt_AsLong(E(PyTuple_GetItem(var,0)));
+            b = PyInt_AsLong(E(PyTuple_GetItem(var,1)));
+            c = PyInt_AsLong(E(PyTuple_GetItem(var,2)));
+            if(PyErr_Occurred()) throw py_error_set();
+        }
+        Thing(int a,int b,int c) : a(a), b(b), c(c) {}
+        long a,b,c;
+    };
+'''
+
+    spec_file = '''
+        <module name="testmodule" include="main.h">
+            <raw-def func="varandkeywords"/>
+            <raw-def func="varonly"/>
+            <class type="Thing">
+                <init overload="int,int,int"/>
+                <raw-init overload="PyObject*,PyObject*"/>
+                <attr cmember="a"/>
+                <attr cmember="b"/>
+                <attr cmember="c"/>
+            </class>
+        </module>
+'''
+
+    def runTest(self):
+        tm = self.compile()
+        self.assertEqual(tm.varonly('A','B','C'),'B')
+        self.assertEqual(tm.varandkeywords('A','B','C',joe='D'),('C','D'))
+        t = tm.Thing(1,2,3)
+        t2 = tm.Thing((4,5,6))
+        self.assertEqual(t.a,1)
+        self.assertEqual(t.b,2)
+        self.assertEqual(t.c,3)
+        self.assertEqual(t2.a,4)
+        self.assertEqual(t2.b,5)
+        self.assertEqual(t2.c,6)
+
+
 
 if __name__ == '__main__':
     unittest.main()

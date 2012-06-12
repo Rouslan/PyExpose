@@ -520,8 +520,7 @@ inline PyTypeObject *create_obj_<% name %>Type() {
 }
 == else
 PyTypeObject obj_<% name %>Type = {
-    PyObject_HEAD_INIT(0)
-    0,                         /* ob_size */
+    PyVarObject_HEAD_INIT(0,0)
     "<% module %>.<% name %>", /* tp_name */
     sizeof(obj_<% name %>), /* tp_basicsize */
     0,                         /* tp_itemsize */
@@ -608,6 +607,13 @@ module_start = '''
 #include <assert.h>
 {includes}
 #include "{module}.h"
+
+
+#ifndef PyVarObject_HEAD_INIT
+    #define PyVarObject_HEAD_INIT(type, size) \\
+        PyObject_HEAD_INIT(type) size,
+#endif
+
 
 #define EXCEPT_HANDLERS(RET) catch(py_error_set&) {{                 \\
         return RET;                                                 \\
@@ -733,8 +739,7 @@ struct _obj_Internal<% suffix %> {
 };
 
 PyTypeObject _obj_Internal<% suffix %>Type = {
-    PyObject_HEAD_INIT(0)
-    0,                         /* ob_size */
+    PyVarObject_HEAD_INIT(0,0)
     "<% module %>._internal_class<% suffix %>", /* tp_name */
     sizeof(_obj_Internal<% suffix %>), /* tp_basicsize */
     0,                         /* tp_itemsize */
@@ -784,15 +789,34 @@ PyMethodDef func_table[] = {
     {0}
 };
 
+#if PY_MAJOR_VERSION >= 3
+#define INIT_ERR_VAL 0
+
+struct PyModuleDef module_def = {
+    PyModuleDef_HEAD_INIT,
+    "<% module %>",
+    <% doc|quote if doc else '0' %>,
+    -1,
+    func_table,
+    0,
+    0,
+    0,
+    0
+};
+
+extern "C" SHARED(PyObject*) PyInit_<% module %>(void) {
+#else
+#define INIT_ERR_VAL
 
 extern "C" SHARED(void) init<% module %>(void) {
+#endif
 == if wrap_in_trycatch
     try {
 == endif
 <% init_pre %>
 
 == for suf in internal_suffixes
-    if(UNLIKELY(PyType_Ready(&_obj_Internal<% suf %>Type) < 0)) return;
+    if(UNLIKELY(PyType_Ready(&_obj_Internal<% suf %>Type) < 0)) return INIT_ERR_VAL;
 == endfor
 
 == for c in classes if not c.dynamic
@@ -802,11 +826,15 @@ extern "C" SHARED(void) init<% module %>(void) {
 ==     if not (c.new_init or c.no_init)
     obj_<% c.name %>Type.tp_new = &PyType_GenericNew;
 ==     endif
-    if(UNLIKELY(PyType_Ready(&obj_<% c.name %>Type) < 0)) return;
+    if(UNLIKELY(PyType_Ready(&obj_<% c.name %>Type) < 0)) return INIT_ERR_VAL;
 == endfor
 
+#if PY_MAJOR_VERSION >= 3
+    PyObject *m = PyModule_Create(&module_def);
+#else
     PyObject *m = Py_InitModule3("<% module %>",func_table,<% doc|quote if doc else '0' %>);
-    if(UNLIKELY(!m)) return;
+#endif
+    if(UNLIKELY(!m)) return INIT_ERR_VAL;
 
 == for suf in internal_suffixes
     Py_INCREF(&_obj_Internal<% suf %>Type);
@@ -816,7 +844,7 @@ extern "C" SHARED(void) init<% module %>(void) {
 == for c in classes
 ==     if c.dynamic
     obj_<% c.name %>Type = create_obj_<% c.name %>Type();
-    if(UNLIKELY(!obj_<% c.name %>Type)) return;
+    if(UNLIKELY(!obj_<% c.name %>Type)) return INIT_ERR_VAL;
     PyModule_AddObject(m,"<% c.name %>",reinterpret_cast<PyObject*>(obj_<% c.name %>Type));
 ==     else
     Py_INCREF(&obj_<% c.name %>Type);
@@ -832,14 +860,19 @@ extern "C" SHARED(void) init<% module %>(void) {
 ==     if loop.last and not wrap_in_trycatch
     } catch(std::bad_alloc&) {
         PyErr_NoMemory();
+        return INIT_ERR_VAL;
     }
 ==     endif
 == endfor
 
 <% init_post %>
 == if wrap_in_trycatch
-    } EXCEPT_HANDLERS()
+    } EXCEPT_HANDLERS(INIT_ERR_VAL)
 == endif
+
+#if PY_MAJOR_VERSION >= 3
+    return m;
+#endif
 }
 
 #pragma GCC visibility pop
@@ -906,18 +939,17 @@ header_end = '''
 #endif
 '''
 
-overload_func_call = env.from_string('''
-== if nokwdscheck
+no_keywords_check = '''
         if(kwds && PyDict_Size(kwds)) {
             PyErr_SetString(PyExc_TypeError,no_keywords_msg);
             throw py_error_set();
         }
-== endif
-<% inner %>
+'''
 
-        NoSuchOverload(<% args %>);
-        return <% errval %>;
-''')
+no_such_overload = '''
+        NoSuchOverload({args});
+        return {errval};
+'''
 
 typecheck_start = env.from_string('''
 #ifdef PYEXPOSE_TEMPLATE_HELPERS

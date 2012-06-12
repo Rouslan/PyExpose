@@ -40,7 +40,6 @@ def accepts_args(f,args):
             mandatory_args(f) <= len(args) and
             all(a.type == b for a,b in zip(f.args,args)))
 
-
 def base_count(x):
     """Return the number of direct and indirect base classes of x."""
     return sum(base_count(b.type) for b in x.bases)

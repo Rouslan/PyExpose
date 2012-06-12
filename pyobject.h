@@ -166,7 +166,7 @@ namespace py {
             return *this;
         }
 
-        // to make sure object_a.attr("x") = object_b.attr("y") works as expected
+        // so object_a.attr("x") = object_b.attr("y") works as expected
         object_attr_proxy &operator=(const object_attr_proxy &val) {
             return operator=(static_cast<object>(val));
         }
@@ -570,6 +570,17 @@ namespace py {
     inline Py_ssize_t len(dict o) {
         return PyDict_Size(o.get());
     }
+
+
+    template<typename T> class ArrayAdapter {
+        const object origin;
+        const size_t size;
+        T *const items;
+
+    public:
+        ArrayAdapter(PyObject *origin,size_t size,T *items) : origin(new_ref(origin)), size(size), items(items) {}
+        int __py_traverse__(visitproc visit,void *arg) const { return (*visit)(origin.get(),arg); }
+    };
 
 
 

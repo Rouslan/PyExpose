@@ -163,7 +163,7 @@ class ArgBranchNode:
         assert anychildnodes or self.call
 
         r = ''
-        get_size = ind.line('if(PyTuple_GET_SIZE(args) {1} {2}) {{')
+        get_size = ind.line('if(PyTuple_GET_SIZE(args) {0} {1}) {{')
 
         if skipsize > 0:
             assert anychildnodes
@@ -180,7 +180,7 @@ class ArgBranchNode:
             max_args = self.max_arg_length()
 
             if min_args == max_args:
-                r += get_size.format(ind,'==',len(argconv) + min_args)
+                r += get_size.format('==',len(argconv) + min_args)
                 ind += 1
 
                 r += self.basic_and_objects_code(conv,argconv,min_args - 1,ind,get_arg,True)
@@ -190,7 +190,7 @@ class ArgBranchNode:
                 ind -= 1
                 r += ind.line('}')
             else:
-                r += get_size.format(ind,'>',len(argconv))
+                r += get_size.format('>',len(argconv))
 
                 r += self.basic_and_objects_code(conv,argconv,min_args - 1,ind + 1,get_arg)
 
@@ -206,7 +206,7 @@ class ArgBranchNode:
 
         else:
             assert self.call
-            r += get_size.format(ind,'==',len(argconv))
+            r += get_size.format('==',len(argconv))
             r += self.call_code(conv,argconv,ind + 1,get_arg)
             r += ind.line('}')
 
@@ -612,7 +612,7 @@ class Conversion:
 
         return ['_{0}'.format(i) for i in range(len(args))], prep
 
-    def function_call(self,calls,errval = '0',use_kwds = True):
+    def function_call(self,calls,errval='0',use_kwds=True,ind=tmpl.Tab(2)):
         """Generate code to call one function from a list of overloads.
 
         calls -- A sequence of tuples containing a function (Conversion.Func)
@@ -641,16 +641,18 @@ class Conversion:
             args,prep = self.arg_parser(calls[0][1],use_kwds)
             return prep + tmpl.Tab(2).line(calls[0][0].output(args,tmpl.Tab(2)))
 
+        r = (self.function_call_fallthrough(calls,ind) +
+            tmpl.no_such_overload.format(args='args',errval=errval))
+        if use_kwds: r = tmpl.no_keywords_check + r
+        return r
+
+    def function_call_fallthrough(self,calls,ind=tmpl.Tab(2)):
         # turn default values into overloads
         ovlds = []
         for f,args in calls:
             ovlds.extend((f,newargs) for newargs in default_to_ov(args))
 
-        return tmpl.overload_func_call.render(
-            inner = self.generate_arg_tree(ovlds).get_code(self),
-            nokwdscheck = use_kwds,
-            args = 'args',
-            errval = errval)
+        return self.generate_arg_tree(ovlds).get_code(self,ind=ind)
 
     def function_call_narg_fallthrough(self,calls,vars,ind=tmpl.Tab(2)):
         assert calls
@@ -663,12 +665,8 @@ class Conversion:
                 [self.frompy(a.type)[0].format(v) for a,v in zip(calls[0][1],vars)],
                 ind)
 
-        return tmpl.overload_func_call.render(
-            inner = self.function_call_narg_fallthrough(calls,vars,ind),
-            nokwdscheck = False,
-            args = ','.join(vars),
-            errval = errval,
-            endlabel = False)
+        return (self.function_call_narg_fallthrough(calls,vars,ind) +
+            tmpl.no_such_overload.format(args=','.join(vars),errval=errval))
 
     def add_conv(self,t,to=None,from_=None):
         if to: self.__topy[t] = to
