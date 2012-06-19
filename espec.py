@@ -271,6 +271,17 @@ class TypedOverload:
     def has_bind(self):
         return self.argbinds and any(a.val for a in self.argbinds)
 
+    def real_index(self,n):
+        r = n
+        i = 0
+        for a in self.argbinds:
+            if a.val:
+                r += 1
+            else:
+                if i == n: break
+                i += 1
+        return r
+
 def call_code_binds(overload):
     return [(i,argbind.val) for i,argbind in enumerate(overload.argbinds) if argbind.val]
 
@@ -511,6 +522,21 @@ def is_virtual(x):
 def is_static(x):
     return isinstance(x,gccxml.CPPMethod) and x.static
 
+def real_ordinal(ov,n):
+    assert n < 10
+    return [
+        'first',
+        'second',
+        'third',
+        'fourth',
+        'fifth',
+        'sixth',
+        'seventh',
+        'eighth',
+        'ninth',
+        'tenth'
+    ][ov.real_index(n)]
+
 class TypedMethodDef(TypedDefDef):
     what = 'method'
     selfvar = 'reinterpret_cast<PyObject*>(self)'
@@ -521,10 +547,10 @@ class TypedMethodDef(TypedDefDef):
 
         for ov in self.overloads:
             if isinstance(ov.func,gccxml.CPPFunction) and not ov.static:
-                if len(ov.func.args) == 0 or strip_refptr(ov.func.args[0].type) != self.classdef.type:
+                if len(ov.args) == 0 or strip_refptr(ov.args[0].type) != self.classdef.type:
                     self.odd_function(ov)
                 else:
-                    ov.bind(0,'&base' if isinstance(ov.func.args[0].type,gccxml.CPPPointerType) else 'base')
+                    ov.bind(0,'&base' if isinstance(ov.args[0].type,gccxml.CPPPointerType) else 'base')
 
     def static(self):
         return all(ov.static for ov in self.overloads)
@@ -553,7 +579,7 @@ class TypedMethodDef(TypedDefDef):
         return super(TypedMethodDef,self).call_code(conv,ov)
 
     def odd_function(self,ov):
-        raise SpecificationError('The first parameter of "{0}" should be of type "{1}" or be a reference or pointer to it.'.format(ov.func.name,self.classdef.type.typestr()))
+        raise SpecificationError('The {0} parameter of "{1}" should be of type "{2}" or be a reference or pointer to it.'.format(real_ordinal(ov,0),ov.func.name,self.classdef.type.typestr()))
 
     def topy(self,conv,t,retsemantic):
         return conv.topy(t,retsemantic,'self')
@@ -880,7 +906,7 @@ class AttrAccess(object):
                 # m should be number
                 if not isinstance(self.type,(gccxml.CPPArrayType,gccxml.CPPPointerType)):
                     raise SpecificationError('"{0}" is not an array or pointer type'.format(self.type.full_name))
-                self.type = self.type.type
+                self.type = real_type(self.type.type)
 
     @property
     def canon_name(self):
@@ -2485,7 +2511,8 @@ class tag_GetSet(tag):
         self.r.overloads.append(Overload(
             tag_Def.operator_parse(args['func']),
             get_ret_semantic(args),
-            args.get('overload')))
+            args.get('overload'),
+            binds=parse_self_arg(args)))
 
 
 class tag_Property(tag):

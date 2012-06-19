@@ -51,7 +51,10 @@
 
 /* when thrown, indicates that a PyErr_X function was already called with the
    details of the exception. As such, it carries no information of its own. */
-struct py_error_set {};
+struct py_error_set {
+    py_error_set() { assert(PyErr_Occurred()); }
+    void clear() { PyErr_Clear(); }
+};
 
 enum storage_mode {UNINITIALIZED = 0,CONTAINS,MANAGEDREF,MANAGEDPTR,UNMANAGEDREF};
 

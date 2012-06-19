@@ -699,7 +699,7 @@ class TestTemplateAssoc(TestCompile):
 
         template<typename T> class pyptr : public object {
         public:
-            template<typename REF> pyptr(REF r) : object(r) { assert(PyObject_IsInstance(ptr(),get_type<T>())); }
+            template<typename REF> pyptr(REF r) : object(r) { assert(PyObject_IsInstance(ptr(),reinterpret_cast<PyObject*>(get_type<T>()))); }
             pyptr(const pyptr<T> &b) : object(b) {}
 
             T &base() {

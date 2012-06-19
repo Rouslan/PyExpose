@@ -533,9 +533,10 @@ class Conversion:
             return self.__pymember[t]
         except KeyError:
             r = None
-            m = t.lookup(CAST_AS_MEMBER_FIELD)
-            if m and isinstance(m[0],gccxml.CPPField):
-                r = '{0}::{1}'.format(t.full_name,CAST_AS_MEMBER_FIELD)
+            if hasattr(t,'lookup'):
+                m = t.lookup(CAST_AS_MEMBER_FIELD)
+                if m and isinstance(m[0],gccxml.CPPField):
+                    r = '{0}::{1}'.format(t.full_name,CAST_AS_MEMBER_FIELD)
 
             self.__pymember[t] = r
             return r

@@ -2,6 +2,7 @@
 #define pyobject_h
 
 #include <algorithm>
+#include <iterator>
 #include <structmember.h>
 
 
@@ -143,7 +144,7 @@ namespace py {
 
         void swap(object &b) { _object_base::swap(b); }
 
-        static object __py_from_pyobject__(PyObject *val) { return new_ref(val); }
+        static object __py_from_pyobject__(PyObject *val) { return borrowed_ref(val); }
     };
 
     template<typename T> inline object make_object(T x) {
@@ -294,8 +295,10 @@ namespace py {
         }
     public:
         _nullable() : _ptr(NULL) {}
-        _nullable(const _nullable<T> &b) : _ptr(incref(b._ptr)) {}
+        _nullable(const _nullable<T> &b) : _ptr(b._ptr) { Py_XINCREF(_ptr); }
         _nullable(const T &b) : _ptr(b.get_new_ref()) {}
+        _nullable(borrowed_ref r) : _ptr(r._ptr) { Py_XINCREF(_ptr); }
+        _nullable(new_ref r) : _ptr(r._ptr) {}
 
         _nullable<T> &operator=(const _nullable<T> &b) {
             Py_XINCREF(b._ptr);
@@ -381,7 +384,39 @@ namespace py {
 
         static tuple __py_from_pyobject__(PyObject *val) {
             if(!PyTuple_Check(val)) THROW_PYERR_STRING(TypeError,"object is not an instance of tuple")
-            return new_ref(val);
+            return borrowed_ref(val);
+        }
+    };
+
+    class tuple_iterator {
+        tuple data;
+        size_t index;
+    public:
+        typedef object value_type;
+        typedef ptrdiff_t difference_type;
+        typedef object *pointer;
+        typedef object &reference;
+        typedef std::random_access_iterator_tag iterator_category;
+
+        tuple_iterator(const tuple &t,size_t index) : data(t), index(index) {}
+        object operator*() const {
+            assert(index < size_t(data.size()));
+            return data[index];
+        }
+        tuple_iterator &operator++() {
+            ++index;
+            return *this;
+        }
+        tuple_iterator operator++(int) {
+            tuple_iterator tmp = *this;
+            operator++();
+            return tmp;
+        }
+        bool operator==(const tuple_iterator &b) const {
+            return data.get() == b.data.get() && index == b.index;
+        }
+        bool operator!=(const tuple_iterator &b) const {
+            return data.get() != b.data.get() || index != b.index;
         }
     };
 
@@ -464,7 +499,7 @@ namespace py {
 
         static dict __py_from_pyobject__(PyObject *val) {
             if(!PyDict_Check(val)) THROW_PYERR_STRING(TypeError,"object is not an instance of dict")
-            return new_ref(val);
+            return borrowed_ref(val);
         }
     };
 
@@ -571,14 +606,36 @@ namespace py {
         return PyDict_Size(o.get());
     }
 
+    inline object iter(const _object_base &o) {
+        return new_ref(check_obj(PyObject_GetIter(o.get())));
+    }
 
-    template<typename T> class ArrayAdapter {
+    inline nullable_object next(const object &o) {
+        PyObject *r = PyIter_Next(o.get());
+        if(!r && PyErr_Occurred()) throw py_error_set();
+        return new_ref(r);
+    }
+
+
+    template<typename T> class array_adapter {
         const object origin;
         const size_t size;
         T *const items;
+        void index_check(Py_ssize_t i) const {
+            if(i < 0 || i >= Py_ssize_t(size)) THROW_PYERR_STRING(IndexError,"index out of range")
+        }
 
     public:
-        ArrayAdapter(PyObject *origin,size_t size,T *items) : origin(new_ref(origin)), size(size), items(items) {}
+        array_adapter(PyObject *origin,size_t size,T *items) : origin(new_ref(origin)), size(size), items(items) {}
+        T &sequence_getitem(Py_ssize_t i) const { 
+            index_check(i);
+            return items[i];
+        }
+        void sequence_setitem(Py_ssize_t i,const T &item) {
+            index_check(i);
+            items[i] = item;
+        }
+        Py_ssize_t length() const { return size; }
         int __py_traverse__(visitproc visit,void *arg) const { return (*visit)(origin.get(),arg); }
     };
 
@@ -623,6 +680,10 @@ namespace std {
     template<> inline void swap(py::dict &a,py::dict &b) { a.swap(b); }
     template<typename T> inline void swap(py::_nullable<T> &a,py::_nullable<T> &b) { a.swap(b); }
     template<typename T> inline void swap(py::pyptr<T> &a,py::pyptr<T> &b) { a.swap(b); }
+}
+
+template<typename T> inline T from_pyobject(const py::object &a) {
+    return from_pyobject<T>(a.get());
 }
 
 

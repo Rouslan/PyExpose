@@ -10,7 +10,7 @@ from err import SpecificationError
 __all__ = ('RET_MANAGED_REF','RET_MANAGED_PTR','RET_UNMANAGED_REF','RET_COPY',
            'RET_SELF','mandatory_args','compatible_args','accepts_args',
            'always_true','BaseMembers','base_count','cconst','cptr','strip_cvq',
-           'strip_refptr','is_const','can_throw','default_to_ov')
+           'strip_refptr','is_const','can_throw','default_to_ov','real_type')
 
 
 

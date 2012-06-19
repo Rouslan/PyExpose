@@ -29,7 +29,7 @@ def generate_module(spec,path,gccxml,compiler,cxxflags):
     with open(gccinname,'w') as gccin:
         spec.print_gccxml_input(gccin)
 
-    args = [gccxml or "gccxml"]
+    args = [gccxml or "gccxml",'-I.']
     if compiler: args.extend(["--gccxml-compiler",compiler])
     if cxxflags: args.extend(["--gccxml-cxxflags",cxxflags])
     args.extend([gccinname,"-fxml="+gccoutname])
@@ -51,6 +51,6 @@ if __name__ == '__main__':
     spec = getspec(args[0])
     tdir = tempfile.mkdtemp()
     try:
-        generate_module(spec, tdir, options.gccxml, options.compiler, options.cxxflags and " ".join(options.cxxflags))
+        generate_module(spec, '.', options.gccxml, options.compiler, options.cxxflags and " ".join(options.cxxflags))
     finally:
         shutil.rmtree(tdir)

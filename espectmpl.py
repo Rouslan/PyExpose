@@ -437,7 +437,16 @@ PyObject *obj_<% name %>_new(PyTypeObject *type,PyObject *args,PyObject *kwds) {
             }
         } EXCEPT_HANDLERS(0)
 success:
-        <@ if features or destructor @>ptr->mode = CONTAINS<@ endif @>;
+==     if features or destructor or weakref
+==         if features or destructor
+        ptr->mode = CONTAINS;
+==         endif
+==         if weakref
+        ptr->weaklist = 0;
+==         endif
+==     else
+        ;
+==     endif
     }
     return reinterpret_cast<PyObject*>(ptr);
 == else
