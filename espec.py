@@ -1896,18 +1896,25 @@ class TypedClassDef:
 
 
         destructor = None
-        d = self.type.getDestructor()
-        if (not (self.no_destruct or self.uninstantiatable())) and d:
-            # the destructor's name is not typestr when the type is a template instance
-            destructor = d.canon_name
-            print >> out.cpp, tmpl.destruct.render(
-                name = self.name,
-                destructor = destructor,
-                features = self.features,
-                new_init = bool(self.newconstructor),
-                instance_dict = self.instance_dict(),
-                weakref = self.weakref()),
+        dealloc = False
+        if not self.uninstantiatable():
+            if not self.no_destruct:
+                destructor = self.type.getDestructor()
+                # the destructor's name is not typestr when the type is a template instance
+                if destructor: destructor = destructor.canon_name
+            w = self.weakref()
+            if destructor or w:
+                dealloc = True
+                print >> out.cpp, tmpl.destruct.render(
+                    name = self.name,
+                    destructor = destructor,
+                    features = self.features,
+                    new_init = bool(self.newconstructor),
+                    instance_dict = self.instance_dict(),
+                    weakref = w),
 
+
+        gc,clear = self.gc_code(out)
 
         print >> out.h, tmpl.classdef.render(
             name = self.name,
@@ -1923,7 +1930,7 @@ class TypedClassDef:
             instance_dict = self.instance_dict(),
             weakref = self.weakref(),
             mode_var = self.needs_mode_var,
-            gc = self.use_gc()),
+            gc = gc),
 
         if virtmethods:
             print >> out.h, tmpl.subclass_meth.render(name=self.name)
@@ -1992,9 +1999,6 @@ class TypedClassDef:
                     raise
 
 
-        gc,clear = self.gc_code(out)
-
-
         print >> out.cpp, tmpl.classtypedef.render(
             dynamic = self.dynamic,
             name = self.name,
@@ -2002,6 +2006,7 @@ class TypedClassDef:
             features = self.features,
             newinitcode = self.newconstructor and self.newconstructor.output(out.conv,typestr,'&ptr->base','0'),
             destructor = destructor,
+            dealloc = dealloc,
             initcode = self.constructor and self.constructor.output(out.conv,typestr,'addr','-1'),
             module = module.name,
             doc = self.doc,

@@ -111,7 +111,7 @@ void obj_<% name %>_dealloc(obj_<% name %> *self) {
 ==     endif
 ==     if UNMANAGED_REF in features and (instance_dict or weakref)
     case UNMANAGEDREF:
-        reinterpret_cast<uref_<% name %>*>(self)->~ptr_<% name %>();
+        reinterpret_cast<uref_<% name %>*>(self)->~uref_<% name %>();
         break;
 ==     endif
 =#     TODO: this default case is not always needed
@@ -490,7 +490,7 @@ inline PyTypeObject *create_obj_<% name %>Type() {
     type->tp_flags |= Py_TPFLAGS_CHECKTYPES<@ if gc @>|Py_TPFLAGS_HAVE_GC<@ endif @>;
     type->tp_dictoffset = <@if instance_dict @>offsetof(obj_<% name %>,idict)<@ else @>0<@ endif @>;
     type->tp_weaklistoffset = <@if weakref @>offsetof(obj_<% name %>,weaklist)<@ else @>0<@ endif @>;
-<@ if destructor @>    type->tp_dealloc = reinterpret_cast<destructor>(&obj_<% name %>_dealloc);<@ endif @>
+<@ if dealloc @>    type->tp_dealloc = reinterpret_cast<destructor>(&obj_<% name %>_dealloc);<@ endif @>
 <@ if '__cmp__' in specialmethods @>    type->tp_compare = reinterpret_cast<cmpfunc>(&obj_<% name %>___cmp__);<@ endif @>
 <@ if '__repr__' in specialmethods @>    type->tp_repr = reinterpret_cast<reprfunc>(&obj_<% name %>___repr__);<@ endif @>
 <@ if number @>    type->tp_as_number = &obj_<% name %>_number_methods;<@ endif @>
@@ -502,10 +502,18 @@ inline PyTypeObject *create_obj_<% name %>Type() {
 <@ if '__getattr__' in specialmethods @>    type->tp_getattro = reinterpret_cast<getattrofunc>(&obj_<% name %>___getattr__);<@ endif @>
 <@ if '__setattr__' in specialmethods @>    type->tp_setattro = reinterpret_cast<setattrofunc>(&obj_<% name %>___setattr__);<@ endif @>
 <@ if doc @>    type->tp_doc = <% doc|quote %>;<@ endif @>
-<@ if methodsref @>    type->tp_methods = obj_<% name %>_methods;<@ endif @>
-<@ if membersref @>    type->tp_members = obj_<% name %>_members;<@ endif @>
-<@ if getsetref @>    type->tp_getset = obj_<% name %>_getset;<@ endif @>
-<@ if richcompare @>    type->tp_richcompare = reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare);<@ endif @>
+==     if methodsref
+    type->tp_methods = obj_<% name %>_methods;
+==     endif
+==     if membersref
+    type->tp_members = obj_<% name %>_members;
+==     endif
+==     if getsetref
+    type->tp_getset = obj_<% name %>_getset;
+==     endif
+==     if richcompare
+    type->tp_richcompare = reinterpret_cast<richcmpfunc>(&obj_<% name %>_richcompare);
+==     endif
 ==     if '__iter__' in specialmethods
     type->tp_iter = reinterpret_cast<getiterfunc>(&obj_<% name %>___iter__);
 ==     endif
@@ -533,7 +541,7 @@ PyTypeObject obj_<% name %>Type = {
     "<% module %>.<% name %>", /* tp_name */
     sizeof(obj_<% name %>), /* tp_basicsize */
     0,                         /* tp_itemsize */
-    <@ if destructor @>reinterpret_cast<destructor>(&obj_<% name %>_dealloc)<@ else @>0<@ endif @>, /* tp_dealloc */
+    <@ if dealloc @>reinterpret_cast<destructor>(&obj_<% name %>_dealloc)<@ else @>0<@ endif @>, /* tp_dealloc */
     0,                         /* tp_print */
     0,                         /* tp_getattr */
     0,                         /* tp_setattr */
