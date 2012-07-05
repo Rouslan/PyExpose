@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
 import os
 import os.path
@@ -6,18 +6,23 @@ import sys
 import shutil
 import tempfile
 import unittest
-import distutils.ccompiler
-import distutils.sysconfig
+from distutils import ccompiler, sysconfig
 import gc
 import weakref
 
+# the user-specific include directory is not searched by default, so we may have to add it manually
+IN_USER_DIR = False
+try:
+    from site import USER_BASE, USER_SITE
+    dn = os.path.dirname
+    if USER_SITE == dn(dn(dn(__file__))):
+        IN_USER_DIR = True
+except Exception:
+    pass
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0,PROJECT_DIR)
 
-
-import expose
-import espec
+from pyexpose import expose
+from pyexpose import espec
 
 
 def write_file(file,data):
@@ -78,14 +83,20 @@ class TestCompile(unittest.TestCase):
         os.chdir(self.dir)
 
         try:
-            pyinc = distutils.sysconfig.get_python_inc()
-
             write_file('main.h',self.header_file)
             write_file('spec.xml',self.spec_file)
             if self.cpp_file:
                 write_file('main.cpp',self.cpp_file)
 
-            gccxml_flags = '-I{0} -I{1}'.format(pyinc,PROJECT_DIR)
+            pyinc = sysconfig.get_python_inc()
+            includes = [pyinc]
+
+            plat_pyinc = sysconfig.get_python_inc(True)
+            if plat_pyinc != pyinc: includes.append(plat_pyinc)
+
+            if IN_USER_DIR: includes.append(sysconfig.get_python_inc(prefix=USER_BASE))
+            
+            gccxml_flags = ' '.join('-I'+i for i in includes)
             if self.templates:
                 gccxml_flags += ' -DPYEXPOSE_TEMPLATE_HELPERS=1'
 
@@ -93,10 +104,9 @@ class TestCompile(unittest.TestCase):
             spec.name = self.modname() # give the new module a unique name
             expose.generate_module(spec,'.',None,'g++',gccxml_flags)
 
-            self.comp = distutils.ccompiler.new_compiler()
-            distutils.sysconfig.customize_compiler(self.comp)
-            self.comp.add_include_dir(pyinc)
-            self.comp.add_include_dir(PROJECT_DIR)
+            self.comp = ccompiler.new_compiler()
+            sysconfig.customize_compiler(self.comp)
+            for i in includes: self.comp.add_include_dir(i)
             self.comp.add_library('stdc++')
 
             if self.templates:
@@ -109,6 +119,7 @@ class TestCompile(unittest.TestCase):
             raise
 
     def tearDown(self):
+        sys.path.remove(self.dir)
         os.chdir(self.olddir)
         shutil.rmtree(self.dir)
 
@@ -119,7 +130,7 @@ class TestCompile(unittest.TestCase):
                 files.append('main.cpp')
             obj = self.comp.compile(files,debug=True)
             self.comp.link_shared_lib(obj,self.modname(),debug=True)
-        except (distutils.ccompiler.CompileError,distutils.ccompiler.LinkError) as e:
+        except (ccompiler.CompileError,ccompiler.LinkError) as e:
             self.fail(str(e))
 
         mname = self.comp.library_filename(self.modname(),'shared')
@@ -166,6 +177,7 @@ class TestExample(TestCompile):
                 <init overload="size_t,const double&amp;"/>
                 <property name="size" get="size" set="resize"/>
                 <def func="push_back"/>
+                <def name="__sequence__len__" func="size"/>
                 <def name="__sequence__getitem__" func="at" return-semantic="copy"/>
                 <def name="__sequence__setitem__" assign-to="at"/>
             </class>
@@ -179,6 +191,7 @@ class TestExample(TestCompile):
         self.assertEqual(v.size,0)
         v.push_back(3)
         self.assertEqual(v.size,1)
+        self.assertEqual(len(v),1)
         self.assertEqual(v[0],3)
 
 
@@ -1023,7 +1036,7 @@ class TestWeakListAndDict(TestCompile):
 
 class TestObjectH(TestCompile):
     header_file = '''
-        #include "pyobject.h"
+        #include <PyExpose/pyobject.h>
 
         void swap_1_and_3(py::object list) {
             py::object temp = list[1];
@@ -1376,7 +1389,7 @@ class TestNonInPlaceConstructor(TestCompile):
 
 class TestRawFunc(TestCompile):
     header_file = '''
-    #include "pyexpose_common.h"
+    #include <PyExpose/pyexpose_common.h>
 
     PyObject *varandkeywords(PyObject *var,PyObject *kwrds) {
         PyObject *a,*b;

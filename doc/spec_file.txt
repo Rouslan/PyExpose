@@ -1,0 +1,719 @@
+
+==================================
+PyExpose Specification File Format
+==================================
+
+
+Example: ::
+
+    <?xml version="1.0"?>
+    <module name="modulename" include="vector">
+      <doc>module doc string</doc>
+
+      <class name="DVector" type="std::vector&lt;double&gt;">
+        <doc>class doc string</doc>
+        <init overload=""/>
+        <init overload="size_t,const double&amp;"/>
+        <property name="size" get="size" set="resize"/>
+        <def func="push_back"/>
+        <def name="__sequence__getitem__" func="at" return-semantic="copy"/>
+        <def name="__sequence__setitem__" assign-to="at"/>
+      </class>
+    </module>
+
+    
+* module_
+* `module > init`_
+* def_
+* `raw-def`_
+* `no-init`_
+* property_
+* get_
+* set_
+* attr_
+* class_
+* `class > init`_
+* `raw-init`_
+* new_
+* `raw-new`_
+* doc_
+* `to-pyobject`_
+* `from-pyobject`_
+* val_
+* var_
+* `gc-handler`_
+* traverse_
+* clear_
+
+
+module
+====================================
+
+
+Child elements:
+-----------------------
+
+def_, class_, doc_, `to-pyobject`_, `from-pyobject`_, `gc-handler`_, init__
+
+__ `module > init`_
+
+Attributes:
+-----------
+
+name = "<Python identifier>"
+    The name of the module. This will be the name by which the module is
+    imported.
+              
+include = "<include list>"
+    A comma separated list of include files to scan for the types and functions
+    to expose.
+              
+
+module > init
+====================================
+
+
+Call a function at the start or end (or both) of the module's initialization.
+
+A function specified here may either return ``int`` or nothing. If it returns
+int, it is expected to use the return value to indicate an error and never throw
+an (C++) exception. A value of zero indicates success. If any other value is
+returned, a Python exception is assumed to be raised and the module
+initialization is aborted.
+            
+Attributes:
+-----------
+
+pre = "<C++ symbol>"
+    The name of a function to call at the start of the module's initialization.
+    The function is called with no arguments.
+                    
+post = "<C++ symbol>"
+    The name of a function to call at the end of the module's initialization.
+    The function should either accept one argument of type ``PyObject*`` or no
+    arguments. If it accepts ``PyObject*``, it will receive the module object.
+                    
+
+
+def
+====================================
+
+
+Specifies a method when inside <class>, specifies a function
+when inside <module>.
+
+Special methods can be defined by using the equivalent Python method
+name:
+
+=============== ================================================================
+Python          C++
+=============== ================================================================
+__repr__        tp_repr
+__str__         tp_str
+__lt__          tp_richcompare
+__le__          tp_richcompare
+__eq__          tp_richcompare
+__ne__          tp_richcompare
+__gt__          tp_richcompare
+__ge__          tp_richcompare
+__cmp__         tp_compare
+__hash__        tp_hash
+__nonzero__     tp_as_number->nb_nonzero
+__getattr__     tp_getattro
+__setattr__     tp_setattro
+__get__         tp_descr_get
+__set__         tp_descr_set
+__call__        tp_call
+__iter__        tp_iter
+next            tp_iternext
+__contains__    tp_as_sequence->sq_contains
+__add__         tp_as_number->nb_add
+__radd__        tp_as_number->nb_add (arguments reversed)
+__sub__         tp_as_number->nb_subtract
+__rsub__        tp_as_number->nb_subtract (arguments reversed)
+__mul__         tp_as_number->nb_multiply
+__rmul__        tp_as_number->nb_multiply (arguments reversed)
+__floordiv__    tp_as_number->nb_floor_divide
+__rfloordiv__   tp_as_number->nb_floor_divide (arguments reversed)
+__mod__         tp_as_number->nb_remainder
+__rmod__        tp_as_number->nb_remainder (arguments reversed)
+__divmod__      tp_as_number->nb_divmod
+__rdivmod__     tp_as_number->nb_divmod (arguments reversed)
+__pow__         tp_as_number->nb_power
+__rpow__        tp_as_number->nb_power (arguments reversed)
+__lshift__      tp_as_number->nb_lshift
+__rlshift__     tp_as_number->nb_lshift (arguments reversed)
+__rshift__      tp_as_number->nb_rshift
+__rrshift__     tp_as_number->nb_rshift (arguments reversed)
+__and__         tp_as_number->nb_and
+__rand__        tp_as_number->nb_and (arguments reversed)
+__xor__         tp_as_number->nb_xor
+__rxor__        tp_as_number->nb_xor (arguments reversed)
+__or__          tp_as_number->nb_or
+__ror__         tp_as_number->nb_or (arguments reversed)
+__div__         tp_as_number->nb_divide
+__rdiv__        tp_as_number->nb_divide (arguments reversed)
+__truediv__     tp_as_number->nb_true_divide
+__rtruediv__    tp_as_number->nb_true_divide (arguments reversed)
+__iadd__        tp_as_number->nb_inplace_add
+__isub__        tp_as_number->nb_inplace_subtract
+__imul__        tp_as_number->nb_inplace_multiply
+__idiv__        tp_as_number->nb_inplace_divide
+__itruediv__    tp_as_number->nb_inplace_true_divide
+__ifloordiv__   tp_as_number->nb_inplace_floor_divide
+__imod__        tp_as_number->nb_inplace_remainder
+__ipow__        tp_as_number->nb_inplace_power
+__ilshift__     tp_as_number->nb_inplace_lshift
+__irshift__     tp_as_number->nb_inplace_rshift
+__iand__        tp_as_number->nb_inplace_and
+__ixor__        tp_as_number->nb_inplace_xor
+__ior__         tp_as_number->nb_inplace_or
+__neg__         tp_as_number->nb_negative
+__pos__         tp_as_number->nb_positive
+__abs__         tp_as_number->nb_absolute
+__invert__      tp_as_number->nb_invert
+__int__         tp_as_number->nb_int
+__long__        tp_as_number->nb_long
+__float__       tp_as_number->nb_float
+__oct__         tp_as_number->nb_oct
+__hex__         tp_as_number->nb_hex
+__index__       tp_as_number->nb_index
+__coerce__      tp_as_number->nb_coerce
+=============== ================================================================
+
+The following cannot be used because they correspond to the constructor and
+destructor. To specify the constructor, use the <init> or <new> tag.
+
+=============== =================
+Python          C++
+=============== =================
+__init__        tp_init
+__new__         tp_new
+__del__         tp_dealloc
+=============== =================
+
+For functions that don't have a distinct equivalent in Python, the following
+names are provided:
+
+========================= ======================================
+Name                      C++
+========================= ======================================
+__concat__                tp_as_sequence->sq_concat
+__iconcat__               tp_as_sequence->sq_inplace_concat
+__repeat__                tp_as_sequence->sq_repeat
+__irepeat__               tp_as_sequence->sq_inplace_repeat
+__mapping__len__          tp_as_mapping->mp_length
+__sequence__len__         tp_as_sequence->sq_length
+__mapping__getitem__      tp_as_mapping->mp_subscript
+__sequence__getitem__     tp_as_sequence->sq_item
+__mapping__setitem__      tp_as_mapping->mp_ass_subscript
+__sequence__setitem__     tp_as_sequence->sq_ass_item
+========================= ======================================
+
+Operator methods can also be specified by their operators. The following are
+equivalent:
+
+============= ================
+<             __lt__
+<=            __le__
+==            __eq__
+!=            __ne__
+>             __gt__
+>=            __ge__
+()            __call__
+\+            __add__
++=            __iadd__
+\-            __sub__
+-=            __isub__
+\*            __mul__
+\*=           __imul__
+\**           __pow__
+\**=          __ipow__
+/             __div__
+/=            __idiv__
+//            __floordiv__
+//=           __ifloordiv__
+<<            __lshift__
+<<=           __ilshift__
+>>            __rshift__
+>>=           __irshift__
+&             __and__
+&=            __iand__
+^             __xor__
+^=            __ixor__
+\|            __or__
+\|=           __ior__
+~             __invert__
+============= ================
+
+One of ``func`` or ``assign-to`` needs to be defined, but not both.
+
+      
+Child elements:
+-----------------------
+
+`doc`_
+
+
+Attributes:
+-----------
+
+name = "<Python identifier>"
+    The name of the function/method as will be seen in python. If not specified,
+    the name will taken from the C++ function/method.
+              
+func = "<C++ symbol>"
+    The C++ function/method that implements this.
+    
+    When specifying a method, whether the resulting Python method is static is
+    determined by whether the C++ method is static. This can be overridden using
+    the ``static`` attribute. A method may also be implemented using a C++
+    function, in which case the function must accept the class's type as the
+    first argument, unless the ``static`` attribute is specified (to prevent
+    mistakes, specifying a function that doesn't accept the class type as its
+    first argument, without specifying ``static``, is considered an error).
+    
+    The __rop__ methods will also accept C++ functions that accept the class
+    type as the second argument.
+              
+assign-to = "<C++ symbol>"
+    Like func, except the return value is assigned to.
+              
+overload = "<argument list>"
+    The list of arguments the C++ function/method takes. This is to select a
+    specific function/method out of a set of overloads. The arguments are
+    separated by commas and can be specified with or without typedefs, as long
+    as the underlying types are the same as that of the function/method.
+              
+return-semantic = "<return semantic>"
+    Specifies how a pointer or reference return value is to be handled. If the
+    function returns by value, this attribute is meaningless. The options are
+    "default", "copy", "managedref" and "self". "default" is the same as
+    omitting this attribute. "copy" means the value will be dereferenced and
+    copied. "managedref" means the returned Python object will keep a reference
+    and a pointer to the class, in order to keep the class alive while the
+    reference exists. "self" means ignore the return value and return what would
+    be the "self" argument in Python.
+    
+    For __iop__ methods, the default is "self".
+
+static = "<true/false>"
+    For methods only, specifies whether the method will be static. This is
+    determined automatically when ``func`` is a method.
+
+self-arg = "<non-negative integer>"
+    For methods only, if supplied, the C++ function will receive the ``self``
+    pointer, of type ``PyObject*``. The value specifies the index (starting from
+    1) of the argument to receive the pointer.
+
+arity = "<non-negative integer>"
+    Filters the overloaded functions/methods specified by ``func`` to ones that
+    have this many arguments. This is so operators with different meaning but
+    the same name (e.g. negation and subtraction), can be conveniently selected.
+    Specifying both ``arity`` and ``overload`` is redundant.
+
+bridge-virtual = "<true/false>"
+    For virtual methods, if true (the default), the method will be overridable
+    in Python code. An attribute look-up must be performed to determine if the
+    method is overridden, so setting this to false avoids a small amount of
+    overhead.
+
+
+raw-def
+====================================
+
+This is identical to def_, except the arguments are not unpacked for you. For
+general functions, the C++ function specified by ``func`` must take either one
+or two instances of ``PyObject*``, which will receive the tuple and dictionary
+respectively, containing the function arguments. For special methods, the C++
+function must accept the same arguments as the function signature in the Python
+API, except for the ``self`` pointer.
+
+Note: if you want to receive the ``self`` pointer, use ``self-arg``.
+
+See def_ for the attributes and child elements of this tag.
+
+
+no-init
+====================================
+
+Specifies that the class will not have an ``__init__`` method. By default, if
+none of ``<init>``, ``<raw-init>``, ``<new>`` or ``<raw-new>`` is defined, the
+class' default constructor is used to implement ``__init__``. Use ``<no-init>``
+to specify you don't want an ``__init__`` method. Unless ``<new>`` or
+``<raw-new>`` is defined, the class cannot be instantiated directly in Python
+code. Attempting to do so will raise a TypeError.
+
+Note: ``<no-init>`` is unnecessary if ``<new>`` or ``<raw-new>`` is specified.
+
+
+property
+====================================
+
+Child elements:
+-----------------------
+
+doc_, get_, set_
+
+
+Attributes:
+-----------
+
+name = "<Python identifier>"
+    ..
+get = "<C++ symbol>"
+    ..
+set = "<C++ symbol>"
+    ..
+
+
+get
+====================================
+
+Attributes:
+-----------
+
+func = "<C++ symbol>"
+    ..
+return-semantic = "<return semantic>"
+    ..
+self-arg = "<non-negative integer>"
+    ..
+
+
+set
+====================================
+
+Attributes:
+-----------
+
+func = "<C++ symbol>"
+    ..
+overload = "<argument list>"
+    ..
+self-arg = "<non-negative integer>"
+    ..
+
+
+attr
+====================================
+
+Expose a member variable as a Python attribute.
+      
+Attributes:
+-----------
+
+name = "<Python identifier>"
+    The name of the member as will be seen in python. If not specified, the name
+    will be taken from the C++ member.
+              
+cmember = "<C++ symbol>"
+    The member variable of the C++ class to expose.
+              
+readonly = "<true/false>"
+    ..
+
+
+class
+====================================
+
+A class to expose to python.
+
+Use ``<init>`` or ``<new>`` to specify a constructor. If none of ``<init>``,
+``<new>`` or ``<no-init>`` are specified, ``<init overload="">`` is implied.
+
+Unless ``<new>`` is specified, the underlying C++ object is not constructed
+until ``__init__`` is called. An unconstructed object raises an exception when
+any of its methods (include property getters and setters) are called.
+
+Child elements:
+-----------------------
+
+init__, new_, `no-init`_, def_, property_, attr_, doc_
+
+__ `class > init`_
+
+Attributes:
+-----------
+
+name = "<Python identifier>"
+    The name of the class as will be seen in python. If not specified, the name
+    will be taken from the C++ class if the class name is a legal Python
+    identifier, otherwise an arbitrary name is chosen.
+              
+type = "<C++ symbol>"
+    The C++ class to expose to python. The class may be an instantiation of a
+    template, but cannot be the template itself (e.g. you can use
+    ``std::vector<int>``, but not ``std::vector``).
+    
+    Note that if you specify an instantiation of a template using a typedef but
+    the template is not instantiated anywhere else, PyExpose might not find it
+    (gccxml only lists instantiated templates, not the templates themselves).
+    The solution is to either specify the template instantiation directly, or
+    add '``template class MyClass<args>;``' to the code PyExpose looks at.
+              
+instance-dict = "<true/false>"
+    Specifies whether to include an instance dictionary (``__dict__``). The
+    default is "true".
+              
+weakrefs = "<true/false>"
+    Specifies whether to support weak references (``__weakref__``). The default
+    is "true".
+              
+use-gc = "<true/false>"
+    Specifies whether to support cyclic garbage collection. If true, the
+    "traverse" and "clear" functions are generated for this class, handling the
+    instance dictionary and any fields of type ``PyObject*`` or a type specified
+    by ``<gc-handler>``. Fields can be omitted from the traverse and clear
+    functions using ``gc-ignore``.
+    
+    Only first-level fields are included by default. For example, if the class
+    has fields that are structs or arrays, the struct's fields and array's items
+    will not be included automatically. They can however be included by listing
+    them in ``gc-include``.
+    
+    The default is "true".
+              
+gc-include = "<field list>"
+    A semicolon-separated list of fields to be included in cyclic garbage
+    collection. This list is ignored if a ``<gc-handler>`` applies to the entire
+    class.
+              
+gc-ignore = "<field list>"
+    A semicolon-separated list of fields to be omitted from cyclic garbage
+    collection. This list is ignored if a ``<gc-handler>`` applies to the entire
+    class.
+              
+
+
+class > init
+====================================
+
+Specifies a constructor to call upon object initialization. This corresponds to
+the ``__init__`` method of a class.
+
+If a class instance is created without calling ``__init__``, any attempt to call
+a method or use a property of the object will result in an exception being
+raised.
+
+If ``__init__`` is called after a class instance has already been initialized,
+the C++ object will have its destructor called and be re-initialized in the same
+place in memory.
+
+Attributes:
+-----------
+
+overload = "<argument list>"
+    The list of arguments of the constructor. This is to select a specific
+    constructor out of a set of overloads. The arguments are separated by commas
+    and can be specified with or without typedefs, as long as the underlying
+    types are the same as that of the constructor.
+            
+self-arg = "<non-negative integer>"
+    If supplied, the constructor will receive the ``self`` pointer, or type
+    ``PyObject*``. The value specifies the index (starting from 1) of the
+    argument to receive the pointer.
+
+func = "<C++ symbol>" By default, the C++ class' constructor is used to
+     implement this method. You can specify a function with this attribute that
+     will initialize the C++ class instead. The first argument must be a pointer
+     of the class' type, which will receive an area in memory where the class
+     must be written.
+
+
+raw-init
+====================================
+
+This is identical to `class > init`_, except the arguments are not unpacked for
+you. The C++ constructor or function specified by ``func`` must take two
+instances of ``PyObject*``, which will receive the tuple and dictionary
+respectively, containing the function arguments.
+
+Note: This will not give you the original ``self`` argument. If you want to
+receive the ``self`` pointer, use ``self-arg``.
+
+See `class > init`_ for the attributes and child elements of this tag.
+
+
+new
+====================================
+
+Specifies a constructor to call upon object creation, before ``__init__`` is
+called.
+
+For classes that have a trivial destructor and only ever need to be stored
+in-place (see ``return-semantic`` for how else a class can be stored),
+specifying ``<new>`` can make the resulting Python object a little smaller
+because it doesn't need an extra variable to store whether the C++ object has
+been constructed or not.
+
+Attributes:
+-----------
+
+overload = "<argument list>"
+    The list of arguments of the constructor. This is to select a specific
+    constructor out of a set of overloads. The arguments are separated by commas
+    and can be specified with or without typedefs, as long as the underlying
+    types are the same as that of the constructor.
+            
+self-arg = "<non-negative integer>"
+    If supplied, the constructor will receive the ``self`` pointer, or type
+    ``PyObject*``. The value specifies the index (starting at 1) of the argument
+    to receive the pointer.
+
+func = "<C++ symbol>" By default, the C++ class' constructor is used to
+     implement this method. You can specify a function with this attribute that
+     will initialize the C++ class instead. The first argument must be a pointer
+     of the class' type, which will receive an area in memory where the class
+     must be written.
+
+
+raw-new
+====================================
+
+This is identical to new_, except the arguments are not unpacked for you. The
+C++ constructor or function specified by ``func`` must take two instances of
+``PyObject*``, which will receive the tuple and dictionary respectively,
+containing the function arguments.
+
+Note: This will not give you the original ``self`` argument. If you want to
+receive the ``self`` pointer, use ``self-arg``.
+
+See new_ for the attributes and child elements of this tag.
+
+
+doc
+====================================
+
+A documentation string that will be exposed to Python.
+      
+
+to-pyobject
+====================================
+
+Specifies how to convert a particular type to ``PyObject*``.
+      
+Child elements:
+-----------------------
+
+val_
+
+
+Attributes:
+-----------
+
+type = "<C++ symbol>"
+    The type the conversion applies to.
+              
+
+
+from-pyobject
+====================================
+
+Specifies how to convert ``PyObject*`` to a particular type.
+      
+Child elements:
+-----------------------
+
+val_
+
+
+Attributes:
+-----------
+
+type = "<C++ symbol>"
+    The C++ type the conversion applies to.
+              
+
+
+val
+====================================
+
+This tag gets replaced by the expression that needs to be acted upon.
+      
+
+var
+====================================
+
+Specifies a variable
+      
+Attributes:
+-----------
+
+name = "<Python identifier>"
+    The name of the variable. If not specified, the name is taken from ``value``,
+    which must be a legal Python identifier.
+              
+value = "<C++ expression>"
+    The value of the variable. This can be any C++ expression and may include
+    macros.
+              
+ref = "<true/false/copy/managedptr/unmanagedref>
+    Specifies whether to pass ``value`` by value or by reference.
+    
+    The following are allowed:
+    
+    ================ ===============================================================
+    true             Pass by reference. This is the default. If the value cannot be
+                     taken by reference (for example: if it's the result of a
+                     function that returns by copy), it's taken by copy instead.
+    false            Pass by copy
+    copy             Same as "false"
+    managedptr       If ``value`` evaluates to a pointer, the pointer is kept and
+                     ``delete`` is called on it when the Python object is destroyed.
+    unmanagedref     Same as "true"
+    ================ ===============================================================
+              
+
+
+gc-handler
+====================================
+
+Specifies how to visit a data type containing a Python reference in a
+tp_traverse function and optionally how to clear it in a tp_clear function.
+
+Example: ::
+
+    <gc-handler type="MyWrapper">
+        <traverse>Py_VISIT(<val/>.get_pyobject());</traverse>
+        <clear>Py_CLEAR(<val/>.get_pyobject());</clear>
+    </gc-handler>
+
+
+Child elements:
+-----------------------
+
+`traverse`_, `clear`_
+
+
+Attributes:
+-----------
+
+type = "<C++ symbol>"
+    The C++ type the traverse and clear code applies to.
+
+
+traverse
+====================================
+
+The C++ code to call to visit a field of a particular type. The inline ``<val>``
+tag is replaced by the field that needs to be visited.
+
+Child elements:
+-----------------------
+
+`val`_
+
+
+
+clear
+====================================
+
+The C++ code to call to clear a field of a particular type. The inline ``<val>``
+tag is replaced by the field that needs to be cleared.
+
+Child elements:
+-----------------------
+
+`val`_
+

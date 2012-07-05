@@ -1,0 +1,24 @@
+#!/usr/bin/env python
+
+import shutil
+from optparse import OptionParser
+
+from pyexpose.expose import getspec, generate_module
+
+
+p = OptionParser(usage = "%prog [options] spec-file")
+p.add_option("--cxxflags",dest="cxxflags",help="CXXFLAGS passed to gccxml",action="append",metavar="ARGS")
+p.add_option("-c","--compiler",dest="compiler",help="the compiler to simulate (see the documentation for gccxml and the --gccxml-compiler option for more information)",metavar="TYPE")
+p.add_option("--gccxml",dest="gccxml",help="path to the gccxml executable",metavar="PATH")
+
+options,args = p.parse_args()
+
+if len(args) != 1:
+    p.error("exactly 1 spec-file must be specified")
+
+spec = getspec(args[0])
+tdir = tempfile.mkdtemp()
+try:
+    generate_module(spec, '.', options.gccxml, options.compiler, options.cxxflags and " ".join(options.cxxflags))
+finally:
+    shutil.rmtree(tdir)

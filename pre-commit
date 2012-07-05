@@ -1,0 +1,35 @@
+#!/usr/bin/env python
+"git hook to update version number before committing"
+
+import subprocess as proc
+import re
+import sys
+import shutil
+
+WRITE_ERR_MSG = '''
+Something went wrong while attempting to rewrite "setup.py". In case the file
+was scrambled, the original was copied to "setup.py~".
+'''
+
+# only do this for the master branch
+if proc.check_output(['git','symbolic-ref','HEAD']).strip() == 'refs/heads/master':
+    major,minor = proc.check_output(['git','describe','--long']).split('-')[0:2]
+    v = '{0}.{1}'.format(major[1:],minor)
+
+    # backup
+    shutil.copyfile('setup.py','setup.py~')
+
+    f = open('setup.py','r+')
+
+    new_code,subs = re.compile(r'^VERSION=.*',re.M).subn('VERSION='+repr(v),f.read(),1)
+    if not subs:
+        raise Exception('Did not find version variable in setup.py')
+
+    f.seek(0)
+    try:
+        f.truncate(0)
+        f.write(new_code)
+    except:
+        print >> sys.stderr, WRITE_ERR_MSG
+        raise
+

@@ -36,6 +36,7 @@ PyExpose Specification File Format
             <xsl:when test="$type='retsemantictype'">"&lt;return semantic&gt;"</xsl:when>
             <xsl:when test="$type='ident'">"&lt;Python identifier&gt;"</xsl:when>
             <xsl:when test="$type='includelist'">"&lt;include list&gt;"</xsl:when>
+            <xsl:when test="$type='fieldlist'">"&lt;field list&gt;"</xsl:when>
             <xsl:when test="$type='xsd:boolean'">"&lt;true/false&gt;"</xsl:when>
             <xsl:when test="$type='xsd:nonNegativeInteger'">"&lt;non-negative integer&gt;"</xsl:when>
             <xsl:when test="$type='expression'">"&lt;C++ expression&gt;"</xsl:when>

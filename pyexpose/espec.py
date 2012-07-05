@@ -11,12 +11,12 @@ import textwrap
 import functools
 import operator
 
-from xmlparse import *
-from err import *
-import gccxml
-import espectmpl as tmpl
-from cpptypes import *
-from conversion import Conversion
+from .xmlparse import *
+from .err import *
+from . import gccxml
+from . import espectmpl as tmpl
+from .cpptypes import *
+from .conversion import Conversion
 
 
 TEST_NS = "___gccxml_types_test_ns___"
@@ -1645,7 +1645,6 @@ class TypedClassDef:
 
         for n in ('__sequence__len__','__concat__','__iconcat__','__contains__'):
             if self.output_special(n,out): have = True
-            f = self.special_methods.get(n)
 
         for n in ('__repeat__','__irepeat__'):
             f = self.special_methods.get(n)

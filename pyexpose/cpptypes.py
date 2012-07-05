@@ -4,8 +4,8 @@ import itertools
 import operator
 import copy
 
-import gccxml
-from err import SpecificationError
+from . import gccxml
+from .err import SpecificationError
 
 __all__ = ('RET_MANAGED_REF','RET_MANAGED_PTR','RET_UNMANAGED_REF','RET_COPY',
            'RET_SELF','mandatory_args','compatible_args','accepts_args',

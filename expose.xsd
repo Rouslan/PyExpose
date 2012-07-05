@@ -57,6 +57,10 @@ Example: ::
     <xsd:restriction base="xsd:string"/>
   </xsd:simpleType>
 
+  <xsd:simpleType name="fieldlist">
+    <xsd:restriction base="xsd:string"/>
+  </xsd:simpleType>
+
 
   <xsd:element name="module">
     <xsd:complexType>
@@ -579,7 +583,7 @@ The default is "true".
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="gc-include" type="xsd:string">
+      <xsd:attribute name="gc-include" type="fieldlist">
         <xsd:annotation>
           <xsd:documentation>
 A semicolon-separated list of fields to be included in cyclic garbage
@@ -589,7 +593,7 @@ class.
         </xsd:annotation>
       </xsd:attribute>
 
-      <xsd:attribute name="gc-ignore" type="xsd:string">
+      <xsd:attribute name="gc-ignore" type="fieldlist">
         <xsd:annotation>
           <xsd:documentation>
 A semicolon-separated list of fields to be omitted from cyclic garbage

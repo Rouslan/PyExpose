@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
 import unittest
 import os
@@ -7,12 +7,9 @@ import tempfile
 import sys
 
 
-sys.path.insert(0,os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-import gccxml
-import expose
-from espec import *
+from pyexpose import gccxml
+from pyexpose import expose
+from pyexpose.espec import *
 
 
 toparse = '''

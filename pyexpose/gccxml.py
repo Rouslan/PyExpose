@@ -1,6 +1,6 @@
 import itertools
 
-from xmlparse import *
+from .xmlparse import *
 
 
 ACCESS_PUBLIC = 1

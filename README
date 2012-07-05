@@ -1,9 +1,26 @@
-To use this program, type "python expose.py spec-file" at the command line.
-Jinja2 must be installed (http://jinja.pocoo.org/2/).
+PyExpose generates a Python extension described by a specification file. It
+strives to allow exposing C++ classes and functions to Python without any
+overhead compared to writing the extension manually.
 
-GCCXML is assumed to be installed and in the path. Get the CVS version by
-following the directions at http://www.gccxml.org/HTML/Download.html
 
-The specification file specifies what interface to expose to python. It is an
-XML file described by expose.xsd. See "test/test_compile.py" for a very basic
-example. More documentation will be added later.
+Dependencies:
+Jinja2 (http://jinja.pocoo.org/2/)
+GCCXML (http://www.gccxml.org/HTML/Index.html)
+
+
+Basic Usage:
+pyexpose spec-file
+or on Windows: python pyexpose spec-file 
+
+A C++ source and header file will be generated with the name of the extension module.
+
+The generated code will depend on pyexpose_common.h, included with the PyExpose
+installation. If you wish to distribute the generated code, you are free to copy
+pyexpose_common.h (and optionally pyobject.h--not yet documented) into your
+project and distribute it together. Define LOCAL_PYEXPOSE_COMMON to have the
+generated code include "pyexpose_common.h" instead of
+<PyExpose/pyexpose_common.h>.
+
+The specification file is an XML file that specifies the interface to expose to
+python. For documentation see
+https://github.com/Rouslan/PyExpose/wiki/PyExpose-Specification-File-Format

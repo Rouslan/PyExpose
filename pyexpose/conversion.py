@@ -2,10 +2,10 @@
 import sys
 import itertools
 
-import gccxml
-import espectmpl as tmpl
-from cpptypes import *
-from err import SpecificationError
+from . import gccxml
+from . import espectmpl as tmpl
+from .cpptypes import *
+from .err import SpecificationError
 
 
 TO_PY_FUNC = '__py_to_pyobject__'
@@ -448,8 +448,8 @@ class Conversion:
     def __frompy_base(self,t):
         """Look up a template for converting "PyObject* to t".
 
-        If one isn't found in self.__frompy, check if t has a member function with
-        the name given by "FROM_PY_FUNC".
+        If one isn't found in self.__frompy, check if t has a member function
+        with the name given by "FROM_PY_FUNC".
         """
         try:
             return self.__frompy[t]
@@ -493,7 +493,7 @@ class Conversion:
             nt = strip_cvq(t.type)
             r = self.__frompy_base(nt)
             if r and(r[0] or is_const(t.type)):
-                return '*({0})'.format(r[1]), ref(nt)
+                return '&({0})'.format(r[1]), cptr(nt)
         elif isinstance(t,gccxml.CPPCvQualifiedType):
             r = self.__frompy_base(t.type)
             if r: return r[1], ref(t.type)

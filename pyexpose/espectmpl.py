@@ -943,7 +943,11 @@ header_start = env.from_string('''
 #ifndef <% module %>_h
 #define <% module %>_h
 
-#include "pyexpose_common.h"
+#ifdef LOCAL_PYEXPOSE_COMMON
+    #include "pyexpose_common.h"
+#else
+    #include <PyExpose/pyexpose_common.h>
+#endif
 
 
 #pragma GCC visibility push(hidden)
@@ -1098,7 +1102,7 @@ ret_notimplemented = '''
 
 mapping_methods = env.from_string('''
 PyMappingMethods obj_<% name %>_mapping_methods = {
-    <@ if '__mapping_length__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___mapping_length__)<@ else @>0<@ endif @>,
+    <@ if '__mapping__len__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___mapping__len__)<@ else @>0<@ endif @>,
     <@ if '__mapping__getitem__' in specialmethods @>reinterpret_cast<binaryfunc>(&obj_<% name %>___mapping__getitem__)<@ else @>0<@ endif @>,
     <@ if '__mapping__setitem__' in specialmethods @>reinterpret_cast<objobjargproc>(&obj_<% name %>___mapping__setitem__)<@ else @>0<@ endif @>
 };
@@ -1106,7 +1110,7 @@ PyMappingMethods obj_<% name %>_mapping_methods = {
 
 sequence_methods = env.from_string('''
 PySequenceMethods obj_<% name %>_sequence_methods = {
-    <@ if '__sequence_length__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___sequence_length__)<@ else @>0<@ endif @>,
+    <@ if '__sequence__len__' in specialmethods @>reinterpret_cast<lenfunc>(&obj_<% name %>___sequence__len__)<@ else @>0<@ endif @>,
     <@ if '__concat__' in specialmethods @>reinterpret_cast<binaryfunc>(&obj_<% name %>___concat__)<@ else @>0<@ endif @>,
     <@ if '__repeat__' in specialmethods @>reinterpret_cast<ssizeargfunc>(&obj_<% name %>___repeat__)<@ else @>0<@ endif @>,
     <@ if '__sequence__getitem__' in specialmethods @>reinterpret_cast<ssizeargfunc>(&obj_<% name %>___sequence__getitem__)<@ else @>0<@ endif @>,

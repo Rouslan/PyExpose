@@ -3,9 +3,9 @@ import xml.parsers.expat
 import sys
 import traceback
 
-import err
+from .err import Error
 
-class ParseError(err.Error):
+class ParseError(Error):
     def __str__(self):
         return 'Parsing Error: ' + super(ParseError,self).__str__()
 
