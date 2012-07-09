@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import tempfile
 import shutil
 from optparse import OptionParser
 

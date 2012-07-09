@@ -852,11 +852,24 @@ class TestSubscriptAttr(TestCompile):
 
 class TestNoInit(TestCompile):
     header_file = '''
+        // with mode variable:
+
         struct Abstract {
             virtual int method() = 0;
         };
 
         struct Concrete : Abstract {
+            int method() { return 5; }
+        };
+
+
+        // without mode variable:
+
+        struct Abstract2 {
+            virtual int method() = 0;
+        };
+
+        struct Concrete2 : Abstract2 {
             int method() { return 5; }
         };
     '''
@@ -868,6 +881,11 @@ class TestNoInit(TestCompile):
                 <def func="method" bridge-virtual="false"/>
             </class>
             <class type="Concrete"/>
+            <class type="Abstract2">
+                <no-init/>
+                <def func="method" bridge-virtual="false"/>
+            </class>
+            <class type="Concrete2"/>
         </module>
     '''
 
@@ -877,6 +895,9 @@ class TestNoInit(TestCompile):
         c = tm.Concrete()
         self.assertEqual(c.method(),5)
         self.assertRaises(NotImplementedError,tm.Abstract.method,c)
+        
+        # just to verify it can be created and destroyed
+        c = tm.Concrete2()
 
 
 class TestOverloadedNew(TestCompile):

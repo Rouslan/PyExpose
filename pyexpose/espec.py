@@ -450,7 +450,7 @@ class TypedDefDef(object):
             ).output([],ind))
 
     @append_except
-    def _output(self,conv,prolog,type_extra,selfvar,funcnameprefix):
+    def _output(self,conv,prolog,type_extra,need_self,funcnameprefix):
         raw_args = None
         if self.raw_overload:
             if accepts_args(self.raw_overload,[conv.pyobject,conv.pyobject]):
@@ -490,7 +490,7 @@ class TypedDefDef(object):
             rettype = 'PyObject *',
             epilog = '',
             name = funcnameprefix + self.name,
-            args = selfvar + funcargs,
+            args = ('PyObject *self' if need_self else 'PyObject*') + funcargs,
             code = prolog + code,
             errval = '0')
 
@@ -504,7 +504,7 @@ class TypedDefDef(object):
         return tableentry,funcbody
 
     def output(self,conv):
-        return self._output(conv,'','','PyObject*','func_')
+        return self._output(conv,'','',False,'func_')
 
 
 def base_prefix(x):
@@ -614,17 +614,19 @@ class TypedMethodDef(TypedDefDef):
     def output(self,conv):
         prolog = ''
         type_extra = ''
+        need_self = False
 
         if self.static():
             type_extra = '|METH_STATIC'
-        else:
+        elif not self.all_pure_virtual():
             prolog = self.classdef.method_prolog()
+            need_self = True
 
         return self._output(
             conv,
             prolog,
             type_extra,
-            'obj_{0} *self'.format(self.classdef.name),
+            need_self,
             'obj_{0}_method_'.format(self.classdef.name))
 
 
@@ -739,7 +741,7 @@ class SpecialMethod(TypedMethodDef):
         return tmpl.function.format(
             rettype = ret,
             name = 'obj_{0}_{1}'.format(self.classdef.name,self.name),
-            args = 'obj_{0} *self{1}'.format(self.classdef.name,argextra),
+            args = 'PyObject *self'+argextra,
             epilog = '',
             code = self.classdef.method_prolog() + code,
             errval = errval)
@@ -1043,7 +1045,7 @@ class QualifiedField(object):
         self.offset = offset
 
 class ClassDef:
-    def __init__(self,name,type,instance_dict=True,weakref=True,use_gc=True,gc_include=None,gc_ignore=None):
+    def __init__(self,name,type,instance_dict=True,weakref=True,use_gc=True,gc_include=None,gc_ignore=None,require_mode_var=False):
         self.name = name
         self.type = type
         self.constructor = None
@@ -1057,6 +1059,7 @@ class ClassDef:
         self.use_gc = use_gc
         self.gc_include = gc_include
         self.gc_ignore = gc_ignore
+        self.require_mode_var = require_mode_var
         self.uniquenum = get_unique_num()
 
     @property
@@ -1256,6 +1259,116 @@ def qualified_fields(c,classdefs):
     return BaseMembers(c,generate)()
 
 
+BinaryIOpMethod = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,defretsemantic=RET_SELF)
+TernaryIOpMethod = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,defretsemantic=RET_SELF)
+BinaryFOpMethod = functools.partial(FOpMethod,argtype=SF_ONE_ARG)
+TernaryFOpMethod = functools.partial(FOpMethod,argtype=SF_TWO_ARGS)
+NoArgs = functools.partial(SpecialMethod,argtype=SF_NO_ARGS)
+OneArg = functools.partial(SpecialMethod,argtype=SF_ONE_ARG)
+TwoArgs = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS)
+KeywordArgs = functools.partial(SpecialMethod,argtype=SF_KEYWORD_ARGS)
+NoArgsInt = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_INT)
+NoArgsIntBool = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_INT_BOOL)
+OneArgInt = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,rettype=SF_RET_INT)
+OneArgIntBool = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,rettype=SF_RET_INT_BOOL)
+NoArgsLong = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_LONG)
+TwoArgsInt = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,rettype=SF_RET_INT)
+CoerceArgsInt = functools.partial(SpecialMethod,argtype=SF_COERCE_ARGS,rettype=SF_RET_INT)
+NoArgsSSize = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_SSIZE)
+
+TwoArgsVoid = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,rettype=SF_RET_INT_VOID)
+
+# TypedOverload.bind will be used to cover the Py_ssize argument
+SSizeArg = NoArgs
+SSizeObjArgsVoid = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,rettype=SF_RET_INT_VOID)
+SSizeIOpMethod = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,defretsemantic=RET_SELF)
+
+special_method_forms = (
+    ('__repr__',         NoArgs), # tp_repr
+    ('__str__',          NoArgs), # tp_str
+    ('__lt__',           OneArg), # tp_richcompare
+    ('__le__',           OneArg), # tp_richcompare
+    ('__eq__',           OneArg), # tp_richcompare
+    ('__ne__',           OneArg), # tp_richcompare
+    ('__gt__',           OneArg), # tp_richcompare
+    ('__ge__',           OneArg), # tp_richcompare
+    ('__cmp__',          OneArgInt), # tp_compare
+    ('__hash__',         NoArgsLong), # tp_hash
+    ('__nonzero__',      NoArgsIntBool), # tp_as_number.nb_nonzero
+    ('__getattr__',      OneArg), # tp_getattro
+    ('__setattr__',      TwoArgs), # tp_setattro
+    ('__get__',          TwoArgs), # tp_descr_get
+    ('__set__',          TwoArgsInt), # tp_descr_set
+    ('__call__',         KeywordArgs), # tp_call
+    ('__iter__',         NoArgs), # tp_iter
+    ('next',             NoArgs), # tp_iternext
+    ('__contains__',     OneArgIntBool), # tp_as_sequence.sq_contains
+    ('__add__',          BinaryFOpMethod), # tp_as_number.nb_add
+    ('__radd__',         BinaryROpMethod),
+    ('__sub__',          BinaryFOpMethod), # tp_as_number.nb_subtract
+    ('__rsub__',         BinaryROpMethod),
+    ('__mul__',          BinaryFOpMethod), # tp_as_number.nb_multiply
+    ('__rmul__',         BinaryROpMethod),
+    ('__floordiv__',     BinaryFOpMethod), # tp_as_number.nb_floor_divide
+    ('__rfloordiv__',    BinaryROpMethod),
+    ('__mod__',          BinaryFOpMethod), # tp_as_number.nb_remainder
+    ('__rmod__',         BinaryROpMethod),
+    ('__divmod__',       BinaryFOpMethod), # tp_as_number.nb_divmod
+    ('__rdivmod__',      BinaryROpMethod),
+    ('__pow__',          TernaryFOpMethod), # tp_as_number.nb_power
+    ('__rpow__',         BinaryROpMethod),
+    ('__lshift__',       BinaryFOpMethod), # tp_as_number.nb_lshift
+    ('__rlshift__',      BinaryROpMethod),
+    ('__rshift__',       BinaryFOpMethod), # tp_as_number.nb_rshift
+    ('__rrshift__',      BinaryROpMethod),
+    ('__and__',          BinaryFOpMethod), # tp_as_number.nb_and
+    ('__rand__',         BinaryROpMethod),
+    ('__xor__',          BinaryFOpMethod), # tp_as_number.nb_xor
+    ('__rxor__',         BinaryROpMethod),
+    ('__or__',           BinaryFOpMethod), # tp_as_number.nb_or
+    ('__ror__',          BinaryROpMethod),
+    ('__div__',          BinaryFOpMethod), # tp_as_number.nb_divide
+    ('__rdiv__',         BinaryROpMethod),
+    ('__truediv__',      BinaryFOpMethod), # tp_as_number.nb_true_divide
+    ('__rtruediv__',     BinaryROpMethod),
+    ('__iadd__',         BinaryIOpMethod), # tp_as_number.nb_inplace_add
+    ('__isub__',         BinaryIOpMethod), # tp_as_number.nb_inplace_subtract
+    ('__imul__',         BinaryIOpMethod), # tp_as_number.nb_inplace_multiply
+    ('__idiv__',         BinaryIOpMethod), # tp_as_number.nb_inplace_divide
+    ('__itruediv__',     BinaryIOpMethod), # tp_as_number.nb_inplace_true_divide
+    ('__ifloordiv__',    BinaryIOpMethod), # tp_as_number.nb_inplace_floor_divide
+    ('__imod__',         BinaryIOpMethod), # tp_as_number.nb_inplace_remainder
+    ('__ipow__',         TernaryIOpMethod), # tp_as_number.nb_inplace_power
+    ('__ilshift__',      BinaryIOpMethod), # tp_as_number.nb_inplace_lshift
+    ('__irshift__',      BinaryIOpMethod), # tp_as_number.nb_inplace_rshift
+    ('__iand__',         BinaryIOpMethod), # tp_as_number.nb_inplace_and
+    ('__ixor__',         BinaryIOpMethod), # tp_as_number.nb_inplace_xor
+    ('__ior__',          BinaryIOpMethod), # tp_as_number.nb_inplace_or
+    ('__neg__',          NoArgs), # tp_as_number.nb_negative
+    ('__pos__',          NoArgs), # tp_as_number.nb_positive
+    ('__abs__',          NoArgs), # tp_as_number.nb_absolute
+    ('__invert__',       NoArgs), # tp_as_number.nb_invert
+    ('__int__',          NoArgs), # tp_as_number.nb_int
+    ('__long__',         NoArgs), # tp_as_number.nb_long
+    ('__float__',        NoArgs), # tp_as_number.nb_float
+    ('__oct__',          NoArgs), # tp_as_number.nb_oct
+    ('__hex__',          NoArgs), # tp_as_number.nb_hex
+    ('__index__',        NoArgs), # tp_as_number.nb_index
+    ('__coerce__',       CoerceArgsInt), # tp_as_number.nb_coerce
+
+    # made-up names for special functions that don't have a distinct equivalent in Python
+    ('__concat__',       OneArg), # tp_as_sequence.sq_concat
+    ('__iconcat__',      BinaryIOpMethod), # tp_as_sequence.sq_inplace_concat
+    ('__repeat__',       SSizeArg), # tp_as_sequence.sq_repeat
+    ('__irepeat__',      SSizeIOpMethod), # tp_as_sequence.sq_inplace_repeat
+    ('__mapping__len__',   NoArgsSSize), # tp_as_mapping.mp_length
+    ('__sequence__len__',  NoArgsSSize), # tp_as_sequence.sq_length
+    ('__mapping__getitem__', OneArg), # tp_as_mapping.mp_subscript
+    ('__sequence__getitem__', SSizeArg), # tp_as_sequence.sq_item
+    ('__mapping__setitem__', TwoArgsVoid), # tp_as_mapping.mp_ass_subscript
+    ('__sequence__setitem__', SSizeObjArgsVoid) # tp_as_sequence.sq_ass_item
+)
+
 class TypedClassDef:
     what = 'class'
 
@@ -1287,116 +1400,8 @@ class TypedClassDef:
         if '__new__' in classdef.methods.data:
             raise SpecificationError('__new__ cannot be defined using <def>. Use <new>.')
 
-        BinaryIOpMethod = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,defretsemantic=RET_SELF)
-        TernaryIOpMethod = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,defretsemantic=RET_SELF)
-        BinaryFOpMethod = functools.partial(FOpMethod,argtype=SF_ONE_ARG)
-        TernaryFOpMethod = functools.partial(FOpMethod,argtype=SF_TWO_ARGS)
-        NoArgs = functools.partial(SpecialMethod,argtype=SF_NO_ARGS)
-        OneArg = functools.partial(SpecialMethod,argtype=SF_ONE_ARG)
-        TwoArgs = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS)
-        KeywordArgs = functools.partial(SpecialMethod,argtype=SF_KEYWORD_ARGS)
-        NoArgsInt = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_INT)
-        NoArgsIntBool = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_INT_BOOL)
-        OneArgInt = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,rettype=SF_RET_INT)
-        OneArgIntBool = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,rettype=SF_RET_INT_BOOL)
-        NoArgsLong = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_LONG)
-        TwoArgsInt = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,rettype=SF_RET_INT)
-        CoerceArgsInt = functools.partial(SpecialMethod,argtype=SF_COERCE_ARGS,rettype=SF_RET_INT)
-        NoArgsSSize = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,rettype=SF_RET_SSIZE)
-
-        TwoArgsVoid = functools.partial(SpecialMethod,argtype=SF_TWO_ARGS,rettype=SF_RET_INT_VOID)
-
-        # TypedOverload.bind will be used to cover the Py_ssize argument
-        SSizeArg = NoArgs
-        SSizeObjArgsVoid = functools.partial(SpecialMethod,argtype=SF_ONE_ARG,rettype=SF_RET_INT_VOID)
-        SSizeIOpMethod = functools.partial(SpecialMethod,argtype=SF_NO_ARGS,defretsemantic=RET_SELF)
-
         self.special_methods = {}
-        for key,mtype in (
-            ('__repr__',         NoArgs), # tp_repr
-            ('__str__',          NoArgs), # tp_str
-            ('__lt__',           OneArg), # tp_richcompare
-            ('__le__',           OneArg), # tp_richcompare
-            ('__eq__',           OneArg), # tp_richcompare
-            ('__ne__',           OneArg), # tp_richcompare
-            ('__gt__',           OneArg), # tp_richcompare
-            ('__ge__',           OneArg), # tp_richcompare
-            ('__cmp__',          OneArgInt), # tp_compare
-            ('__hash__',         NoArgsLong), # tp_hash
-            ('__nonzero__',      NoArgsIntBool), # tp_as_number.nb_nonzero
-            ('__getattr__',      OneArg), # tp_getattro
-            ('__setattr__',      TwoArgs), # tp_setattro
-            ('__get__',          TwoArgs), # tp_descr_get
-            ('__set__',          TwoArgsInt), # tp_descr_set
-            ('__call__',         KeywordArgs), # tp_call
-            ('__iter__',         NoArgs), # tp_iter
-            ('next',             NoArgs), # tp_iternext
-            ('__contains__',     OneArgIntBool), # tp_as_sequence.sq_contains
-            ('__add__',          BinaryFOpMethod), # tp_as_number.nb_add
-            ('__radd__',         BinaryROpMethod),
-            ('__sub__',          BinaryFOpMethod), # tp_as_number.nb_subtract
-            ('__rsub__',         BinaryROpMethod),
-            ('__mul__',          BinaryFOpMethod), # tp_as_number.nb_multiply
-            ('__rmul__',         BinaryROpMethod),
-            ('__floordiv__',     BinaryFOpMethod), # tp_as_number.nb_floor_divide
-            ('__rfloordiv__',    BinaryROpMethod),
-            ('__mod__',          BinaryFOpMethod), # tp_as_number.nb_remainder
-            ('__rmod__',         BinaryROpMethod),
-            ('__divmod__',       BinaryFOpMethod), # tp_as_number.nb_divmod
-            ('__rdivmod__',      BinaryROpMethod),
-            ('__pow__',          TernaryFOpMethod), # tp_as_number.nb_power
-            ('__rpow__',         BinaryROpMethod),
-            ('__lshift__',       BinaryFOpMethod), # tp_as_number.nb_lshift
-            ('__rlshift__',      BinaryROpMethod),
-            ('__rshift__',       BinaryFOpMethod), # tp_as_number.nb_rshift
-            ('__rrshift__',      BinaryROpMethod),
-            ('__and__',          BinaryFOpMethod), # tp_as_number.nb_and
-            ('__rand__',         BinaryROpMethod),
-            ('__xor__',          BinaryFOpMethod), # tp_as_number.nb_xor
-            ('__rxor__',         BinaryROpMethod),
-            ('__or__',           BinaryFOpMethod), # tp_as_number.nb_or
-            ('__ror__',          BinaryROpMethod),
-            ('__div__',          BinaryFOpMethod), # tp_as_number.nb_divide
-            ('__rdiv__',         BinaryROpMethod),
-            ('__truediv__',      BinaryFOpMethod), # tp_as_number.nb_true_divide
-            ('__rtruediv__',     BinaryROpMethod),
-            ('__iadd__',         BinaryIOpMethod), # tp_as_number.nb_inplace_add
-            ('__isub__',         BinaryIOpMethod), # tp_as_number.nb_inplace_subtract
-            ('__imul__',         BinaryIOpMethod), # tp_as_number.nb_inplace_multiply
-            ('__idiv__',         BinaryIOpMethod), # tp_as_number.nb_inplace_divide
-            ('__itruediv__',     BinaryIOpMethod), # tp_as_number.nb_inplace_true_divide
-            ('__ifloordiv__',    BinaryIOpMethod), # tp_as_number.nb_inplace_floor_divide
-            ('__imod__',         BinaryIOpMethod), # tp_as_number.nb_inplace_remainder
-            ('__ipow__',         TernaryIOpMethod), # tp_as_number.nb_inplace_power
-            ('__ilshift__',      BinaryIOpMethod), # tp_as_number.nb_inplace_lshift
-            ('__irshift__',      BinaryIOpMethod), # tp_as_number.nb_inplace_rshift
-            ('__iand__',         BinaryIOpMethod), # tp_as_number.nb_inplace_and
-            ('__ixor__',         BinaryIOpMethod), # tp_as_number.nb_inplace_xor
-            ('__ior__',          BinaryIOpMethod), # tp_as_number.nb_inplace_or
-            ('__neg__',          NoArgs), # tp_as_number.nb_negative
-            ('__pos__',          NoArgs), # tp_as_number.nb_positive
-            ('__abs__',          NoArgs), # tp_as_number.nb_absolute
-            ('__invert__',       NoArgs), # tp_as_number.nb_invert
-            ('__int__',          NoArgs), # tp_as_number.nb_int
-            ('__long__',         NoArgs), # tp_as_number.nb_long
-            ('__float__',        NoArgs), # tp_as_number.nb_float
-            ('__oct__',          NoArgs), # tp_as_number.nb_oct
-            ('__hex__',          NoArgs), # tp_as_number.nb_hex
-            ('__index__',        NoArgs), # tp_as_number.nb_index
-            ('__coerce__',       CoerceArgsInt), # tp_as_number.nb_coerce
-
-            # made-up names for special functions that don't have a distinct equivalent in Python
-            ('__concat__',       OneArg), # tp_as_sequence.sq_concat
-            ('__iconcat__',      BinaryIOpMethod), # tp_as_sequence.sq_inplace_concat
-            ('__repeat__',       SSizeArg), # tp_as_sequence.sq_repeat
-            ('__irepeat__',      SSizeIOpMethod), # tp_as_sequence.sq_inplace_repeat
-            ('__mapping__len__',   NoArgsSSize), # tp_as_mapping.mp_length
-            ('__sequence__len__',  NoArgsSSize), # tp_as_sequence.sq_length
-            ('__mapping__getitem__', OneArg), # tp_as_mapping.mp_subscript
-            ('__sequence__getitem__', SSizeArg), # tp_as_sequence.sq_item
-            ('__mapping__setitem__', TwoArgsVoid), # tp_as_mapping.mp_ass_subscript
-            ('__sequence__setitem__', SSizeObjArgsVoid) # tp_as_sequence.sq_ass_item
-        ):
+        for key,mtype in special_method_forms:
             m = classdef.methods.data.pop(key,None)
             if m: self.special_methods[key] = mtype(self,m,tns)
 
@@ -1409,7 +1414,13 @@ class TypedClassDef:
         self.bases = []
         self.derived = []
         self.features = set()
+
+        # these two have the same meaning, but the second one also specifies if
+        # the value has been propogated to derived and base classes yet, and
+        # thus isn't set until the derived and base classes have been added
+        self._needs_mode_var = classdef.require_mode_var
         self.needs_mode_var = False
+
         self.gc_fields = None # this is computed later
 
     def basecount(self):
@@ -1460,7 +1471,11 @@ class TypedClassDef:
         function to know when it must not call the destructor.
 
         """
-        if (not self.needs_mode_var) and (self.features or not (self.newconstructor and self.no_destruct)):
+        if (not self.needs_mode_var) and (
+                self._needs_mode_var or
+                self.features or not (
+                    (self.newconstructor and self.no_destruct) or
+                    self.uninstantiatable())):
             self.propogate_needs_mode_var()
 
     def propogate_needs_mode_var(self):
@@ -1473,9 +1488,8 @@ class TypedClassDef:
         return tmpl.cast_base.render(
             type = self.type.typestr(),
             name = self.name,
-            uninstantiatable = self.uninstantiatable(),
             features = self.indirect_features(),
-            new_init = bool(self.newconstructor))
+            mode_var = self.needs_mode_var)
 
     def get_base_func(self,module):
         """Generate the get_base_X(PyObject o) function.
@@ -1578,7 +1592,7 @@ class TypedClassDef:
                 print >> out.cpp, tmpl.function.format(
                     rettype = 'PyObject *',
                     name = 'obj_{0}_{1}'.format(self.name,fn),
-                    args = 'obj_{0} *self,PyObject *arg'.format(self.name),
+                    args = 'PyObject *self,PyObject *arg',
                     epilog = tmpl.ret_notimplemented,
                     code = self.method_prolog() + f.function_call_1arg_fallthrough(out.conv),
                     errval = '0')
@@ -1610,7 +1624,7 @@ class TypedClassDef:
             print >> out.cpp, tmpl.function.format(
                 rettype = 'PyObject *',
                 name = 'obj_{0}___ipow__'.format(self.name),
-                args = 'obj_{0} *self,PyObject *arg1,PyObject *arg2'.format(self.name),
+                args = 'PyObject *self,PyObject *arg1,PyObject *arg2',
                 epilog = tmpl.ret_notimplemented,
                 code = self.method_prolog() + splitdefdef23code(f,out.conv,['arg1','arg2']),
                 errval = '0')
@@ -1654,7 +1668,7 @@ class TypedClassDef:
                 print >> out.cpp, tmpl.function.format(
                     rettype = 'PyObject *',
                     name = 'obj_{0}_{1}'.format(self.name,n),
-                    args = 'obj_{0} *self,Py_ssize_t count'.format(self.name),
+                    args = 'PyObject *self,Py_ssize_t count',
                     epilog = '',
                     code = self.method_prolog() + f.function_call_0arg(out.conv),
                     errval = '0')
@@ -1666,7 +1680,7 @@ class TypedClassDef:
             print >> out.cpp, tmpl.function.format(
                 rettype = 'PyObject *',
                 name = 'obj_{0}___sequence__getitem__'.format(self.name),
-                args = 'obj_{0} *self,Py_ssize_t index'.format(self.name),
+                args = 'PyObject *self,Py_ssize_t index',
                 epilog = '',
                 code = self.method_prolog() + f.function_call_0arg(out.conv),
                 errval = '0')
@@ -1678,7 +1692,7 @@ class TypedClassDef:
             print >> out.cpp, tmpl.function.format(
                 rettype = 'int',
                 name = 'obj_{0}___sequence__setitem__'.format(self.name),
-                args = 'obj_{0} *self,Py_ssize_t index,PyObject *arg'.format(self.name),
+                args = 'PyObject *self,Py_ssize_t index,PyObject *arg',
                 epilog = '',
                 code = self.method_prolog() + f.function_call_1arg(out.conv),
                 errval = '-1')
@@ -1706,7 +1720,7 @@ class TypedClassDef:
     def cast_base_expr(self):
         return ('get_base_{0}({{0}},false)' if self.has_multi_inherit_subclass() else 'cast_base_{0}({{0}})').format(self.name)
 
-    def method_prolog(self,var='reinterpret_cast<PyObject*>(self)',ind=tmpl.Tab(2)):
+    def method_prolog(self,var='self',ind=tmpl.Tab(2)):
         return '{0}{1} &base = {2};\n'.format(
             ind,
             self.type.full_name,
@@ -2740,11 +2754,12 @@ class tag_Class(tag):
             parse_bool(args,'weakrefs',True),
             parse_bool(args,'use-gc',True),
             parse_gc_list(args,'gc-include'),
-            parse_gc_list(args,'gc-ignore'))
+            parse_gc_list(args,'gc-ignore'),
+            parse_bool(args,'require-mode-var',False))
 
     @staticmethod
     def noinit_means_noinit():
-        raise SpecificationError("You can't have both <no-init> and <init>")
+        raise SpecificationError("You can't have both <no-init> and <init>/<raw-init>")
 
     @tag_handler('init',tag_Init)
     @tag_handler('raw-init',tag_Init,True)
@@ -2836,7 +2851,7 @@ class tag_ModuleInit(tag):
 
 class tag_Module(tag):
     def __init__(self,args):
-        self.r = ModuleDef(args["name"],stripsplit(args["include"]))
+        self.r = ModuleDef(args['name'],stripsplit(args['include']))
 
     @tag_handler('class',tag_Class)
     def handle_class(self,data):

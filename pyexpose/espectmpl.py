@@ -63,7 +63,7 @@ env.filters['quote'] = quote_c
 
 
 property_get = env.from_string('''
-PyObject *obj_<% cname %>_get<% name %>(obj_<% cname %> *self,void *) {
+PyObject *obj_<% cname %>_get<% name %>(PyObject *self,void *) {
 <% prolog %>
     try {
 <% code %>
@@ -72,7 +72,7 @@ PyObject *obj_<% cname %>_get<% name %>(obj_<% cname %> *self,void *) {
 ''')
 
 property_set = env.from_string('''
-int obj_<% cname %>_set<% name %>(obj_<% cname %> *self,PyObject *arg,void *) {
+int obj_<% cname %>_set<% name %>(PyObject *self,PyObject *arg,void *) {
     if(!arg) {
         PyErr_SetString(PyExc_TypeError,no_delete_msg);
         return -1;
@@ -897,7 +897,7 @@ extern "C" SHARED(void) init<% module %>(void) {
 
 cast_base = env.from_string('''
 <% type %> &cast_base_<% name %>(PyObject *o) {
-== if features or not new_init
+== if mode_var
     switch(reinterpret_cast<obj_<% name %>*>(o)->mode) {
     case CONTAINS:
         return reinterpret_cast<<% type %>&>(reinterpret_cast<obj_<% name %>*>(o)->base);
@@ -923,7 +923,7 @@ cast_base = env.from_string('''
         throw py_error_set();
     }
 == else
-    return reinterpret_cast<obj_<% name %>*>(o)->base;
+    return reinterpret_cast<<% type %>&>(reinterpret_cast<obj_<% name %>*>(o)->base);
 == endif
 }
 ''')
@@ -1029,7 +1029,7 @@ PyObject *obj_{cname}_{op}({args}) {{
 
 
 richcompare_start = '''
-PyObject *obj_{name}_richcompare(obj_{name} *self,PyObject *arg,int op) {{
+PyObject *obj_{name}_richcompare(PyObject *self,PyObject *arg,int op) {{
     try {{
 {prolog}
         switch(op) {{
